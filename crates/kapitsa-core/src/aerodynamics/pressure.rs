@@ -20,6 +20,13 @@
 //! Mach ≤ 0.2 and up to 256 triangles, with quasi-steady rigid rotation but
 //! without Kutta wake, circulation or separation.
 //! See [`crate::aerodynamics::potential`].
+//!
+//! [`EmpiricalBasePressure`] is a separate opt-in turbulent-base add-on for a
+//! closed primary Mesh/Colliders body at Mach 1–5. It combines Love's
+//! cylindrical base-pressure data with MIL-HDBK-762 Fig. 5-141 boattail relief
+//! and applies the resulting negative Cp to rear-facing patches within 10
+//! degrees of the COM motion direction. It is a bounded empirical wake
+//! approximation, not an unsteady wake or cavity-flow solver.
 
 use super::{AtmosphericState, geometry::PreparedSurfacePatches};
 use crate::transform::Transform;
@@ -379,6 +386,33 @@ const SPHERE_EQUATORIAL_SPEED_RATIO_SQUARED: f64 = 2.25;
 const CYLINDER_SIDE_SPEED_RATIO_SQUARED: f64 = 4.0;
 /// Dimensionless tolerance for checking perpendicular unit vectors.
 const POTENTIAL_CYLINDER_ORTHOGONALITY_TOLERANCE: f64 = 1e-10;
+/// Lowest Mach number of the empirical turbulent-base correlation. Below the
+/// sonic range the blunt-base pressure depends strongly on geometry, boundary
+/// layers and vortex shedding, so it is not extrapolated.
+const EMPIRICAL_BASE_MIN_MACH: f64 = 1.0;
+/// Highest Mach number of the tabulated Love base-pressure data.
+const EMPIRICAL_BASE_MAX_MACH: f64 = 5.0;
+/// Lowest Mach number of MIL-HDBK-762 Fig. 5-141's boattail base-relief
+/// correlation. The relief factor is held from Mach 1 to this value.
+const EMPIRICAL_BASE_RELIEF_MIN_MACH: f64 = 2.5;
+/// Ratio of specific heats used by the pressure conversion in the base
+/// correlation.
+const EMPIRICAL_BASE_GAMMA: f64 = 1.4;
+/// A rear patch is treated as base area only when its outward normal is
+/// within this angle of the oncoming body-motion direction. Larger angles are
+/// aft skin or boattail surface, not a blunt base.
+const EMPIRICAL_BASE_MAX_OFF_AXIS_ANGLE: f64 = 10.0 * std::f64::consts::PI / 180.0;
+/// Love's turbulent base-pressure magnitude `-Cp_b` behind a cylindrical
+/// afterbody against Mach number (MIL-HDBK-762 Fig. 5-139, printed p. 5-208,
+/// after NACA TN 3819). Values are held at the endpoints.
+const LOVE_BASE_PRESSURE: [(f64, f64); 6] = [
+    (2.5, 0.1195),
+    (3.0, 0.097),
+    (3.5, 0.0805),
+    (4.0, 0.067),
+    (4.5, 0.0565),
+    (5.0, 0.0475),
+];
 
 impl SurfacePressure {
     pub fn new(cp: f64, min_mach: f64, max_mach: f64) -> Result<Self, crate::Error> {
@@ -421,6 +455,82 @@ impl BasePressure {
             max_mach,
         })
     }
+}
+
+/// Bounded empirical base pressure for a turbulent cylindrical afterbody with
+/// MIL-HDBK-762 boattail relief.
+///
+/// This is not a wake solver and does not infer base exposure. It supplies a
+/// Mach- and area-ratio-dependent coefficient for rear-facing prepared patches;
+/// [`evaluate_prepared_mesh_with_empirical_base`] performs the geometric
+/// selection. The domain is Mach 1–5. Between Mach 1 and 2.5 the correlations
+/// are held at their Mach 2.5 values because the available tabulation begins
+/// there; this is an explicit engineering hold, not a transonic validation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EmpiricalBasePressure {
+    base_area_ratio: f64,
+}
+
+impl EmpiricalBasePressure {
+    /// `base_area_ratio` is base area divided by the body's maximum
+    /// cross-sectional (forebody) area, in `(0, 1]`. The caller must establish
+    /// that ratio and the applicability of turbulent base flow.
+    pub fn new(base_area_ratio: f64) -> Result<Self, crate::Error> {
+        if !base_area_ratio.is_finite() || base_area_ratio <= 0.0 || base_area_ratio > 1.0 {
+            return Err(crate::Error::from(PressureError::InvalidCoefficient));
+        }
+        Ok(Self { base_area_ratio })
+    }
+
+    pub fn base_area_ratio(self) -> f64 {
+        self.base_area_ratio
+    }
+
+    /// Returns the base pressure coefficient `Cp_b <= 0` at `mach`.
+    ///
+    /// `Cp_b = -(-Cp_cyl(M)) k(M, a_b)`, where `-Cp_cyl` is Love's cylindrical
+    /// base-pressure data and `k` is MIL-HDBK-762 Fig. 5-141's base-pressure
+    /// relief ratio. Outside Mach 1–5 this returns
+    /// [`PressureError::UnsupportedMach`].
+    pub fn coefficient(self, mach: f64) -> Result<f64, crate::Error> {
+        if !mach.is_finite() || !(EMPIRICAL_BASE_MIN_MACH..=EMPIRICAL_BASE_MAX_MACH).contains(&mach)
+        {
+            return Err(crate::Error::from(PressureError::UnsupportedMach));
+        }
+        let cylinder = love_base_pressure(mach.max(EMPIRICAL_BASE_RELIEF_MIN_MACH));
+        let relief = self.relief_ratio(mach.max(EMPIRICAL_BASE_RELIEF_MIN_MACH));
+        let coefficient = -(cylinder * relief);
+        if !coefficient.is_finite() {
+            return Err(crate::Error::from(PressureError::ArithmeticOverflow));
+        }
+        Ok(coefficient)
+    }
+
+    fn relief_ratio(self, mach: f64) -> f64 {
+        // p_cyl/p from Love's coefficient; p_bt/p from MIL-HDBK-762
+        // Fig. 5-141, then k = Cp_bt / Cp_cyl in pressure terms.
+        let cylinder = love_base_pressure(mach);
+        let p_cylinder = (1.0 - cylinder * 0.5 * EMPIRICAL_BASE_GAMMA * mach * mach).max(0.0);
+        let p_base = p_cylinder / (0.442 + 0.558 * self.base_area_ratio);
+        ((1.0 - p_base) / (1.0 - p_cylinder)).clamp(0.0, 1.0)
+    }
+}
+
+/// Love's `-Cp_b` for a cylinder, linearly interpolated between the tabulated
+/// readings and held at their endpoints.
+fn love_base_pressure(mach: f64) -> f64 {
+    let first = LOVE_BASE_PRESSURE[0];
+    let last = LOVE_BASE_PRESSURE[LOVE_BASE_PRESSURE.len() - 1];
+    if mach <= first.0 {
+        return first.1;
+    }
+    if mach >= last.0 {
+        return last.1;
+    }
+    let index = LOVE_BASE_PRESSURE.partition_point(|point| point.0 <= mach) - 1;
+    let (m0, c0) = LOVE_BASE_PRESSURE[index];
+    let (m1, c1) = LOVE_BASE_PRESSURE[index + 1];
+    c0 + (c1 - c0) * (mach - m0) / (m1 - m0)
 }
 
 impl PressurePatch {
@@ -1125,6 +1235,138 @@ pub fn evaluate_prepared_surface(
         Some(ExplicitPressure::Surface(pressure)),
         MeshPressureModel::Newtonian,
     )
+}
+
+/// Adds an empirical base-pressure load to a prepared Mesh/Colliders body.
+///
+/// The surface contribution uses [`evaluate_prepared_mesh`] or
+/// [`evaluate_prepared_mesh_modified_newtonian`] through `model`; only those
+/// two compression closures are supported. Rear-facing patches whose outward
+/// normal is within [`EMPIRICAL_BASE_MAX_OFF_AXIS_ANGLE`] of the body-motion
+/// direction receive `Cp_b(M, a_b)` from `base`. The load is summed about the
+/// common body COM with the same world-space conventions as the surface loads.
+///
+/// Base classification uses the COM translation relative to the atmosphere
+/// wind. Rotation is not used to reclassify or locally vary the base pressure;
+/// this is a bounded empirical wake approximation, not a solution of the
+/// separated wake. The model requires at least one qualifying base patch and a
+/// Mach number in 1–5 (except exactly zero relative speed, which contributes no
+/// base load). The caller must prepare exposed patches and establish that the
+/// geometry has a turbulent blunt base and that `base_area_ratio` is applicable.
+pub fn evaluate_prepared_mesh_with_empirical_base(
+    patches: &PreparedSurfacePatches,
+    flow: PressureFlow,
+    model: MeshPressureModel,
+    base: EmpiricalBasePressure,
+) -> Result<PressureWrench, crate::Error> {
+    if matches!(
+        model,
+        MeshPressureModel::PotentialFlow
+            | MeshPressureModel::KuttaLifting
+            | MeshPressureModel::VortexLattice
+    ) {
+        return Err(crate::Error::from(PressureError::UnsupportedGeometry));
+    }
+    let mut total = evaluate_prepared(patches, flow, None, model)?;
+    add_empirical_base(
+        patches
+            .iter()
+            .map(|patch| (patch.center, patch.normal, patch.area)),
+        flow,
+        base,
+        &mut total,
+    )?;
+    Ok(total)
+}
+
+/// Adds an empirical base load to `total` from already validated body-local
+/// patches. The caller must have validated motion, sound speed and model domain.
+fn add_empirical_base(
+    patches: impl Iterator<Item = (Vec3, Vec3, f64)>,
+    flow: PressureFlow,
+    base: EmpiricalBasePressure,
+    total: &mut PressureWrench,
+) -> Result<(), crate::Error> {
+    let overflow = PressureError::ArithmeticOverflow;
+    let relative = flow
+        .linear_velocity
+        .checked_sub(flow.atmosphere.wind_velocity())
+        .ok_or(overflow)?;
+    let speed = relative.checked_length().ok_or(overflow)?;
+    if speed == 0.0 {
+        return Ok(());
+    }
+    let mach = speed / flow.sound_speed;
+    let coefficient = base.coefficient(mach)?;
+    let direction = (relative / speed)
+        .try_normalize()
+        .ok_or_else(|| crate::Error::from(PressureError::InvalidMotion))?;
+    let threshold = EMPIRICAL_BASE_MAX_OFF_AXIS_ANGLE.cos();
+    let mut base_area = 0.0;
+    for (center, raw_normal, area) in patches {
+        let normal = flow.transform.transform_vector(raw_normal);
+        if !normal.is_finite() {
+            return Err(crate::Error::from(overflow));
+        }
+        let alignment = normal.checked_dot(direction).ok_or(overflow)?;
+        if alignment > -threshold {
+            continue;
+        }
+        let offset = center.checked_sub(flow.center_of_mass).ok_or(overflow)?;
+        let arm = flow.transform.transform_vector(offset);
+        if !arm.is_finite() {
+            return Err(crate::Error::from(overflow));
+        }
+        let magnitude = super::hull::scaled_product(
+            &[
+                0.5,
+                flow.atmosphere.density(),
+                speed,
+                speed,
+                coefficient.abs(),
+                area,
+            ],
+            1.0,
+        )?;
+        let force = normal.checked_mul_scalar(magnitude).ok_or(overflow)?;
+        let moment = arm.checked_cross(force).ok_or(overflow)?;
+        base_area += area;
+        if !base_area.is_finite() {
+            return Err(crate::Error::from(overflow));
+        }
+        total.force = total.force.checked_add(force).ok_or(overflow)?;
+        total.moment = total.moment.checked_add(moment).ok_or(overflow)?;
+    }
+    if base_area == 0.0 {
+        return Err(crate::Error::from(PressureError::UnsupportedGeometry));
+    }
+    Ok(())
+}
+
+/// Evaluates only the empirical base-pressure contribution over body-local
+/// patches, such as the closed-mesh triangle list returned by
+/// [`closed_mesh_pressure_patches`].
+///
+/// The same Mach/geometry domain and classification as
+/// [`evaluate_prepared_mesh_with_empirical_base`] apply. The result is a
+/// world-space wrench about the common body COM and contains no surface
+/// pressure, so callers add it to their chosen surface model.
+pub fn evaluate_empirical_base_patches(
+    patches: &[PressurePatch],
+    flow: PressureFlow,
+    base: EmpiricalBasePressure,
+) -> Result<PressureWrench, crate::Error> {
+    let mut total = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?
+        .evaluate_with_model(flow, MeshPressureModel::ModifiedNewtonian)?;
+    add_empirical_base(
+        patches
+            .iter()
+            .map(|patch| (patch.center(), patch.normal(), patch.area())),
+        flow,
+        base,
+        &mut total,
+    )?;
+    Ok(total)
 }
 
 fn evaluate_prepared(

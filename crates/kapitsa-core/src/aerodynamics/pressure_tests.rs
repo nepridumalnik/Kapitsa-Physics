@@ -293,6 +293,44 @@ fn explicit_base_pressure_has_correct_force_moment_and_domain() {
 }
 
 #[test]
+fn empirical_base_pressure_matches_love_and_relief() {
+    let cylinder = EmpiricalBasePressure::new(1.0).unwrap();
+    for (mach, magnitude) in [
+        (1.0, 0.1195),
+        (2.0, 0.1195),
+        (2.5, 0.1195),
+        (3.0, 0.097),
+        (4.0, 0.067),
+        (5.0, 0.0475),
+    ] {
+        assert!(
+            (cylinder.coefficient(mach).unwrap() + magnitude).abs() < 1e-12,
+            "Mach {mach}"
+        );
+    }
+    let relieved = EmpiricalBasePressure::new(0.5).unwrap();
+    let p_cylinder = 1.0 - 0.097 * 0.5 * 1.4 * 9.0;
+    let p_base = p_cylinder / (0.442 + 0.558 * 0.5);
+    let expected = -0.097 * (1.0 - p_base) / (1.0 - p_cylinder);
+    assert!((relieved.coefficient(3.0).unwrap() - expected).abs() < 1e-12);
+    assert!(relieved.coefficient(3.0).unwrap() > cylinder.coefficient(3.0).unwrap());
+    assert_eq!(relieved.base_area_ratio(), 0.5);
+
+    for mach in [0.99, 5.01, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            cylinder.coefficient(mach),
+            Err(crate::Error::from(PressureError::UnsupportedMach))
+        );
+    }
+    for ratio in [0.0, -0.1, 1.1, f64::NAN] {
+        assert_eq!(
+            EmpiricalBasePressure::new(ratio),
+            Err(crate::Error::from(PressureError::InvalidCoefficient))
+        );
+    }
+}
+
+#[test]
 fn base_pressure_rejects_invalid_coefficients_and_domains() {
     for (cp, min, max) in [
         (0.1, 0.0, 1.0),

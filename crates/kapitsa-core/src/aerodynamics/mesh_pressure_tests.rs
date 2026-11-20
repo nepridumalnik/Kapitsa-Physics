@@ -635,6 +635,118 @@ fn prepared_cube_has_opposing_drag_and_symmetric_com_moment() {
 }
 
 #[test]
+fn empirical_base_pressure_loads_rear_patches_and_rejects_missing_base() {
+    let mesh = TriangleMesh::new(
+        vec![
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::ONE,
+            Vec3::new(0.0, 1.0, 1.0),
+        ],
+        vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 7, 6],
+            [3, 6, 2],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ],
+    )
+    .unwrap();
+    let rear = prepare(&mesh, -Vec3::X);
+    assert_eq!(rear.len(), 2);
+    assert!(rear.iter().all(|patch| patch.normal.x < 0.0));
+    let state = PressureFlow {
+        center_of_mass: Vec3::splat(0.5),
+        linear_velocity: Vec3::X * 300.0,
+        ..flow()
+    };
+    let base = EmpiricalBasePressure::new(1.0).unwrap();
+    let surface = evaluate_prepared_mesh_modified_newtonian(&rear, state).unwrap();
+    assert_eq!(surface.force, Vec3::ZERO);
+    let total = evaluate_prepared_mesh_with_empirical_base(
+        &rear,
+        state,
+        MeshPressureModel::ModifiedNewtonian,
+        base,
+    )
+    .unwrap();
+    let magnitude = 0.5 * 300.0 * 300.0 * 0.097;
+    close(total.force, -Vec3::X * magnitude);
+    close(total.moment, Vec3::ZERO);
+    let closed = closed_mesh_pressure_patches(&mesh).unwrap();
+    let axial = evaluate_empirical_base_patches(&closed, state, base).unwrap();
+    close(axial.force, -Vec3::X * magnitude);
+    close(axial.moment, Vec3::ZERO);
+
+    let relieved = evaluate_prepared_mesh_with_empirical_base(
+        &rear,
+        state,
+        MeshPressureModel::ModifiedNewtonian,
+        EmpiricalBasePressure::new(0.5).unwrap(),
+    )
+    .unwrap();
+    assert!(relieved.force.x > total.force.x);
+    assert!(relieved.force.x < 0.0);
+
+    let front = prepare(&mesh, Vec3::X);
+    assert_eq!(
+        evaluate_prepared_mesh_with_empirical_base(
+            &front,
+            state,
+            MeshPressureModel::ModifiedNewtonian,
+            base,
+        ),
+        Err(crate::Error::from(PressureError::UnsupportedGeometry))
+    );
+    assert_eq!(
+        evaluate_prepared_mesh_with_empirical_base(
+            &rear,
+            PressureFlow {
+                linear_velocity: Vec3::X * 50.0,
+                ..state
+            },
+            MeshPressureModel::ModifiedNewtonian,
+            base,
+        ),
+        Err(crate::Error::from(PressureError::UnsupportedMach))
+    );
+    assert_eq!(
+        evaluate_prepared_mesh_with_empirical_base(
+            &rear,
+            PressureFlow {
+                linear_velocity: Vec3::ZERO,
+                ..state
+            },
+            MeshPressureModel::ModifiedNewtonian,
+            base,
+        )
+        .unwrap()
+        .force,
+        Vec3::ZERO
+    );
+    assert_eq!(
+        evaluate_prepared_mesh_with_empirical_base(
+            &rear,
+            state,
+            MeshPressureModel::PotentialFlow,
+            base,
+        ),
+        Err(crate::Error::from(PressureError::UnsupportedGeometry))
+    );
+}
+
+#[test]
 fn asymmetric_pyramid_nose_loads_windward_slopes_and_drags_at_nose() {
     let mesh = TriangleMesh::new(
         vec![

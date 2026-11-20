@@ -147,6 +147,7 @@ mod aerodynamics {
                         world.mesh_pressure_model,
                     )
                     .with_base_pressure(&entry.body.base_pressure_patches)
+                    .with_empirical_base(world.mesh_empirical_base)
                     .with_cluster(entry.cluster.as_ref())
                     .with_assembly(patches.as_ref())
                     .with_voxel_wave(voxel_wave.as_ref()),
@@ -561,6 +562,7 @@ struct AerodynamicsBodyUpdate {
 
 struct PreparedAerodynamicLoads {
     mesh_patches: Option<crate::aerodynamics::geometry::PreparedSurfacePatches>,
+    empirical_base_patches: Option<Vec<crate::aerodynamics::pressure::PressurePatch>>,
     sphere_patches: Option<Vec<crate::aerodynamics::pressure::PressurePatch>>,
     voxel_wave: Option<crate::aerodynamics::hull::HullSection>,
     assembly_wave: Option<(PartId, crate::aerodynamics::hull::HullSection)>,
@@ -571,9 +573,11 @@ struct PreparedAerodynamicLoads {
 struct AerodynamicsInputs<'a> {
     mesh_sound_speed: f64,
     mesh_pressure_model: crate::aerodynamics::pressure::MeshPressureModel,
+    empirical_base: Option<crate::aerodynamics::pressure::EmpiricalBasePressure>,
     cluster: Option<&'a RigidCluster>,
     dt: Option<f64>,
     mesh_patches: Option<&'a crate::aerodynamics::geometry::PreparedSurfacePatches>,
+    empirical_base_patches: Option<&'a [crate::aerodynamics::pressure::PressurePatch]>,
     collider_mesh: Option<&'a crate::shape::TriangleMesh>,
     sphere_patches: Option<&'a [crate::aerodynamics::pressure::PressurePatch]>,
     voxel_wave: Option<&'a crate::aerodynamics::hull::HullSection>,
@@ -598,9 +602,11 @@ impl<'a> AerodynamicsInputs<'a> {
         Self {
             mesh_sound_speed,
             mesh_pressure_model,
+            empirical_base: None,
             cluster: None,
             dt: None,
             mesh_patches: None,
+            empirical_base_patches: None,
             collider_mesh: None,
             sphere_patches: None,
             voxel_wave: None,
@@ -617,6 +623,14 @@ impl<'a> AerodynamicsInputs<'a> {
 
     fn with_cluster(mut self, cluster: Option<&'a RigidCluster>) -> Self {
         self.cluster = cluster;
+        self
+    }
+
+    fn with_empirical_base(
+        mut self,
+        base: Option<crate::aerodynamics::pressure::EmpiricalBasePressure>,
+    ) -> Self {
+        self.empirical_base = base;
         self
     }
 
@@ -669,6 +683,7 @@ impl<'a> AerodynamicsInputs<'a> {
 
     fn with_loads(mut self, loads: &'a PreparedAerodynamicLoads) -> Self {
         self.mesh_patches = loads.mesh_patches.as_ref();
+        self.empirical_base_patches = loads.empirical_base_patches.as_deref();
         self.sphere_patches = loads.sphere_patches.as_deref();
         self.voxel_wave = loads.voxel_wave.as_ref();
         self.assembly_wave = loads.assembly_wave.as_ref();
@@ -870,6 +885,9 @@ pub struct PhysicsWorld {
     mesh_sound_speed: f64,
     /// Surface-pressure closure for primary and assembly Mesh/Colliders loads.
     mesh_pressure_model: crate::aerodynamics::pressure::MeshPressureModel,
+    /// Optional empirical base-pressure add-on for the primary closed
+    /// Mesh/Colliders body.
+    mesh_empirical_base: Option<crate::aerodynamics::pressure::EmpiricalBasePressure>,
     preserve_body_mesh_cavities: bool,
     preserve_assembly_mesh_cavities: bool,
     aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
@@ -1602,6 +1620,7 @@ impl PhysicsWorld {
             atmosphere: Atmosphere::Vacuum,
             mesh_sound_speed: 340.0,
             mesh_pressure_model: crate::aerodynamics::pressure::MeshPressureModel::Newtonian,
+            mesh_empirical_base: None,
             preserve_body_mesh_cavities: false,
             preserve_assembly_mesh_cavities: false,
             aerodynamics_body_updates: Vec::new(),
@@ -1727,6 +1746,32 @@ impl PhysicsWorld {
     /// Returns the current Mesh/Colliders surface-pressure closure.
     pub fn mesh_pressure_model(&self) -> crate::aerodynamics::pressure::MeshPressureModel {
         self.mesh_pressure_model
+    }
+
+    /// Configures the opt-in empirical base-pressure add-on for the primary
+    /// closed Mesh/Colliders body.
+    ///
+    /// The model adds `Cp_b(M, a_b)` from
+    /// [`crate::aerodynamics::pressure::EmpiricalBasePressure`] to rear-facing
+    /// prepared patches whose normals are within 10 degrees of the COM
+    /// body-motion direction. It requires the `Newtonian` or
+    /// `ModifiedNewtonian` surface closure, no cluster, no sphere substitute and
+    /// a Mach number in 1–5. Changing this setting does not invalidate prepared
+    /// geometry; the next aerodynamic evaluation uses the new closure. This is a
+    /// bounded empirical wake approximation, not a separated-wake solution.
+    pub fn set_mesh_empirical_base_pressure(
+        &mut self,
+        base: Option<crate::aerodynamics::pressure::EmpiricalBasePressure>,
+    ) {
+        self.mesh_empirical_base = base;
+    }
+
+    /// Returns the configured empirical base-pressure add-on, if any.
+    #[must_use]
+    pub fn mesh_empirical_base_pressure(
+        &self,
+    ) -> Option<crate::aerodynamics::pressure::EmpiricalBasePressure> {
+        self.mesh_empirical_base
     }
 
     /// Selects triangles from one attached collider's current tessellation.
@@ -3380,9 +3425,11 @@ impl PhysicsWorld {
         let AerodynamicsInputs {
             mesh_sound_speed,
             mesh_pressure_model,
+            empirical_base,
             cluster,
             dt,
             mesh_patches,
+            empirical_base_patches,
             collider_mesh,
             sphere_patches,
             voxel_wave,
@@ -3406,6 +3453,26 @@ impl PhysicsWorld {
                     primary,
                     crate::aerodynamics::Aerodynamics::Mesh(_)
                         | crate::aerodynamics::Aerodynamics::Colliders
+                ))
+        {
+            return Err(Error::from(StepError::Aerodynamics {
+                body_id,
+                cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::UnsupportedModel),
+            }));
+        }
+        if empirical_base.is_some()
+            && (!base_pressure_patches.is_empty()
+                || cluster.is_some()
+                || sphere_patches.is_some()
+                || !matches!(
+                    primary,
+                    crate::aerodynamics::Aerodynamics::Mesh(_)
+                        | crate::aerodynamics::Aerodynamics::Colliders
+                )
+                || !matches!(
+                    mesh_pressure_model,
+                    crate::aerodynamics::pressure::MeshPressureModel::Newtonian
+                        | crate::aerodynamics::pressure::MeshPressureModel::ModifiedNewtonian
                 ))
         {
             return Err(Error::from(StepError::Aerodynamics {
@@ -3513,7 +3580,7 @@ impl PhysicsWorld {
                 linear_velocity: body.state().linear_velocity(),
                 angular_velocity: body.state().angular_velocity(),
             };
-            let wrench = if let Some(patches) = sphere_patches {
+            let mut wrench = if let Some(patches) = sphere_patches {
                 crate::aerodynamics::pressure::evaluate_potential_sphere_patches(patches, flow)
             } else {
                 match mesh_pressure_model {
@@ -3607,6 +3674,28 @@ impl PhysicsWorld {
                 body_id,
                 cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Pressure(cause)),
             })?;
+            if let Some(base) = empirical_base {
+                let base_patches = empirical_base_patches.ok_or_else(error)?;
+                let base_wrench = crate::aerodynamics::pressure::evaluate_empirical_base_patches(
+                    base_patches,
+                    flow,
+                    base,
+                )
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Pressure(
+                        cause,
+                    )),
+                })?;
+                wrench.force = wrench
+                    .force
+                    .checked_add(base_wrench.force)
+                    .ok_or_else(error)?;
+                wrench.moment = wrench
+                    .moment
+                    .checked_add(base_wrench.moment)
+                    .ok_or_else(error)?;
+            }
             body.apply_force(wrench.force).map_err(|_| error())?;
             body.apply_torque(wrench.moment).map_err(|_| error())?;
             if sphere_patches.is_none()
@@ -4325,6 +4414,7 @@ impl PhysicsWorld {
                 None => (None, None, None),
             };
             let mut sphere_patches = None;
+            let mut empirical_base_patches = None;
             // Only the primary geometry samples the COM. Additional surfaces
             // still evaluate their own positions, including when the COM is in vacuum.
             let primary_atmosphere = if matches!(
@@ -4582,6 +4672,24 @@ impl PhysicsWorld {
                             cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Geometry(cause)),
                         })?,
                 );
+                    if self.mesh_empirical_base.is_some()
+                        && entry.cluster.is_none()
+                        && matches!(
+                            self.mesh_pressure_model,
+                            crate::aerodynamics::pressure::MeshPressureModel::Newtonian
+                                | crate::aerodynamics::pressure::MeshPressureModel::ModifiedNewtonian
+                        )
+                    {
+                        empirical_base_patches = Some(
+                            crate::aerodynamics::pressure::closed_mesh_pressure_patches(mesh)
+                                .map_err(|cause| StepError::Aerodynamics {
+                                    body_id,
+                                    cause: crate::Error::from(
+                                        crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                                    ),
+                                })?,
+                        );
+                    }
                 }
             }
             self.aerodynamics_body_updates.push(AerodynamicsBodyUpdate {
@@ -4596,6 +4704,7 @@ impl PhysicsWorld {
                 applied_mesh_pressure: None,
                 loads: PreparedAerodynamicLoads {
                     mesh_patches,
+                    empirical_base_patches,
                     sphere_patches,
                     voxel_wave,
                     assembly_wave,
@@ -4631,6 +4740,7 @@ impl PhysicsWorld {
                                         self.mesh_pressure_model,
                                     )
                                     .with_base_pressure(&entry.body.base_pressure_patches)
+                                    .with_empirical_base(self.mesh_empirical_base)
                                     .with_cluster(entry.cluster.as_ref())
                                     .with_timestep(Some(dt))
                                     .with_collider_mesh(entry.collider_aerodynamic_mesh.as_ref())
@@ -4706,6 +4816,7 @@ impl PhysicsWorld {
         // unchanged. The workspace is committed only after the entire step.
         for update in &self.aerodynamics_body_updates {
             if update.loads.sphere_patches.is_some()
+                || self.mesh_empirical_base.is_some()
                 || matches!(
                     self.mesh_pressure_model,
                     crate::aerodynamics::pressure::MeshPressureModel::PotentialFlow
@@ -6144,6 +6255,7 @@ impl PhysicsWorld {
                                             self.mesh_pressure_model,
                                         )
                                         .with_base_pressure(&entry.body.base_pressure_patches)
+                                        .with_empirical_base(self.mesh_empirical_base)
                                         .with_cluster(entry.cluster.as_ref())
                                         .with_collider_mesh(
                                             entry.collider_aerodynamic_mesh.as_ref(),

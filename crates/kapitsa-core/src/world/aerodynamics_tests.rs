@@ -1,4 +1,4 @@
-use kapitsa_math::{Mat3, Vec3};
+use kapitsa_math::{Mat3, Quat, Vec3};
 
 use crate::{
     aerodynamics::{AerodynamicProperties, Aerodynamics, AtmosphericState},
@@ -713,6 +713,195 @@ fn modified_newtonian_mesh_and_collider_pressure_step_below_mach_five()
                 world.step(0.01)?;
             }
         }
+    }
+    Ok(())
+}
+
+fn unit_cube_mesh() -> Result<TriangleMesh, crate::Error> {
+    TriangleMesh::new(
+        vec![
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::ONE,
+            Vec3::new(0.0, 1.0, 1.0),
+        ],
+        vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 7, 6],
+            [3, 6, 2],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ],
+    )
+}
+
+#[test]
+fn empirical_base_pressure_adds_axial_drag_in_world_steps() -> Result<(), Box<dyn std::error::Error>>
+{
+    use crate::aerodynamics::{MeshPressureModel, pressure::EmpiricalBasePressure};
+    use crate::{
+        collider::Collider,
+        shape::{Cuboid, Shape},
+    };
+    for collider_mode in [false, true] {
+        for sharded in [false, true] {
+            let mut velocities = Vec::new();
+            for base in [None, Some(EmpiricalBasePressure::new(1.0)?)] {
+                let mut world = PhysicsWorld::new();
+                world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                    1.0,
+                    Vec3::ZERO,
+                )?));
+                world.set_mesh_sound_speed(50.0)?;
+                world.set_mesh_pressure_model(MeshPressureModel::ModifiedNewtonian);
+                world.set_mesh_empirical_base_pressure(base);
+                assert_eq!(world.mesh_empirical_base_pressure(), base);
+                let mass = MassProperties::new(1.0, Vec3::splat(0.5), Mat3::IDENTITY)?;
+                let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+                body.set_linear_velocity(Vec3::X * 100.0)?;
+                body.set_aerodynamics(if collider_mode {
+                    Aerodynamics::Colliders
+                } else {
+                    Aerodynamics::Mesh(unit_cube_mesh()?)
+                });
+                let id = world.add_body(body)?;
+                if collider_mode {
+                    world.add_collider(
+                        id,
+                        Collider::new(
+                            Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                            Transform::new(Vec3::splat(-0.5), Quat::IDENTITY)?,
+                        ),
+                    )?;
+                }
+                if sharded {
+                    world.step_with_shards(
+                        1e-4,
+                        &mut [Vec::new()],
+                        &crate::execution::SequentialExecutor,
+                        1,
+                    )?;
+                } else {
+                    world.step(1e-4)?;
+                }
+                velocities.push(world.body(id).ok_or("body")?.state().linear_velocity().x);
+            }
+            assert!(
+                velocities[1] < velocities[0],
+                "collider={collider_mode}, sharded={sharded}: {velocities:?}"
+            );
+            assert!(velocities[0] < 100.0);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn empirical_base_pressure_rejects_unsupported_models_conflicts_and_mach()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::{
+        MeshPressureModel,
+        pressure::{BasePressure, EmpiricalBasePressure, PressureError},
+    };
+    let base = EmpiricalBasePressure::new(1.0)?;
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_sound_speed(50.0)?;
+        world.set_mesh_pressure_model(MeshPressureModel::PotentialFlow);
+        world.set_mesh_empirical_base_pressure(Some(base));
+        let mass = MassProperties::new(1.0, Vec3::splat(0.5), Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 100.0)?;
+        body.set_aerodynamics(Aerodynamics::Mesh(unit_cube_mesh()?));
+        let id = world.add_body(body)?;
+        let before = world.body(id).ok_or("body")?.motion();
+        let result = if sharded {
+            world.step_with_shards(
+                1e-4,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+        } else {
+            world.step(1e-4)
+        };
+        assert!(matches!(
+            aero_cause(&result),
+            Some(crate::aerodynamics::AerodynamicsError::UnsupportedModel)
+        ));
+        assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+    }
+
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::ZERO,
+    )?));
+    world.set_mesh_sound_speed(50.0)?;
+    world.set_mesh_pressure_model(MeshPressureModel::ModifiedNewtonian);
+    world.set_mesh_empirical_base_pressure(Some(base));
+    let mass = MassProperties::new(1.0, Vec3::splat(0.5), Mat3::IDENTITY)?;
+    let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+    body.set_linear_velocity(Vec3::X * 100.0)?;
+    body.set_aerodynamics(Aerodynamics::Mesh(unit_cube_mesh()?));
+    body.set_mesh_base_triangles(&[8], BasePressure::new(-0.4, 1.0, 5.0)?)?;
+    let id = world.add_body(body)?;
+    let before = world.body(id).ok_or("body")?.motion();
+    let result = world.step(1e-4);
+    assert!(
+        matches!(
+            aero_cause(&result),
+            Some(crate::aerodynamics::AerodynamicsError::UnsupportedModel)
+        ),
+        "{result:?}"
+    );
+    assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_sound_speed(200.0)?;
+        world.set_mesh_pressure_model(MeshPressureModel::ModifiedNewtonian);
+        world.set_mesh_empirical_base_pressure(Some(base));
+        let mass = MassProperties::new(1.0, Vec3::splat(0.5), Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 100.0)?;
+        body.set_aerodynamics(Aerodynamics::Mesh(unit_cube_mesh()?));
+        let id = world.add_body(body)?;
+        let before = world.body(id).ok_or("body")?.motion();
+        let result = if sharded {
+            world.step_with_shards(
+                1e-4,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+        } else {
+            world.step(1e-4)
+        };
+        assert!(
+            matches!(aero_pressure(&result), Some(PressureError::UnsupportedMach)),
+            "sharded={sharded}: {result:?}"
+        );
+        assert_eq!(world.body(id).ok_or("body")?.motion(), before);
     }
     Ok(())
 }

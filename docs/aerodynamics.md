@@ -513,6 +513,35 @@ this limitation. Proving a partition requires additional geometric invariants.
 
 For explicitly selected base surfaces, `BasePressure::new(cp, min_mach, max_mach)` and `evaluate_prepared_base` provide a separate constant-Cp load primitive. `cp` is nonpositive excess pressure relative to freestream divided by dynamic pressure; the inclusive Mach range and the coefficient must be supplied from data appropriate to the geometry and flow. Force is `-q * cp * area * outward_normal`, with moment about the COM. A patch pointing into its local body-relative velocity is rejected, including under rotation; this necessary orientation check does not identify a base or prove it is exposed. The caller must select actual base surfaces: reversing the visibility direction is not a general wake or base-surface classifier. Nonempty configurations supplied directly through `RigidBody::set_base_pressure_patches` are rejected by world steps; use the index-based APIs below for simulation. The low-level `PressurePatch::evaluate_base` remains available independently. Indexed loads use the same COM atmosphere as mesh impact pressure. Replacing the primary aerodynamic model clears the configuration. Cluster conversion rejects a nonempty configuration before changing topology; cluster bodies and non-Mesh/Colliders models with configured patches return `UnsupportedModel` in air. This approximation does not model wake interaction and is not experimentally validated. It does not change the existing Newtonian impact-pressure policy.
 
+`EmpiricalBasePressure::new(base_area_ratio)` and
+`evaluate_prepared_mesh_with_empirical_base` / `evaluate_empirical_base_patches`
+add an opt-in bounded turbulent-base load without caller-selected base
+triangles. `base_area_ratio` is base area over the body's maximum
+cross-sectional area in `(0, 1]`. The coefficient is
+`Cp_b = -(-Cp_cyl(M)) k(M, a_b)`, where `-Cp_cyl` is Love's cylindrical
+base-pressure data (MIL-HDBK-762 Fig. 5-139, after NACA TN 3819) and `k` is
+MIL-HDBK-762 Fig. 5-141's base-pressure relief ratio
+`p_bt/p = p_cyl/(0.442 + 0.558 a_b)`, clamped to `[0, 1]`. The tabulated
+domain is Mach 2.5–5; Mach 1–2.5 holds both correlations at their Mach 2.5
+values. Outside Mach 1–5 the model returns `UnsupportedMach`. A rear patch is
+treated as base area only when its outward normal is within 10 degrees of the
+body-motion direction; geometry with no such patch returns
+`UnsupportedGeometry`. The load is `-Cp_b q A` on each selected patch, with a
+moment about the COM. Zero COM relative speed contributes no base load.
+
+`PhysicsWorld::set_mesh_empirical_base_pressure(Some(model))` applies this
+add-on to a closed primary `Mesh` or `Colliders` body with the `Newtonian` or
+`ModifiedNewtonian` surface closure, without a cluster, parts assembly or
+sphere substitute. World preparation uses `closed_mesh_pressure_patches` for
+the base triangles, so an open mesh is rejected. This path does not perform a
+separate downstream visibility check: rear-facing internal or cavity surfaces
+of a non-convex mesh may be included, and the caller must provide a simple
+closed body. Base classification and pressure use the COM translation;
+rotation does not reclassify or vary the base load. The model does not resolve
+an unsteady wake, vortex shedding, base-flow turbulence, roughness, surface
+temperature or experimental validation. Explicitly selected `BasePressure`
+patches remain the way to supply measured or geometry-specific data.
+
 For `Colliders` bodies, adding or removing a collider, requesting `collider_mut`, or changing collider tessellation clears the base patches, even if a mutable borrow makes no change. Reapplying identical tessellation settings leaves them intact. Configure patches after collider edits. These operations do not clear patches attached to an independent `Mesh` model. This invalidation does not establish that newly supplied patches are physically exposed or match the collider geometry.
 
 For a primary `Mesh`, `RigidBody::set_mesh_base_triangles` selects whole source triangles by unique indices, deriving their area, center and normal from the mesh. `PhysicsWorld::set_collider_base_triangles` similarly selects triangles from one attached collider, using the ordering produced by `collider_mesh` for that collider and the body's current tessellation. The latter replaces, rather than appends to, the base selection. Invalid or duplicate indices reject the update without replacing the previous selection. Selection checks membership but not outward winding or base classification; world step preparation checks full geometric visibility as described below. Replacing the primary model clears the selection.
@@ -936,7 +965,8 @@ engine does not blend models to hide a domain limit.
 | Mesh/Colliders potential panel | local Mach ≤ 0.2, closed isolated mesh ≤ 256 triangles, quasi-steady rotation | unsteady added mass, wind gradient, separation, base flow |
 | Mesh/Colliders Kutta lifting | closed thin wing, span ≥ chord, thickness ≤ 0.15 span, Mach ≤ 0.3 | camber, sweep, taper, tip relief, general 3D Kutta wake |
 | Mesh/Colliders vortex lattice | closed thin wing, 3×6 lattice, Mach ≤ 0.3 | finite thickness, separation, wake roll-up, control surfaces, validation |
-| Base pressure | caller Cp and inclusive Mach range | wake interaction |
+| Base pressure (explicit) | caller Cp, inclusive Mach range and selected patches | wake interaction, exposure inference |
+| Empirical base pressure | Mach 1–5 (2.5–5 tabulated), closed primary Mesh/Colliders, caller base-area ratio, 10° rear-normal cone | subsonic base physics, unsteady/cavity wake, rotation, validation |
 | Incompressible friction | Mach ≤ 0.3 | compressibility, transition above 0.3 |
 | Transitioned flat plate | 500,000 < Re < 100,000,000, Mach ≤ 0.3 | prescribed transition only |
 | Compressible turbulent friction | Mach ≤ 0.95, 1M ≤ Re ≤ 100M | shock interaction, roughness |
@@ -955,8 +985,9 @@ Finite-thickness and multi-surface Kutta wake flow with wake roll-up and
 control surfaces for Mesh/Colliders, unsteady added-mass and rotating-wake
 effects, validated geometry/CFD stall onset and measured `CL_max`,
 vortex-lift dynamic stall and validated hysteresis,
-wake/shielding physics beyond geometric occlusion, base-flow interaction,
-surface roughness, high-speed transition, real-gas properties, a validated
+wake/shielding physics beyond geometric occlusion, unsteady or validated
+base-flow interaction, surface roughness, high-speed transition, real-gas
+properties, a validated
 body-of-revolution transonic solver and a validated general supersonic
 lifting-surface solution with thickness, sweep, tip relief and shock
 detachment remain outside the implemented models. The predictive hull
