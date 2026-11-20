@@ -408,6 +408,37 @@ Vacuum, zero-area patches and zero relative speed return zero loads after
 motion and sound-speed validation; invalid geometry, motion, sound speed and
 unrepresentable arithmetic are explicit errors.
 
+### Bounded potential-flow panel model
+
+`MeshPressureModel::PotentialFlow` is an explicit opt-in incompressible
+source-panel model for a closed, isolated primary `Mesh` or `Colliders` body.
+It assigns one constant-strength source panel to each triangle, solves the
+no-penetration system with dense Gaussian elimination, and recovers
+`Cp = 1 - |v_t|² / |V|²` from the tangential surface velocity. Force is
+`-q Cp A n` with moment about the COM. This supplies attached pressure and
+suction from the geometry itself, including non-lifting lateral force on
+asymmetric bodies.
+
+The explicit domain is:
+
+- Mach ≤ 0.2 and steady uniform incompressible flow;
+- one closed, outward-wound triangle mesh with at most 256 triangles;
+- no cluster/part assembly, no overlapping or internal surfaces, no rotation,
+  wind gradient or separate wake;
+- no Kutta condition, circulation, boundary layer, separation, roughness or
+  base pressure.
+
+The panel system is rebuilt for each evaluation with `O(N³)` solve and `O(N²)`
+scratch storage; the panel budget is deliberate. An open, reversed, disconnected
+or oversized mesh returns `InvalidPatch` or `WorkBudgetExceeded`, Mach above 0.2
+returns `UnsupportedMach`, and rotation or unsupported geometry returns
+`UnsupportedGeometry`. Cluster/part geometry returns `UnsupportedModel`.
+Allocation and singular-system failures are explicit `ArithmeticOverflow`
+errors, never partial loads. Per-owner pressure diagnostics are not staged for
+this model. The sphere net-force regression is a model consistency check, not
+experimental validation. For lifting wings use `WingPolar` or `FiniteWing`;
+this panel model has no wake or Kutta condition.
+
 ### Implemented patch pressure evaluator
 
 `kapitsa::aerodynamics::pressure::PressurePatch` implements the unmodified Newtonian equation above for caller-selected physical surface patches; `evaluate_modified_newtonian` selects the opt-in compression closure described above. `PressureFlow` supplies an explicit sound speed, the atmosphere sampled at the patch, the body's rigid transform, body-local COM, and world-space linear/angular velocities. The evaluator computes point velocity `v_COM + omega × r`, subtracts wind, and returns world-space `PressureWrench { force, moment }` about the COM. Patch centers are body-origin-relative, not COM-relative; changing COM does not rebuild patches. Normals are normalized at construction. Evaluation allocates nothing and does not mutate the body.
@@ -798,7 +829,8 @@ engine does not blend models to hide a domain limit.
 | Supersonic wing linear theory | 1.2 ≤ Mach ≤ min(caller max, 5), attached small incidence | thickness, camber, sweep, tip relief, shock detachment |
 | `WingPolar` | caller Mach/AoA grid only | interpolation outside the table |
 | Mesh/Colliders unmodified Newtonian | Mach ≥ 5 | subsonic/transonic pressure; use modified model |
-| Mesh/Colliders modified Newtonian | Mach 0–5 | attached suction/lift, wake, base flow, friction |
+| Mesh/Colliders modified Newtonian | Mach 0–5 | attached potential lift, wake, base flow, friction |
+| Mesh/Colliders potential panel | Mach ≤ 0.2, closed isolated mesh ≤ 256 triangles | Kutta wake/circulation, rotation, separation, base flow |
 | Base pressure | caller Cp and inclusive Mach range | wake interaction |
 | Incompressible friction | Mach ≤ 0.3 | compressibility, transition above 0.3 |
 | Transitioned flat plate | 500,000 < Re < 100,000,000, Mach ≤ 0.3 | prescribed transition only |
@@ -814,12 +846,12 @@ engine does not blend models to hide a domain limit.
 | Transitional particle | 0.1 ≤ Kn ≤ 10, Re ≤ 45, Mach ≤ 10 | other Kn/Re |
 | `LothParticle` selector | transitional Re ≤ 45, compression Re > 45 | gaps such as Mach 0.22, Re 100 |
 
-Potential-flow attached suction or lift for Mesh/Colliders, wake/shielding
-physics beyond geometric occlusion, base-flow interaction, surface roughness,
-high-speed transition, real-gas properties, a validated body-of-revolution
-transonic solver and a validated general supersonic lifting-surface solution
-with thickness, sweep, tip relief and shock detachment remain outside the
-implemented models. The predictive hull transonic row is an equivalent-section
+Kutta-condition lifting potential flow with a wake for Mesh/Colliders,
+rotational potential flow, wake/shielding physics beyond geometric occlusion,
+base-flow interaction, surface roughness, high-speed transition, real-gas
+properties, a validated body-of-revolution transonic solver and a validated
+general supersonic lifting-surface solution with thickness, sweep, tip relief
+and shock detachment remain outside the implemented models. The predictive hull transonic row is an equivalent-section
 Korn/Lock estimate, not a validated transonic body solution; the supersonic
 wing row is a bounded Ackeret/finite-span estimate, not a general solver. The modified Newtonian Mesh/Colliders closure supplies
 compression pressure only; it does not constitute a subsonic panel solution. Callers must not treat the table as

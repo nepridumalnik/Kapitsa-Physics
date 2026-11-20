@@ -200,6 +200,7 @@ cache
 colliders
 geometry
 hull
+potential
 pressure
 slender
 wave

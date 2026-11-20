@@ -243,7 +243,8 @@ impl SimulationBuilder {
     /// Selects the Mesh/Colliders pressure closure before startup.
     /// The default is [`kapitsa_core::aerodynamics::MeshPressureModel::Newtonian`],
     /// which requires Mach >= 5. `ModifiedNewtonian` enables the documented
-    /// compression-only model for `0 <= Mach <= 5`.
+    /// compression-only model for `0 <= Mach <= 5`; `PotentialFlow` enables the
+    /// bounded closed-mesh source-panel model at Mach <= 0.2.
     pub fn mesh_pressure_model(
         mut self,
         model: kapitsa_core::aerodynamics::pressure::MeshPressureModel,

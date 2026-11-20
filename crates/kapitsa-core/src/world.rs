@@ -574,6 +574,7 @@ struct AerodynamicsInputs<'a> {
     cluster: Option<&'a RigidCluster>,
     dt: Option<f64>,
     mesh_patches: Option<&'a crate::aerodynamics::geometry::PreparedSurfacePatches>,
+    collider_mesh: Option<&'a crate::shape::TriangleMesh>,
     sphere_patches: Option<&'a [crate::aerodynamics::pressure::PressurePatch]>,
     voxel_wave: Option<&'a crate::aerodynamics::hull::HullSection>,
     assembly_wave: Option<&'a (PartId, crate::aerodynamics::hull::HullSection)>,
@@ -600,6 +601,7 @@ impl<'a> AerodynamicsInputs<'a> {
             cluster: None,
             dt: None,
             mesh_patches: None,
+            collider_mesh: None,
             sphere_patches: None,
             voxel_wave: None,
             assembly_wave: None,
@@ -671,6 +673,11 @@ impl<'a> AerodynamicsInputs<'a> {
         self.voxel_wave = loads.voxel_wave.as_ref();
         self.assembly_wave = loads.assembly_wave.as_ref();
         self.wing_visibility = loads.wing_visibility.as_deref();
+        self
+    }
+
+    fn with_collider_mesh(mut self, mesh: Option<&'a crate::shape::TriangleMesh>) -> Self {
+        self.collider_mesh = mesh;
         self
     }
 
@@ -1696,9 +1703,13 @@ impl PhysicsWorld {
     ///
     /// [`crate::aerodynamics::MeshPressureModel::ModifiedNewtonian`] enables
     /// the compression-only extension for `0 <= Mach <= 5`. It uses the same
-    /// prepared exposure geometry and does not add suction, wake, friction,
-    /// base pressure or circulation. Changing the model does not invalidate
-    /// prepared geometry; the next aerodynamic evaluation uses the new closure.
+    /// prepared exposure geometry and does not add a wake or friction.
+    /// [`crate::aerodynamics::MeshPressureModel::PotentialFlow`] enables a
+    /// bounded incompressible source-panel model for a closed isolated primary
+    /// Mesh/Colliders body at Mach <= 0.2 and up to 256 triangles; it does not
+    /// support clusters/parts, rotation, Kutta wake or separation. Changing the
+    /// model does not invalidate prepared geometry; the next aerodynamic
+    /// evaluation uses the new closure.
     /// A body above the selected model's Mach domain returns an explicit
     /// pressure error and rolls back its step.
     pub fn set_mesh_pressure_model(
@@ -3367,6 +3378,7 @@ impl PhysicsWorld {
             cluster,
             dt,
             mesh_patches,
+            collider_mesh,
             sphere_patches,
             voxel_wave,
             assembly_wave,
@@ -3499,15 +3511,42 @@ impl PhysicsWorld {
             let wrench = if let Some(patches) = sphere_patches {
                 crate::aerodynamics::pressure::evaluate_potential_sphere_patches(patches, flow)
             } else {
-                let patches = mesh_patches.ok_or_else(error)?;
                 match mesh_pressure_model {
                     crate::aerodynamics::pressure::MeshPressureModel::Newtonian => {
-                        crate::aerodynamics::pressure::evaluate_prepared_mesh(patches, flow)
+                        crate::aerodynamics::pressure::evaluate_prepared_mesh(
+                            mesh_patches.ok_or_else(error)?,
+                            flow,
+                        )
                     }
                     crate::aerodynamics::pressure::MeshPressureModel::ModifiedNewtonian => {
                         crate::aerodynamics::pressure::evaluate_prepared_mesh_modified_newtonian(
-                            patches, flow,
+                            mesh_patches.ok_or_else(error)?,
+                            flow,
                         )
+                    }
+                    crate::aerodynamics::pressure::MeshPressureModel::PotentialFlow => {
+                        if cluster.is_some() {
+                            return Err(Error::from(StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                ),
+                            }));
+                        }
+                        let mesh = match primary {
+                            crate::aerodynamics::Aerodynamics::Mesh(mesh) => Some(mesh),
+                            crate::aerodynamics::Aerodynamics::Colliders => collider_mesh,
+                            _ => None,
+                        }
+                        .ok_or_else(|| {
+                            Error::from(StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                ),
+                            })
+                        })?;
+                        crate::aerodynamics::potential::evaluate_closed_mesh(mesh, flow)
                     }
                 }
             }
@@ -4541,6 +4580,7 @@ impl PhysicsWorld {
                                     .with_base_pressure(&entry.body.base_pressure_patches)
                                     .with_cluster(entry.cluster.as_ref())
                                     .with_timestep(Some(dt))
+                                    .with_collider_mesh(entry.collider_aerodynamic_mesh.as_ref())
                                     .with_loads(&update.loads)
                                     .with_part_hull_wrenches(&mut update.part_hull_wrenches)
                                     .with_part_wing_wrenches(&mut update.part_wing_wrenches)
@@ -4612,7 +4652,10 @@ impl PhysicsWorld {
         // This diagnostic pass never applies forces; the solver path above is
         // unchanged. The workspace is committed only after the entire step.
         for update in &self.aerodynamics_body_updates {
-            if update.loads.sphere_patches.is_some() {
+            if update.loads.sphere_patches.is_some()
+                || self.mesh_pressure_model
+                    == crate::aerodynamics::pressure::MeshPressureModel::PotentialFlow
+            {
                 continue;
             }
             let Some(patches) = update.loads.mesh_patches.as_ref() else {
@@ -6045,6 +6088,9 @@ impl PhysicsWorld {
                                         )
                                         .with_base_pressure(&entry.body.base_pressure_patches)
                                         .with_cluster(entry.cluster.as_ref())
+                                        .with_collider_mesh(
+                                            entry.collider_aerodynamic_mesh.as_ref(),
+                                        )
                                         .with_timestep(dt);
                                         let inputs = if let Some(update) = staged {
                                             inputs.with_loads(&update.loads)

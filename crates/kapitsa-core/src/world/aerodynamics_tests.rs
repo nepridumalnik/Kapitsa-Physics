@@ -718,6 +718,67 @@ fn modified_newtonian_mesh_and_collider_pressure_step_below_mach_five()
 }
 
 #[test]
+fn potential_flow_mesh_and_collider_models_step_on_closed_spheres()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            MeshPressureModel,
+            colliders::{ColliderTessellation, collider_mesh},
+            pressure::PressureError,
+        },
+        collider::Collider,
+        shape::{Shape, Sphere},
+    };
+    for collider_mode in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_pressure_model(MeshPressureModel::PotentialFlow);
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 20.0)?;
+        let mesh = collider_mesh(
+            [&Collider::new(
+                Shape::Sphere(Sphere::new(1.0)?),
+                Transform::identity(),
+            )],
+            ColliderTessellation::new(16, 9, 1000)?,
+        )?;
+        if collider_mode {
+            body.set_aerodynamics(Aerodynamics::Colliders);
+        } else {
+            body.set_aerodynamics(Aerodynamics::Mesh(mesh));
+        }
+        let id = world.add_body(body)?;
+        if collider_mode {
+            world.add_collider(
+                id,
+                Collider::new(Shape::Sphere(Sphere::new(1.0)?), Transform::identity()),
+            )?;
+        }
+        world.step(0.001)?;
+        let velocity = world.body(id).ok_or("body")?.state().linear_velocity();
+        assert!(
+            (velocity.x - 20.0).abs() < 1e-6 && velocity.is_finite(),
+            "collider={collider_mode}: {velocity:?}"
+        );
+
+        // The model is explicitly bounded to Mach <= 0.2.
+        world.set_mesh_sound_speed(50.0)?;
+        let before = world.body(id).ok_or("body")?.motion();
+        let result = world.step(0.001);
+        assert!(
+            matches!(aero_pressure(&result), Some(PressureError::UnsupportedMach)),
+            "collider={collider_mode}: {result:?}"
+        );
+        assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+    }
+    Ok(())
+}
+
+#[test]
 fn spherical_vacuum_skips_collider_preparation() -> Result<(), Box<dyn std::error::Error>> {
     use crate::{
         aerodynamics::{Atmosphere, ColliderTessellation, SphericalAtmosphere},

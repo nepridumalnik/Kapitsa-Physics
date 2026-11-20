@@ -14,6 +14,11 @@
 //! isentropic stagnation pressure below Mach 1 and Rayleigh pitot pressure
 //! through Mach 5. It is not a potential-flow, lifting, suction, wake or
 //! viscous model; leeward pressure remains zero.
+//!
+//! [`MeshPressureModel::PotentialFlow`] is a bounded incompressible
+//! source-panel model for a closed isolated Mesh/Colliders body at Mach ≤ 0.2,
+//! up to 256 triangles, without rotation, Kutta wake, circulation or
+//! separation. See [`crate::aerodynamics::potential`].
 
 use super::{AtmosphericState, geometry::PreparedSurfacePatches};
 use crate::transform::Transform;
@@ -29,6 +34,8 @@ pub enum PressureError {
     InvalidBaseOrientation,
     BaseNotFullyVisible,
     UnsupportedMach,
+    UnsupportedGeometry,
+    WorkBudgetExceeded,
     ArithmeticOverflow,
 }
 impl fmt::Display for PressureError {
@@ -43,7 +50,9 @@ impl std::error::Error for PressureError {}
 /// `Newtonian` is the existing unmodified hypersonic impact model and requires
 /// Mach >= 5. `ModifiedNewtonian` is the compression-only extension in
 /// `0 <= Mach <= 5`; it still uses exposed windward patches and returns an
-/// error above Mach 5. The default preserves existing behavior.
+/// error above Mach 5. `PotentialFlow` is a bounded incompressible source-panel
+/// model for closed isolated meshes at Mach <= 0.2. The default preserves
+/// existing behavior.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MeshPressureModel {
     /// Unmodified Newtonian impact pressure, `Cp = 2 sin²(theta)`, Mach >= 5.
@@ -53,6 +62,10 @@ pub enum MeshPressureModel {
     /// with `Cp_max` from isentropic or Rayleigh-pitot stagnation pressure.
     /// Leeward suction, wake, friction, base flow and circulation are absent.
     ModifiedNewtonian,
+    /// Incompressible source-panel potential flow for a closed, isolated
+    /// Mesh/Colliders body. Mach ≤ 0.2 and at most 256 mesh triangles.
+    /// See [`crate::aerodynamics::potential::evaluate_closed_mesh`].
+    PotentialFlow,
 }
 
 fn same_triangle(a: &[Vec3; 3], b: &[Vec3; 3]) -> bool {
@@ -607,6 +620,9 @@ impl PressurePatch {
         explicit: Option<ExplicitPressure>,
         model: MeshPressureModel,
     ) -> Result<PressureWrench, crate::Error> {
+        if model == MeshPressureModel::PotentialFlow {
+            return Err(crate::Error::from(PressureError::UnsupportedGeometry));
+        }
         if !flow.center_of_mass.is_finite()
             || !flow.linear_velocity.is_finite()
             || !flow.angular_velocity.is_finite()
@@ -737,6 +753,9 @@ impl PressurePatch {
                     ],
                     1.0,
                 )
+            }
+            MeshPressureModel::PotentialFlow => {
+                return Err(crate::Error::from(PressureError::UnsupportedGeometry));
             }
         }
         .map_err(|_| overflow)?;

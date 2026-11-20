@@ -5,6 +5,7 @@ pub mod cache;
 pub mod colliders;
 pub mod geometry;
 pub mod hull;
+pub mod potential;
 pub mod pressure;
 pub mod slender;
 pub mod sphere_drag;
