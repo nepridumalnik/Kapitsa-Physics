@@ -625,6 +625,99 @@ fn existing_mesh_and_collider_models_reject_subsonic_flow_without_state_change()
 }
 
 #[test]
+fn modified_newtonian_mesh_and_collider_pressure_step_below_mach_five()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{MeshPressureModel, pressure::PressureError},
+        collider::Collider,
+        shape::{Cuboid, Shape},
+    };
+    for collider_mode in [false, true] {
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                1.0,
+                Vec3::ZERO,
+            )?));
+            world.set_mesh_pressure_model(MeshPressureModel::ModifiedNewtonian);
+            assert_eq!(
+                world.mesh_pressure_model(),
+                MeshPressureModel::ModifiedNewtonian
+            );
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::X * 100.0)?;
+            if collider_mode {
+                body.set_aerodynamics(Aerodynamics::Colliders);
+            } else {
+                body.set_aerodynamics(Aerodynamics::Mesh(TriangleMesh::new(
+                    vec![Vec3::ZERO, Vec3::Y, Vec3::Z],
+                    vec![[0, 1, 2]],
+                )?));
+            }
+            let id = world.add_body(body)?;
+            if collider_mode {
+                world.add_collider(
+                    id,
+                    Collider::new(
+                        Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                        Transform::identity(),
+                    ),
+                )?;
+            }
+            let before = world.body(id).ok_or("body")?.motion();
+            if sharded {
+                world.step_with_shards(
+                    0.01,
+                    &mut [Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(0.01)?;
+            }
+            assert!(
+                world.body(id).ok_or("body")?.state().linear_velocity().x < 100.0,
+                "collider={collider_mode}, sharded={sharded}"
+            );
+
+            // Above the modified model's Mach domain the step is atomic.
+            world.set_mesh_sound_speed(5.0)?;
+            let before_error = world.body(id).ok_or("body")?.motion();
+            let result = if sharded {
+                world.step_with_shards(
+                    0.01,
+                    &mut [Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )
+            } else {
+                world.step(0.01)
+            };
+            assert!(
+                matches!(aero_pressure(&result), Some(PressureError::UnsupportedMach)),
+                "collider={collider_mode}, sharded={sharded}: {result:?}"
+            );
+            assert_eq!(world.body(id).ok_or("body")?.motion(), before_error);
+            assert_ne!(before, before_error);
+
+            world.set_mesh_sound_speed(340.0)?;
+            if sharded {
+                world.step_with_shards(
+                    0.01,
+                    &mut [Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(0.01)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn spherical_vacuum_skips_collider_preparation() -> Result<(), Box<dyn std::error::Error>> {
     use crate::{
         aerodynamics::{Atmosphere, ColliderTessellation, SphericalAtmosphere},

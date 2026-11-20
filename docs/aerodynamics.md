@@ -60,7 +60,7 @@ References for geometric concepts: [Voxel](https://en.wikipedia.org/wiki/Voxel),
 
 ## World Mesh and Colliders integration
 
-Non-cluster dynamic bodies support `Aerodynamics::Mesh` and `Aerodynamics::Colliders` through `PreparedGeometryCache`, direction-dependent exposed physical patches, and the pressure evaluator. The current pressure policy requires Mach >= 5 and samples primary atmosphere at the COM. An optional atmospheric sound-speed profile supplies local values; otherwise `PhysicsWorld::set_mesh_sound_speed` and `SimulationBuilder::mesh_sound_speed` configure the uniform fallback in m/s. The fallback defaults to 340 m/s and is not inferred from density. Both Tokio and Rayon builders apply it before service start. Additional explicit surfaces sample their own positions even when the COM is outside the atmosphere. Existing cluster bodies use explicit per-part geometry configuration. Converting a body with Mesh or Colliders into a cluster transfers its primary geometry model to the root part.
+Non-cluster dynamic bodies support `Aerodynamics::Mesh` and `Aerodynamics::Colliders` through `PreparedGeometryCache`, direction-dependent exposed physical patches, and the pressure evaluator. The default pressure policy is unmodified Newtonian impact pressure and requires Mach >= 5; `PhysicsWorld::set_mesh_pressure_model` and `SimulationBuilder::mesh_pressure_model` can explicitly select the documented modified Newtonian compression model for `0 <= Mach <= 5`. Primary atmosphere is sampled at the COM. An optional atmospheric sound-speed profile supplies local values; otherwise `PhysicsWorld::set_mesh_sound_speed` and `SimulationBuilder::mesh_sound_speed` configure the uniform fallback in m/s. The fallback defaults to 340 m/s and is not inferred from density. Both Tokio and Rayon builders apply these settings before service start. Additional explicit surfaces sample their own positions even when the COM is outside the atmosphere. Existing cluster bodies use explicit per-part geometry configuration. Converting a body with Mesh or Colliders into a cluster transfers its primary geometry model to the root part.
 
 Each geometry-bearing primary configuration has a private shared identity token. Replacing a model or the whole `RigidBody` changes identity; world motion, COM edits and edits to other bodies do not. Prepared world entries compare identity before use and discard both the cache and collider-derived mesh on mismatch. The token remains alive in the cached entry, preventing allocator-address ABA. Collider topology and tessellation mutations retain their explicit per-body invalidation. Global motion `body_revision` is no longer used as geometry identity.
 
@@ -80,7 +80,7 @@ One body-wide `ColliderTessellation` applies to collider parts, including its ag
 
 A preparation entry compares instance membership, mesh identity and part-local transforms. Changed unions are prepared in temporary entries and published only on success. Failed preparation does not apply partial forces. Collider transforms are already body-local after conversion and are not applied twice. When collider sources are present, the existing 1e-10 positional welding tolerance is used for closure checks across all instances; it does not move pressure vertices, change source normals or offset shadow rays. Geometry failures retain their `GeometryError` through `AerodynamicsError::Geometry` and its error source.
 
-Part pressure currently retains Mach >= 5, COM atmosphere sampling and centroid rotational-flow quadrature. Vacuum skips preparation. Tests cover ordinary/sharded paths, mixed Mesh/Colliders assemblies, merge/split, overlap ownership, triangle budgets, configuration replacement, preparation errors, cleanup, and runtime commands on Tokio/Rayon. General physical equivalence to FAR is not established; the explicit subsonic hull and wing models below do not supply transonic hull physics.
+Part pressure retains COM atmosphere sampling and centroid rotational-flow quadrature; the world-selected Mesh/Colliders closure applies to primary and part geometry, with the default Newtonian Mach >= 5 policy and the opt-in modified Newtonian `0 <= Mach <= 5` model. Vacuum skips preparation. Tests cover ordinary/sharded paths, mixed Mesh/Colliders assemblies, merge/split, overlap ownership, triangle budgets, configuration replacement, preparation errors, cleanup, and runtime commands on Tokio/Rayon. General physical equivalence to FAR is not established; the explicit subsonic hull and wing models below do not supply transonic hull physics.
 
 ## Conventions
 
@@ -339,11 +339,45 @@ This is a hypersonic impact approximation. It must **not** be represented as FAR
 
 Modified Newtonian theory replaces `2` with a stagnation pressure coefficient; it requires appropriate gas and Mach data. Do not infer those from density alone.
 
+### Modified Newtonian compression below Mach 5
+
+`MeshPressureModel::ModifiedNewtonian` is an explicit opt-in closure for
+`0 <= Mach <= 5`. Select it with `PhysicsWorld::set_mesh_pressure_model` or
+`SimulationBuilder::mesh_pressure_model`; the default remains the unmodified
+Newtonian model above. It keeps the same prepared exposed windward patches and
+uses
+`Cp = Cp_max(M) max(0, n · v_hat)²`, with force
+`F = -0.5 rho |v|² Cp A n` and moment about the COM. Leeward patches carry zero
+excess pressure. This is a compression-only impact model, not a potential-flow
+panel solution.
+
+For calorically perfect air with `gamma = 1.4`, `Cp_max(M)` is the stagnation
+pressure coefficient. Below Mach 1 it follows isentropic stagnation,
+`Cp_max = ((1 + 0.2 M²)^3.5 - 1) / (0.7 M²)`, with the limit one at `M = 0`.
+From Mach 1 through 5 it uses the Rayleigh pitot value behind a normal shock:
+`p2/p1 = (2 gamma M² - (gamma - 1)) / (gamma + 1)`,
+`M2² = ((gamma - 1) M² + 2) / (2 gamma M² - (gamma - 1))`, and
+`Cp_max = ((p2/p1) (1 + 0.2 M2²)^3.5 - 1) / (0.7 M²)`. The branches agree at
+Mach 1 (`Cp_max = 1.275613...`). At Mach 5 the modified value is
+`1.808770...`, while the unmodified default uses `2`; the handoff is a
+coefficient step, not a blended closure. Select one model for a run and do not
+treat Mach 5 as a continuous accuracy boundary.
+
+The model assumes steady uniform flow, attached compression surfaces,
+calorically perfect air and negligible real-gas, rarefaction or viscous effects.
+It does not supply attached-flow suction, a potential-flow lift distribution,
+wake or base flow, friction, interference, shock-boundary-layer interaction or
+experimental accuracy. Above Mach 5 a finite flow returns
+`PressureError::UnsupportedMach` and the world step rolls back atomically.
+Vacuum, zero-area patches and zero relative speed return zero loads after
+motion and sound-speed validation; invalid geometry, motion, sound speed and
+unrepresentable arithmetic are explicit errors.
+
 ### Implemented patch pressure evaluator
 
-`kapitsa::aerodynamics::pressure::PressurePatch` implements the unmodified Newtonian equation above for caller-selected physical surface patches. `PressureFlow` supplies an explicit sound speed, the atmosphere sampled at the patch, the body's rigid transform, body-local COM, and world-space linear/angular velocities. The evaluator computes point velocity `v_COM + omega × r`, subtracts wind, and returns world-space `PressureWrench { force, moment }` about the COM. Patch centers are body-origin-relative, not COM-relative; changing COM does not rebuild patches. Normals are normalized at construction. Evaluation allocates nothing and does not mutate the body.
+`kapitsa::aerodynamics::pressure::PressurePatch` implements the unmodified Newtonian equation above for caller-selected physical surface patches; `evaluate_modified_newtonian` selects the opt-in compression closure described above. `PressureFlow` supplies an explicit sound speed, the atmosphere sampled at the patch, the body's rigid transform, body-local COM, and world-space linear/angular velocities. The evaluator computes point velocity `v_COM + omega × r`, subtracts wind, and returns world-space `PressureWrench { force, moment }` about the COM. Patch centers are body-origin-relative, not COM-relative; changing COM does not rebuild patches. Normals are normalized at construction. Evaluation allocates nothing and does not mutate the body.
 
-For nonzero density, patch area and relative speed, Mach below 5 returns `UnsupportedMach`. This threshold is a declared engineering policy, not a universal accuracy boundary derived from the source. Vacuum, zero-area patches and zero relative speed return zero loads, after validating motion and sound speed. Invalid input and unrepresentable arithmetic are explicit errors.
+For nonzero density, patch area and relative speed, the default unmodified model returns `UnsupportedMach` below Mach 5; the opt-in modified model returns it above Mach 5. These thresholds are declared engineering policies, not universal accuracy boundaries derived from the source. Vacuum, zero-area patches and zero relative speed return zero loads, after validating motion and sound speed. Invalid input and unrepresentable arithmetic are explicit errors.
 
 `PreparedGeometry::surface_triangles(instances, max_work)` transforms source triangles while preserving physical normals. `exposed_surface_patches` partitions windward triangles along the projected edges and depth planes of candidate blockers, then tests the resulting polygon triangles upstream. Coplanar overlap is assigned once, in canonical owner/vertex order. Fully visible source triangles retain their original centroid sampling. Partially visible polygons are triangulated for area and first-moment integration under uniform pressure.
 
@@ -360,7 +394,7 @@ only a necessary consistency check: overlap and missing coverage can cancel.
 A regression with a duplicated half-triangle and a missing half demonstrates
 this limitation. Proving a partition requires additional geometric invariants.
 
-`kapitsa::aerodynamics::pressure::evaluate_prepared_mesh(&PreparedSurfacePatches, PressureFlow)` evaluates each prepared physical patch through `PressurePatch` and returns the checked sum of world-space force and COM moment. It allocates nothing, mutates nothing and returns an error (not a partial wrench) if any patch evaluation or accumulation fails. A single explicit atmospheric state and sound speed are used for the whole set; no atmosphere sampling or per-owner load distribution occurs. Empty sets return zero after motion and sound-speed validation. The existing patch force convention and Mach >= 5 policy are preserved, without a new pressure closure.
+`kapitsa::aerodynamics::pressure::evaluate_prepared_mesh(&PreparedSurfacePatches, PressureFlow)` evaluates each prepared physical patch through `PressurePatch` and returns the checked sum of world-space force and COM moment. It allocates nothing, mutates nothing and returns an error (not a partial wrench) if any patch evaluation or accumulation fails. A single explicit atmospheric state and sound speed are used for the whole set; no atmosphere sampling or per-owner load distribution occurs. Empty sets return zero after motion and sound-speed validation. `evaluate_prepared_mesh` preserves the default unmodified Newtonian Mach >= 5 policy; `evaluate_prepared_mesh_modified_newtonian` applies the documented `0 <= Mach <= 5` compression closure to the same exposed patches. Model-selectable owner and workspace variants use the same closure so staged diagnostics match applied loads.
 
 For explicitly selected base surfaces, `BasePressure::new(cp, min_mach, max_mach)` and `evaluate_prepared_base` provide a separate constant-Cp load primitive. `cp` is nonpositive excess pressure relative to freestream divided by dynamic pressure; the inclusive Mach range and the coefficient must be supplied from data appropriate to the geometry and flow. Force is `-q * cp * area * outward_normal`, with moment about the COM. A patch pointing into its local body-relative velocity is rejected, including under rotation; this necessary orientation check does not identify a base or prove it is exposed. The caller must select actual base surfaces: reversing the visibility direction is not a general wake or base-surface classifier. Nonempty configurations supplied directly through `RigidBody::set_base_pressure_patches` are rejected by world steps; use the index-based APIs below for simulation. The low-level `PressurePatch::evaluate_base` remains available independently. Indexed loads use the same COM atmosphere as mesh impact pressure. Replacing the primary aerodynamic model clears the configuration. Cluster conversion rejects a nonempty configuration before changing topology; cluster bodies and non-Mesh/Colliders models with configured patches return `UnsupportedModel` in air. This approximation does not model wake interaction and is not experimentally validated. It does not change the existing Newtonian impact-pressure policy.
 
@@ -707,7 +741,8 @@ engine does not blend models to hide a domain limit.
 | Prandtl–Glauert wing | caller maximum below Mach 1 | shock onset, wave drag |
 | NDARC wing lift/drag rise | caller maximum; ratio ≤ 1.1 or explicit plateau | general high-supersonic wing model |
 | `WingPolar` | caller Mach/AoA grid only | interpolation outside the table |
-| Mesh/Colliders pressure | Mach ≥ 5 | subsonic/transonic surface pressure |
+| Mesh/Colliders unmodified Newtonian | Mach ≥ 5 | subsonic/transonic pressure; use modified model |
+| Mesh/Colliders modified Newtonian | Mach 0–5 | attached suction/lift, wake, base flow, friction |
 | Base pressure | caller Cp and inclusive Mach range | wake interaction |
 | Incompressible friction | Mach ≤ 0.3 | compressibility, transition above 0.3 |
 | Transitioned flat plate | 500,000 < Re < 100,000,000, Mach ≤ 0.3 | prescribed transition only |
@@ -723,11 +758,12 @@ engine does not blend models to hide a domain limit.
 | Transitional particle | 0.1 ≤ Kn ≤ 10, Re ≤ 45, Mach ≤ 10 | other Kn/Re |
 | `LothParticle` selector | transitional Re ≤ 45, compression Re > 45 | gaps such as Mach 0.22, Re 100 |
 
-Predictive transonic hull drag rise, subsonic/transonic Mesh/Colliders pressure
-below Mach 5, automatic stall or separation, wake/shielding physics beyond
-geometric occlusion, base-flow interaction, surface roughness, high-speed
-transition, real-gas properties and a general supersonic wing lifting model
-remain outside the implemented models. Callers must not treat the table as
+Predictive transonic hull drag rise, potential-flow attached suction or lift
+for Mesh/Colliders, wake/shielding physics beyond geometric occlusion,
+base-flow interaction, surface roughness, high-speed transition, real-gas
+properties and a general supersonic wing lifting model remain outside the
+implemented models. The modified Newtonian Mesh/Colliders closure supplies
+compression pressure only; it does not constitute a subsonic panel solution. Callers must not treat the table as
 evidence of accuracy outside each cited correlation's tested conditions.
 
 The friction rows are separate opt-ins, not a stitched continuous closure.

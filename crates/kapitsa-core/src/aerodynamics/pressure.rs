@@ -7,6 +7,13 @@
 //! Callers must supply exposed original-surface normals and areas. In particular,
 //! voxel staircase normals are not a consistent replacement for smooth normals.
 //! Overlap removal and upstream shielding are the caller's responsibility.
+//!
+//! [`MeshPressureModel::ModifiedNewtonian`] is a separate opt-in compression
+//! model for `0 <= Mach <= 5`. It keeps the same exposed-patch geometry and the
+//! impact form `Cp = Cp_max(M) sin²(theta)`, but derives `Cp_max` from
+//! isentropic stagnation pressure below Mach 1 and Rayleigh pitot pressure
+//! through Mach 5. It is not a potential-flow, lifting, suction, wake or
+//! viscous model; leeward pressure remains zero.
 
 use super::{AtmosphericState, geometry::PreparedSurfacePatches};
 use crate::transform::Transform;
@@ -26,10 +33,27 @@ pub enum PressureError {
 }
 impl fmt::Display for PressureError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Newtonian pressure evaluation failed: {self:?}")
+        write!(f, "surface pressure evaluation failed: {self:?}")
     }
 }
 impl std::error::Error for PressureError {}
+
+/// Selects the surface-pressure closure used for Mesh/Colliders geometry.
+///
+/// `Newtonian` is the existing unmodified hypersonic impact model and requires
+/// Mach >= 5. `ModifiedNewtonian` is the compression-only extension in
+/// `0 <= Mach <= 5`; it still uses exposed windward patches and returns an
+/// error above Mach 5. The default preserves existing behavior.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MeshPressureModel {
+    /// Unmodified Newtonian impact pressure, `Cp = 2 sin²(theta)`, Mach >= 5.
+    #[default]
+    Newtonian,
+    /// Modified Newtonian compression pressure, `Cp = Cp_max(M) sin²(theta)`,
+    /// with `Cp_max` from isentropic or Rayleigh-pitot stagnation pressure.
+    /// Leeward suction, wake, friction, base flow and circulation are absent.
+    ModifiedNewtonian,
+}
 
 fn same_triangle(a: &[Vec3; 3], b: &[Vec3; 3]) -> bool {
     (0..3).any(|shift| {
@@ -322,6 +346,8 @@ pub struct SurfacePressure {
 /// Maximum Mach accepted by the incompressible potential-flow approximation.
 /// This conservative policy is not an experimental accuracy guarantee.
 const POTENTIAL_FLOW_MAX_MACH: f64 = 0.2;
+/// Maximum Mach accepted by the opt-in modified Newtonian compression model.
+const MODIFIED_NEWTONIAN_MAX_MACH: f64 = 5.0;
 /// Squared surface-speed ratio at the equator of an ideal sphere.
 const SPHERE_EQUATORIAL_SPEED_RATIO_SQUARED: f64 = 2.25;
 /// Squared surface-speed ratio at the side of an ideal circular cylinder.
@@ -516,8 +542,33 @@ impl PressurePatch {
     /// Evaluates a centroid load sample; supply atmosphere sampled at this patch.
     /// COM is body-local; velocities, force and moment are world-space.
     /// No allocation, geometry preparation or body mutation occurs here.
+    /// This is the unmodified Newtonian model and retains its Mach >= 5 domain.
     pub fn evaluate(&self, flow: PressureFlow) -> Result<PressureWrench, crate::Error> {
-        self.evaluate_inner(flow, None)
+        self.evaluate_inner(flow, None, MeshPressureModel::Newtonian)
+    }
+
+    /// Modified Newtonian compression pressure for `0 <= Mach <= 5`.
+    ///
+    /// The geometry and exposure conventions are identical to [`Self::evaluate`].
+    /// `Cp = Cp_max(M) sin²(theta)` with isentropic stagnation pressure below
+    /// Mach 1 and Rayleigh pitot pressure from Mach 1 to 5. Air is assumed to be
+    /// calorically perfect with `gamma = 1.4`. Leeward pressure, suction, wake,
+    /// friction, base flow and circulation are not modeled. A finite Mach above
+    /// 5 returns [`PressureError::UnsupportedMach`]; select the unmodified model
+    /// for hypersonic flow instead.
+    pub fn evaluate_modified_newtonian(
+        &self,
+        flow: PressureFlow,
+    ) -> Result<PressureWrench, crate::Error> {
+        self.evaluate_inner(flow, None, MeshPressureModel::ModifiedNewtonian)
+    }
+
+    pub(crate) fn evaluate_with_model(
+        &self,
+        flow: PressureFlow,
+        model: MeshPressureModel,
+    ) -> Result<PressureWrench, crate::Error> {
+        self.evaluate_inner(flow, None, model)
     }
 
     /// Applies a caller-supplied constant base Cp to this explicitly selected
@@ -529,7 +580,11 @@ impl PressurePatch {
         flow: PressureFlow,
         base: BasePressure,
     ) -> Result<PressureWrench, crate::Error> {
-        self.evaluate_inner(flow, Some(ExplicitPressure::Base(base)))
+        self.evaluate_inner(
+            flow,
+            Some(ExplicitPressure::Base(base)),
+            MeshPressureModel::Newtonian,
+        )
     }
 
     /// Applies a supplied signed Cp without inferring exposure or wake physics.
@@ -539,13 +594,18 @@ impl PressurePatch {
         flow: PressureFlow,
         pressure: SurfacePressure,
     ) -> Result<PressureWrench, crate::Error> {
-        self.evaluate_inner(flow, Some(ExplicitPressure::Surface(pressure)))
+        self.evaluate_inner(
+            flow,
+            Some(ExplicitPressure::Surface(pressure)),
+            MeshPressureModel::Newtonian,
+        )
     }
 
     fn evaluate_inner(
         &self,
         flow: PressureFlow,
         explicit: Option<ExplicitPressure>,
+        model: MeshPressureModel,
     ) -> Result<PressureWrench, crate::Error> {
         if !flow.center_of_mass.is_finite()
             || !flow.linear_velocity.is_finite()
@@ -592,8 +652,20 @@ impl PressurePatch {
             Some(ExplicitPressure::Surface(p)) => Some((p.min_mach, p.max_mach)),
             None => None,
         };
-        if domain.map_or(mach < 5.0, |(min, max)| mach < min || mach > max) {
-            return Err(crate::Error::from(PressureError::UnsupportedMach));
+        if let Some((min, max)) = domain {
+            if mach < min || mach > max {
+                return Err(crate::Error::from(PressureError::UnsupportedMach));
+            }
+        } else {
+            match model {
+                MeshPressureModel::Newtonian if mach < 5.0 => {
+                    return Err(crate::Error::from(PressureError::UnsupportedMach));
+                }
+                MeshPressureModel::ModifiedNewtonian if mach > MODIFIED_NEWTONIAN_MAX_MACH => {
+                    return Err(crate::Error::from(PressureError::UnsupportedMach));
+                }
+                _ => {}
+            }
         }
         if let Some(explicit) = explicit {
             let cp = match explicit {
@@ -638,22 +710,75 @@ impl PressurePatch {
         // The factors 1/2 in dynamic pressure and 2 in Newtonian Cp cancel.
         // Scale the complete product so an unrepresentable intermediate pressure
         // does not reject a representable force on a small patch.
-        let magnitude = super::hull::scaled_product(
-            &[
-                flow.atmosphere.density(),
-                speed,
-                speed,
-                incidence,
-                incidence,
-                self.area,
-            ],
-            1.0,
-        )
+        let magnitude = match model {
+            MeshPressureModel::Newtonian => super::hull::scaled_product(
+                &[
+                    flow.atmosphere.density(),
+                    speed,
+                    speed,
+                    incidence,
+                    incidence,
+                    self.area,
+                ],
+                1.0,
+            ),
+            MeshPressureModel::ModifiedNewtonian => {
+                let cp_max = modified_newtonian_stagnation_cp(mach)?;
+                super::hull::scaled_product(
+                    &[
+                        0.5,
+                        flow.atmosphere.density(),
+                        speed,
+                        speed,
+                        cp_max,
+                        incidence,
+                        incidence,
+                        self.area,
+                    ],
+                    1.0,
+                )
+            }
+        }
         .map_err(|_| overflow)?;
         let force = normal.checked_mul_scalar(-magnitude).ok_or(overflow)?;
         let moment = arm.checked_cross(force).ok_or(overflow)?;
         Ok(PressureWrench { force, moment })
     }
+}
+
+/// Stagnation pressure coefficient for calorically perfect air (`gamma = 1.4`).
+///
+/// Below Mach 1 this is the isentropic stagnation value; from Mach 1 through 5
+/// it is the Rayleigh pitot value behind a normal shock. At `M = 0` the limit is
+/// one. The caller validates the Mach domain before calling this helper.
+fn modified_newtonian_stagnation_cp(mach: f64) -> Result<f64, crate::Error> {
+    const AIR_GAMMA: f64 = 1.4;
+    const EXPONENT: f64 = AIR_GAMMA / (AIR_GAMMA - 1.0);
+    if !mach.is_finite() || mach < 0.0 {
+        return Err(crate::Error::from(PressureError::UnsupportedMach));
+    }
+    if mach == 0.0 {
+        return Ok(1.0);
+    }
+    let mach_squared = mach * mach;
+    let stagnation_over_static = if mach < 1.0 {
+        (1.0 + 0.5 * (AIR_GAMMA - 1.0) * mach_squared).powf(EXPONENT)
+    } else {
+        let shock_denominator = 2.0 * AIR_GAMMA * mach_squared - (AIR_GAMMA - 1.0);
+        if !shock_denominator.is_finite() || shock_denominator <= 0.0 {
+            return Err(crate::Error::from(PressureError::ArithmeticOverflow));
+        }
+        let downstream_mach_squared = ((AIR_GAMMA - 1.0) * mach_squared + 2.0) / shock_denominator;
+        let static_ratio = shock_denominator / (AIR_GAMMA + 1.0);
+        let total_ratio = (1.0 + 0.5 * (AIR_GAMMA - 1.0) * downstream_mach_squared).powf(EXPONENT);
+        static_ratio * total_ratio
+    };
+    let dynamic_over_static = 0.5 * AIR_GAMMA * mach_squared;
+    let coefficient = (stagnation_over_static - 1.0) / dynamic_over_static;
+    coefficient
+        .is_finite()
+        .then_some(coefficient)
+        .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))
 }
 
 /// Sums centroid pressure loads over prepared physical mesh patches.
@@ -673,7 +798,24 @@ pub fn evaluate_prepared_mesh(
     patches: &PreparedSurfacePatches,
     flow: PressureFlow,
 ) -> Result<PressureWrench, crate::Error> {
-    evaluate_prepared(patches, flow, None)
+    evaluate_prepared(patches, flow, None, MeshPressureModel::Newtonian)
+}
+
+/// Evaluates the opt-in modified Newtonian compression model over prepared
+/// patches, in world coordinates and about the common body COM.
+///
+/// The model is valid for `0 <= Mach <= 5` and uses the same exposure and
+/// overlap geometry as [`evaluate_prepared_mesh`]. It is compression-only:
+/// windward patches receive `Cp = Cp_max(M) sin²(theta)` and leeward patches
+/// receive zero. This is not a potential-flow or wake solver, and it does not
+/// add suction, friction, base pressure or circulation. A finite Mach above 5
+/// returns [`PressureError::UnsupportedMach`]. Empty sets return zero after
+/// validating motion and sound speed. No allocation or geometry mutation occurs.
+pub fn evaluate_prepared_mesh_modified_newtonian(
+    patches: &PreparedSurfacePatches,
+    flow: PressureFlow,
+) -> Result<PressureWrench, crate::Error> {
+    evaluate_prepared(patches, flow, None, MeshPressureModel::ModifiedNewtonian)
 }
 
 /// Returns the impact-pressure wrench of one geometry owner about the common
@@ -686,9 +828,21 @@ pub fn evaluate_prepared_mesh_owner(
     flow: PressureFlow,
     owner: super::geometry::GeometryOwner,
 ) -> Result<PressureWrench, crate::Error> {
-    let mut total = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
+    evaluate_prepared_mesh_owner_with_model(patches, flow, owner, MeshPressureModel::Newtonian)
+}
+
+/// Model-selectable variant of [`evaluate_prepared_mesh_owner`].
+pub fn evaluate_prepared_mesh_owner_with_model(
+    patches: &PreparedSurfacePatches,
+    flow: PressureFlow,
+    owner: super::geometry::GeometryOwner,
+    model: MeshPressureModel,
+) -> Result<PressureWrench, crate::Error> {
+    let mut total =
+        PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate_with_model(flow, model)?;
     for patch in patches.iter().filter(|patch| patch.owner == owner) {
-        let load = PressurePatch::new(patch.center, patch.normal, patch.area)?.evaluate(flow)?;
+        let load = PressurePatch::new(patch.center, patch.normal, patch.area)?
+            .evaluate_with_model(flow, model)?;
         total.force = total
             .force
             .checked_add(load.force)
@@ -711,10 +865,20 @@ pub fn evaluate_prepared_mesh_by_owner(
     patches: &PreparedSurfacePatches,
     flow: PressureFlow,
 ) -> Result<Vec<(super::geometry::GeometryOwner, PressureWrench)>, crate::Error> {
-    let zero = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
+    evaluate_prepared_mesh_by_owner_with_model(patches, flow, MeshPressureModel::Newtonian)
+}
+
+/// Model-selectable variant of [`evaluate_prepared_mesh_by_owner`].
+pub fn evaluate_prepared_mesh_by_owner_with_model(
+    patches: &PreparedSurfacePatches,
+    flow: PressureFlow,
+    model: MeshPressureModel,
+) -> Result<Vec<(super::geometry::GeometryOwner, PressureWrench)>, crate::Error> {
+    let zero = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate_with_model(flow, model)?;
     let mut totals = std::collections::BTreeMap::new();
     for patch in patches.iter() {
-        let load = PressurePatch::new(patch.center, patch.normal, patch.area)?.evaluate(flow)?;
+        let load = PressurePatch::new(patch.center, patch.normal, patch.area)?
+            .evaluate_with_model(flow, model)?;
         let total: &mut PressureWrench = totals.entry(patch.owner).or_insert(zero);
         total.force = total
             .force
@@ -736,6 +900,7 @@ pub fn evaluate_prepared_mesh_by_owner(
 pub struct OwnerPressureWorkspace {
     published: Vec<(super::geometry::GeometryOwner, PressureWrench)>,
     scratch: Vec<(super::geometry::GeometryOwner, PressureWrench)>,
+    pressure_model: MeshPressureModel,
     prepared: bool,
     scratch_total: PressureWrench,
 }
@@ -757,9 +922,24 @@ impl OwnerPressureWorkspace {
         Some(Self {
             scratch: published.clone(),
             published,
+            pressure_model: MeshPressureModel::Newtonian,
             prepared: false,
             scratch_total: zero,
         })
+    }
+
+    /// Selects the closure used by subsequent preparations. Changing the model
+    /// invalidates any staged result but preserves the last published result.
+    pub fn set_pressure_model(&mut self, model: MeshPressureModel) {
+        if self.pressure_model != model {
+            self.prepared = false;
+            self.pressure_model = model;
+        }
+    }
+
+    /// Current closure used by [`Self::prepare`].
+    pub fn pressure_model(&self) -> MeshPressureModel {
+        self.pressure_model
     }
 
     /// Last successful complete result; initially all configured loads are zero.
@@ -822,7 +1002,8 @@ impl OwnerPressureWorkspace {
         flow: PressureFlow,
     ) -> Result<(), crate::Error> {
         self.prepared = false;
-        let zero = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
+        let zero = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?
+            .evaluate_with_model(flow, self.pressure_model)?;
         self.scratch_total = zero;
         for (_, wrench) in &mut self.scratch {
             *wrench = zero;
@@ -832,8 +1013,8 @@ impl OwnerPressureWorkspace {
                 .scratch
                 .binary_search_by_key(&patch.owner, |entry| entry.0)
                 .map_err(|_| crate::Error::from(PressureError::InvalidPatch))?;
-            let load =
-                PressurePatch::new(patch.center, patch.normal, patch.area)?.evaluate(flow)?;
+            let load = PressurePatch::new(patch.center, patch.normal, patch.area)?
+                .evaluate_with_model(flow, self.pressure_model)?;
             self.scratch_total.force = self
                 .scratch_total
                 .force
@@ -883,7 +1064,12 @@ pub fn evaluate_prepared_base(
     flow: PressureFlow,
     base: BasePressure,
 ) -> Result<PressureWrench, crate::Error> {
-    evaluate_prepared(patches, flow, Some(ExplicitPressure::Base(base)))
+    evaluate_prepared(
+        patches,
+        flow,
+        Some(ExplicitPressure::Base(base)),
+        MeshPressureModel::Newtonian,
+    )
 }
 
 /// Applies an explicitly supplied signed Cp to selected mesh- or collider-derived
@@ -895,19 +1081,26 @@ pub fn evaluate_prepared_surface(
     flow: PressureFlow,
     pressure: SurfacePressure,
 ) -> Result<PressureWrench, crate::Error> {
-    evaluate_prepared(patches, flow, Some(ExplicitPressure::Surface(pressure)))
+    evaluate_prepared(
+        patches,
+        flow,
+        Some(ExplicitPressure::Surface(pressure)),
+        MeshPressureModel::Newtonian,
+    )
 }
 
 fn evaluate_prepared(
     patches: &PreparedSurfacePatches,
     flow: PressureFlow,
     explicit: Option<ExplicitPressure>,
+    model: MeshPressureModel,
 ) -> Result<PressureWrench, crate::Error> {
     // Validate even an empty set, using the same rules as patch evaluation.
-    let mut total = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
+    let mut total =
+        PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate_with_model(flow, model)?;
     for patch in patches.iter() {
         let load = PressurePatch::new(patch.center, patch.normal, patch.area)?
-            .evaluate_inner(flow, explicit)?;
+            .evaluate_inner(flow, explicit, model)?;
         total.force = total
             .force
             .checked_add(load.force)

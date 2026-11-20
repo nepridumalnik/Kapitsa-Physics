@@ -12,6 +12,7 @@ pub mod wave;
 pub mod wing;
 pub use atmosphere::{Atmosphere, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder};
 pub use colliders::ColliderTessellation;
+pub use pressure::MeshPressureModel;
 
 use std::fmt;
 

@@ -485,6 +485,92 @@ fn limits_vacuum_zero_speed_and_mach_boundary() {
 }
 
 #[test]
+fn modified_newtonian_covers_zero_through_mach_five() {
+    let patch = PressurePatch::new(Vec3::ZERO, Vec3::X, 2.0).unwrap();
+    for (mach, expected_cp) in [
+        (0.3, 1.022_702_954_808_543_1),
+        (0.5, 1.064_072_217_396_561_5),
+        (0.95, 1.246_439_147_762_104_6),
+        (1.0, 1.275_613_083_911_22),
+        (2.0, 1.657_300_290_294_042),
+        (5.0, 1.808_769_960_702_756_8),
+    ] {
+        let speed = 100.0 * mach;
+        let load = patch
+            .evaluate_modified_newtonian(PressureFlow {
+                linear_velocity: Vec3::X * speed,
+                ..flow()
+            })
+            .unwrap();
+        let expected = -0.5 * (100.0 * mach).powi(2) * expected_cp * 2.0;
+        assert!(
+            (load.force.x / expected - 1.0).abs() < 1e-12,
+            "mach={mach}: {:?} != {expected}",
+            load.force
+        );
+        assert_eq!((load.force.y, load.force.z), (0.0, 0.0));
+        assert_eq!(load.moment, Vec3::ZERO);
+    }
+    assert_eq!(modified_newtonian_stagnation_cp(0.0).unwrap(), 1.0);
+    // The Mach 1 isentropic and pitot limits agree.
+    assert!((modified_newtonian_stagnation_cp(1.0).unwrap() - 1.275_613_083_911_22).abs() < 1e-15);
+
+    // The model rejects the hypersonic branch and leaves that to Newtonian.
+    assert_eq!(
+        patch.evaluate_modified_newtonian(PressureFlow {
+            linear_velocity: Vec3::X * 500.1,
+            ..flow()
+        }),
+        Err(crate::Error::from(PressureError::UnsupportedMach))
+    );
+    // Leeward and zero-speed patches carry no load.
+    assert_eq!(
+        patch
+            .evaluate_modified_newtonian(PressureFlow {
+                linear_velocity: -Vec3::X * 100.0,
+                ..flow()
+            })
+            .unwrap()
+            .force,
+        Vec3::ZERO
+    );
+    assert_eq!(
+        patch
+            .evaluate_modified_newtonian(PressureFlow {
+                linear_velocity: Vec3::ZERO,
+                ..flow()
+            })
+            .unwrap()
+            .force,
+        Vec3::ZERO
+    );
+    // Incidence enters as sin²(theta).
+    let oblique = PressurePatch::new(
+        Vec3::ZERO,
+        Vec3::new(
+            std::f64::consts::FRAC_1_SQRT_2,
+            std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+        ),
+        2.0,
+    )
+    .unwrap();
+    let oblique_load = oblique
+        .evaluate_modified_newtonian(PressureFlow {
+            linear_velocity: Vec3::X * 30.0,
+            ..flow()
+        })
+        .unwrap();
+    let along = patch
+        .evaluate_modified_newtonian(PressureFlow {
+            linear_velocity: Vec3::X * 30.0,
+            ..flow()
+        })
+        .unwrap();
+    assert!((oblique_load.force.length() / (along.force.length() * 0.5) - 1.0).abs() < 1e-12);
+}
+
+#[test]
 fn rejects_invalid_input_and_overflow_without_mutation() {
     assert_eq!(
         PressurePatch::new(Vec3::ZERO, Vec3::ZERO, 1.0),

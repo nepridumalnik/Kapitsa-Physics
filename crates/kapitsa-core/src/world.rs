@@ -142,11 +142,14 @@ mod aerodynamics {
                     },
                     &mut body,
                     &world.parts,
-                    super::AerodynamicsInputs::new(world.mesh_sound_speed)
-                        .with_base_pressure(&entry.body.base_pressure_patches)
-                        .with_cluster(entry.cluster.as_ref())
-                        .with_assembly(patches.as_ref())
-                        .with_voxel_wave(voxel_wave.as_ref()),
+                    super::AerodynamicsInputs::new(
+                        world.mesh_sound_speed,
+                        world.mesh_pressure_model,
+                    )
+                    .with_base_pressure(&entry.body.base_pressure_patches)
+                    .with_cluster(entry.cluster.as_ref())
+                    .with_assembly(patches.as_ref())
+                    .with_voxel_wave(voxel_wave.as_ref()),
                 )?;
             }
             Ok(())
@@ -567,6 +570,7 @@ struct PreparedAerodynamicLoads {
 /// Borrowed inputs prepared before aerodynamic loads are evaluated.
 struct AerodynamicsInputs<'a> {
     mesh_sound_speed: f64,
+    mesh_pressure_model: crate::aerodynamics::pressure::MeshPressureModel,
     cluster: Option<&'a RigidCluster>,
     dt: Option<f64>,
     mesh_patches: Option<&'a crate::aerodynamics::geometry::PreparedSurfacePatches>,
@@ -586,9 +590,13 @@ struct AerodynamicsInputs<'a> {
 }
 
 impl<'a> AerodynamicsInputs<'a> {
-    fn new(mesh_sound_speed: f64) -> Self {
+    fn new(
+        mesh_sound_speed: f64,
+        mesh_pressure_model: crate::aerodynamics::pressure::MeshPressureModel,
+    ) -> Self {
         Self {
             mesh_sound_speed,
+            mesh_pressure_model,
             cluster: None,
             dt: None,
             mesh_patches: None,
@@ -850,9 +858,11 @@ pub struct PhysicsWorld {
     part_gravity_published: Vec<PartGravityWrench>,
     part_gravity_pending: Vec<PartGravityWrench>,
     atmosphere: Atmosphere,
-    /// Sound speed used by the Newtonian mesh pressure model (m/s).
+    /// Sound speed used by the Mesh/Colliders pressure models (m/s).
     /// The default is 340 m/s; callers should set this for their atmosphere.
     mesh_sound_speed: f64,
+    /// Surface-pressure closure for primary and assembly Mesh/Colliders loads.
+    mesh_pressure_model: crate::aerodynamics::pressure::MeshPressureModel,
     preserve_body_mesh_cavities: bool,
     preserve_assembly_mesh_cavities: bool,
     aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
@@ -1584,6 +1594,7 @@ impl PhysicsWorld {
             part_gravity_pending: Vec::new(),
             atmosphere: Atmosphere::Vacuum,
             mesh_sound_speed: 340.0,
+            mesh_pressure_model: crate::aerodynamics::pressure::MeshPressureModel::Newtonian,
             preserve_body_mesh_cavities: false,
             preserve_assembly_mesh_cavities: false,
             aerodynamics_body_updates: Vec::new(),
@@ -1677,6 +1688,29 @@ impl PhysicsWorld {
     /// Returns the uniform Mesh/Colliders sound speed in m/s.
     pub fn mesh_sound_speed(&self) -> f64 {
         self.mesh_sound_speed
+    }
+
+    /// Selects the surface-pressure closure for primary and part-owned
+    /// Mesh/Colliders geometry. The default is unmodified Newtonian impact
+    /// pressure, which requires Mach >= 5.
+    ///
+    /// [`crate::aerodynamics::MeshPressureModel::ModifiedNewtonian`] enables
+    /// the compression-only extension for `0 <= Mach <= 5`. It uses the same
+    /// prepared exposure geometry and does not add suction, wake, friction,
+    /// base pressure or circulation. Changing the model does not invalidate
+    /// prepared geometry; the next aerodynamic evaluation uses the new closure.
+    /// A body above the selected model's Mach domain returns an explicit
+    /// pressure error and rolls back its step.
+    pub fn set_mesh_pressure_model(
+        &mut self,
+        model: crate::aerodynamics::pressure::MeshPressureModel,
+    ) {
+        self.mesh_pressure_model = model;
+    }
+
+    /// Returns the current Mesh/Colliders surface-pressure closure.
+    pub fn mesh_pressure_model(&self) -> crate::aerodynamics::pressure::MeshPressureModel {
+        self.mesh_pressure_model
     }
 
     /// Selects triangles from one attached collider's current tessellation.
@@ -3329,6 +3363,7 @@ impl PhysicsWorld {
     ) -> Result<(), Error> {
         let AerodynamicsInputs {
             mesh_sound_speed,
+            mesh_pressure_model,
             cluster,
             dt,
             mesh_patches,
@@ -3464,10 +3499,17 @@ impl PhysicsWorld {
             let wrench = if let Some(patches) = sphere_patches {
                 crate::aerodynamics::pressure::evaluate_potential_sphere_patches(patches, flow)
             } else {
-                crate::aerodynamics::pressure::evaluate_prepared_mesh(
-                    mesh_patches.ok_or_else(error)?,
-                    flow,
-                )
+                let patches = mesh_patches.ok_or_else(error)?;
+                match mesh_pressure_model {
+                    crate::aerodynamics::pressure::MeshPressureModel::Newtonian => {
+                        crate::aerodynamics::pressure::evaluate_prepared_mesh(patches, flow)
+                    }
+                    crate::aerodynamics::pressure::MeshPressureModel::ModifiedNewtonian => {
+                        crate::aerodynamics::pressure::evaluate_prepared_mesh_modified_newtonian(
+                            patches, flow,
+                        )
+                    }
+                }
             }
             .map_err(|cause| StepError::Aerodynamics {
                 body_id,
@@ -4492,20 +4534,21 @@ impl PhysicsWorld {
                                     update.id,
                                     &mut update.prepared,
                                     &self.parts,
-                                    AerodynamicsInputs::new(self.mesh_sound_speed)
-                                        .with_base_pressure(&entry.body.base_pressure_patches)
-                                        .with_cluster(entry.cluster.as_ref())
-                                        .with_timestep(Some(dt))
-                                        .with_loads(&update.loads)
-                                        .with_part_hull_wrenches(&mut update.part_hull_wrenches)
-                                        .with_part_wing_wrenches(&mut update.part_wing_wrenches)
-                                        .with_simple_surface_correction(
-                                            &mut update.simple_surface_correction,
-                                        )
-                                        .with_raw_simple_surfaces(&mut update.raw_simple_surfaces)
-                                        .with_applied_mesh_pressure(
-                                            &mut update.applied_mesh_pressure,
-                                        ),
+                                    AerodynamicsInputs::new(
+                                        self.mesh_sound_speed,
+                                        self.mesh_pressure_model,
+                                    )
+                                    .with_base_pressure(&entry.body.base_pressure_patches)
+                                    .with_cluster(entry.cluster.as_ref())
+                                    .with_timestep(Some(dt))
+                                    .with_loads(&update.loads)
+                                    .with_part_hull_wrenches(&mut update.part_hull_wrenches)
+                                    .with_part_wing_wrenches(&mut update.part_wing_wrenches)
+                                    .with_simple_surface_correction(
+                                        &mut update.simple_surface_correction,
+                                    )
+                                    .with_raw_simple_surfaces(&mut update.raw_simple_surfaces)
+                                    .with_applied_mesh_pressure(&mut update.applied_mesh_pressure),
                                 )
                             })
                             .unwrap_or(Ok(()))
@@ -4624,6 +4667,7 @@ impl PhysicsWorld {
                         .ok_or_else(error)?,
                 ),
             };
+            workspace.set_pressure_model(self.mesh_pressure_model);
             workspace
                 .configure_pending(&self.owner_pressure_owners)
                 .and_then(|()| workspace.prepare(patches, flow))
@@ -5995,10 +6039,13 @@ impl PhysicsWorld {
                             step.error = local_wave
                                 .and_then(|local_wave| {
                                     local_assembly.and_then(|local_assembly| {
-                                        let inputs = AerodynamicsInputs::new(self.mesh_sound_speed)
-                                            .with_base_pressure(&entry.body.base_pressure_patches)
-                                            .with_cluster(entry.cluster.as_ref())
-                                            .with_timestep(dt);
+                                        let inputs = AerodynamicsInputs::new(
+                                            self.mesh_sound_speed,
+                                            self.mesh_pressure_model,
+                                        )
+                                        .with_base_pressure(&entry.body.base_pressure_patches)
+                                        .with_cluster(entry.cluster.as_ref())
+                                        .with_timestep(dt);
                                         let inputs = if let Some(update) = staged {
                                             inputs.with_loads(&update.loads)
                                         } else {

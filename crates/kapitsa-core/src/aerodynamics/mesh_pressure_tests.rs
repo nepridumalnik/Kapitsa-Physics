@@ -62,6 +62,54 @@ fn close(actual: Vec3, expected: Vec3) {
 }
 
 #[test]
+fn prepared_modified_newtonian_matches_patch_and_owner_models()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]])?;
+    let patches = prepare(&mesh, Vec3::X);
+    assert_eq!(patches.len(), 1);
+    let mut input = flow();
+    input.sound_speed = 340.0;
+    input.linear_velocity = Vec3::X * 100.0;
+    let total = evaluate_prepared_mesh_modified_newtonian(&patches, input)?;
+    let only = patches.iter().next().ok_or("patch")?;
+    let patch = PressurePatch::new(only.center, only.normal, only.area)?;
+    let expected = patch.evaluate_modified_newtonian(input)?;
+    close(total.force, expected.force);
+    close(total.moment, expected.moment);
+    assert!(total.force.x < 0.0);
+
+    let by_owner = evaluate_prepared_mesh_by_owner_with_model(
+        &patches,
+        input,
+        MeshPressureModel::ModifiedNewtonian,
+    )?;
+    assert_eq!(by_owner.len(), 1);
+    assert_eq!(by_owner[0].0, GeometryOwner::Body);
+    close(by_owner[0].1.force, total.force);
+    close(by_owner[0].1.moment, total.moment);
+
+    let mut workspace = OwnerPressureWorkspace::new(&[GeometryOwner::Body]).ok_or("owners")?;
+    workspace.set_pressure_model(MeshPressureModel::ModifiedNewtonian);
+    workspace.prepare(&patches, input)?;
+    let staged = workspace.staged_total()?.ok_or("staged")?;
+    close(staged.force, total.force);
+    close(staged.moment, total.moment);
+
+    let mut hypersonic = input;
+    hypersonic.sound_speed = 10.0;
+    assert_eq!(
+        evaluate_prepared_mesh_modified_newtonian(&patches, hypersonic),
+        Err(crate::Error::from(PressureError::UnsupportedMach))
+    );
+    // The default model still rejects this subsonic prepared set.
+    assert_eq!(
+        evaluate_prepared_mesh(&patches, input),
+        Err(crate::Error::from(PressureError::UnsupportedMach))
+    );
+    Ok(())
+}
+
+#[test]
 fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::{mass::MassProperties, rigid_body::RigidBody, world::PhysicsWorld};

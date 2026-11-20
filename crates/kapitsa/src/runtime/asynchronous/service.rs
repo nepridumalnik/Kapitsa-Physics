@@ -168,6 +168,7 @@ impl OwnedRuntime {
 pub struct SimulationBuilder {
     atmosphere: Atmosphere,
     mesh_sound_speed: Option<f64>,
+    mesh_pressure_model: Option<kapitsa_core::aerodynamics::pressure::MeshPressureModel>,
     oriented_aerodynamic_cavities: bool,
     config: SimulationConfig,
     invalid_worker_count: bool,
@@ -239,6 +240,18 @@ impl SimulationBuilder {
         self
     }
 
+    /// Selects the Mesh/Colliders pressure closure before startup.
+    /// The default is [`kapitsa_core::aerodynamics::MeshPressureModel::Newtonian`],
+    /// which requires Mach >= 5. `ModifiedNewtonian` enables the documented
+    /// compression-only model for `0 <= Mach <= 5`.
+    pub fn mesh_pressure_model(
+        mut self,
+        model: kapitsa_core::aerodynamics::pressure::MeshPressureModel,
+    ) -> Self {
+        self.mesh_pressure_model = Some(model);
+        self
+    }
+
     /// Preserves resolved cavities bounded by oppositely oriented walls in
     /// body and assembly aerodynamic meshes. Defaults to `false` (solid fill).
     /// Example: `Simulation::builder().oriented_aerodynamic_cavities(true)`.
@@ -285,6 +298,9 @@ impl SimulationBuilder {
                 .set_mesh_sound_speed(sound_speed)
                 .map_err(SimulationError::InvalidMeshSoundSpeed)?;
         }
+        if let Some(model) = self.mesh_pressure_model {
+            world.set_mesh_pressure_model(model);
+        }
         let mut simulation = Simulation::new_with_world(world, self.config)?;
         simulation.set_time_horizon(self.time_horizon);
         simulation.start()?;
@@ -309,6 +325,9 @@ impl SimulationBuilder {
             world
                 .set_mesh_sound_speed(sound_speed)
                 .map_err(SimulationError::InvalidMeshSoundSpeed)?;
+        }
+        if let Some(model) = self.mesh_pressure_model {
+            world.set_mesh_pressure_model(model);
         }
         let (owned_runtime, runtime) = OwnedRuntime::start()?;
         let runner =
@@ -1377,6 +1396,9 @@ mod tests {
                 .frequency(100)
                 .time_horizon(Duration::ZERO)
                 .mesh_sound_speed(295.0)
+                .mesh_pressure_model(
+                    kapitsa_core::aerodynamics::MeshPressureModel::ModifiedNewtonian,
+                )
                 .oriented_aerodynamic_cavities(true);
             let mut simulation = if rayon {
                 builder.spawn_on_rayon(std::sync::Arc::new(
@@ -1409,6 +1431,10 @@ mod tests {
                 .ok_or("missing stopped simulation")?;
             assert_eq!(runner.world()?.atmosphere(), atmosphere);
             assert_eq!(runner.world()?.mesh_sound_speed(), 295.0);
+            assert_eq!(
+                runner.world()?.mesh_pressure_model(),
+                kapitsa_core::aerodynamics::MeshPressureModel::ModifiedNewtonian
+            );
             assert_eq!(runner.world()?.central_gravity(), None);
         }
         Ok(())

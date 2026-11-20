@@ -284,7 +284,8 @@ fn part_wings_match_body_wings_after_mass_merge_split_and_root_deletion()
             first,
             &mut actual_loads,
             &world.parts,
-            AerodynamicsInputs::new(world.mesh_sound_speed).with_cluster(entry.cluster.as_ref()),
+            AerodynamicsInputs::new(world.mesh_sound_speed, world.mesh_pressure_model)
+                .with_cluster(entry.cluster.as_ref()),
         )?;
         PhysicsWorld::apply_aerodynamics(
             world.atmosphere(),
@@ -293,7 +294,7 @@ fn part_wings_match_body_wings_after_mass_merge_split_and_root_deletion()
             first,
             &mut expected_loads,
             &world.parts,
-            AerodynamicsInputs::new(world.mesh_sound_speed),
+            AerodynamicsInputs::new(world.mesh_sound_speed, world.mesh_pressure_model),
         )?;
         assert!((actual_loads.forces().force() - expected_loads.forces().force()).length() < 1e-12);
         assert!(
