@@ -4,8 +4,105 @@ use kapitsa_math::Vec3;
 use super::AerodynamicsError;
 use crate::{
     collider::Collider,
-    shape::{Shape, TriangleMesh},
+    shape::{LevelSet, Shape, TriangleMesh},
 };
+
+// Consistent face diagonals on neighboring cells, with a common 0–7 diagonal.
+const CELL_TETRAHEDRA: [[usize; 4]; 6] = [
+    [0, 1, 3, 7],
+    [0, 3, 2, 7],
+    [0, 2, 6, 7],
+    [0, 6, 4, 7],
+    [0, 4, 5, 7],
+    [0, 5, 1, 7],
+];
+
+fn emit_level_set(
+    field: &LevelSet,
+    emit: &mut impl FnMut([Vec3; 3]) -> Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+    let [nx, ny, nz] = field.dimensions();
+    for z in 0..nz - 1 {
+        for y in 0..ny - 1 {
+            for x in 0..nx - 1 {
+                let nodes = std::array::from_fn::<_, 8, _>(|i| {
+                    let [x, y, z] = [x + (i & 1), y + ((i >> 1) & 1), z + (i >> 2)];
+                    let value = field.signed_distances()[(z * ny + y) * nx + x];
+                    let point = field.origin()
+                        + field.grid_spacing() * Vec3::new(x as f64, y as f64, z as f64);
+                    (point, value)
+                });
+                for tetrahedron in CELL_TETRAHEDRA {
+                    emit_tetrahedron(tetrahedron.map(|index| nodes[index]), emit)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn emit_tetrahedron(
+    nodes: [(Vec3, f64); 4],
+    emit: &mut impl FnMut([Vec3; 3]) -> Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+    let mut inside = [0; 4];
+    let mut outside = [0; 4];
+    let (mut ni, mut no) = (0, 0);
+    for (index, (_, value)) in nodes.iter().enumerate() {
+        if *value < 0.0 {
+            inside[ni] = index;
+            ni += 1;
+        } else {
+            outside[no] = index;
+            no += 1;
+        }
+    }
+    if ni == 0 || no == 0 {
+        return Ok(());
+    }
+    let outward = nodes[outside[0]].0 - nodes[inside[0]].0;
+    let crossing = |i: usize, o: usize| {
+        let (a, negative) = nodes[i];
+        let (b, positive) = nodes[o];
+        if positive == 0.0 {
+            return b;
+        }
+        let scale = (-negative).max(positive);
+        let negative = -negative / scale;
+        let positive = positive / scale;
+        a + (b - a) * (negative / (negative + positive))
+    };
+    let mut triangle = |a: Vec3, b: Vec3, c: Vec3| {
+        if a == b || a == c || b == c {
+            return Ok(());
+        }
+        let winding = (b - a).cross(c - a).dot(outward);
+        if !winding.is_finite() || winding == 0.0 {
+            return Err(AerodynamicsError::ArithmeticOverflow.into());
+        }
+        emit(if winding > 0.0 { [a, b, c] } else { [a, c, b] })
+    };
+    match ni {
+        1 => triangle(
+            crossing(inside[0], outside[0]),
+            crossing(inside[0], outside[1]),
+            crossing(inside[0], outside[2]),
+        ),
+        2 => {
+            let a = crossing(inside[0], outside[0]);
+            let b = crossing(inside[0], outside[1]);
+            let c = crossing(inside[1], outside[1]);
+            let d = crossing(inside[1], outside[0]);
+            triangle(a, b, c)?;
+            triangle(a, c, d)
+        }
+        _ => triangle(
+            crossing(inside[0], outside[0]),
+            crossing(inside[1], outside[0]),
+            crossing(inside[2], outside[0]),
+        ),
+    }
+}
 
 /// Resolution and aggregate output budget for one body's attached colliders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,6 +295,11 @@ pub fn collider_mesh<'a>(
                 .checked_mul(shape.columns() - 1)
                 .and_then(|cells| cells.checked_mul(2))
                 .ok_or(AerodynamicsError::TessellationBudgetExceeded)?,
+            Shape::LevelSet(shape) => shape
+                .dimensions()
+                .into_iter()
+                .try_fold(12usize, |work, n| work.checked_mul(n - 1))
+                .ok_or(AerodynamicsError::TessellationBudgetExceeded)?,
             _ => return Err(crate::Error::from(AerodynamicsError::UnsupportedModel)),
         };
         if count > config.max_triangles - triangles.len() {
@@ -226,6 +328,7 @@ pub fn collider_mesh<'a>(
             Ok(())
         };
         match collider.shape() {
+            Shape::LevelSet(shape) => emit_level_set(shape, &mut emit)?,
             Shape::HeightField(shape) => {
                 for row in 0..shape.rows() - 1 {
                     for column in 0..shape.columns() - 1 {
@@ -344,6 +447,55 @@ pub fn collider_mesh<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn level_set_mesh_extracts_plane_with_outward_winding() -> Result<(), crate::Error> {
+        let samples = [-1.0, 1.0].repeat(4);
+        let field = LevelSet::from_vec(Vec3::ZERO, [2; 3], Vec3::splat(1.0), samples)?;
+        let collider = Collider::new(Shape::LevelSet(field), Transform::identity());
+        let mesh = collider_mesh([&collider], ColliderTessellation::new(3, 3, 12)?)?;
+        let mut area = 0.0;
+        for face in mesh.triangles() {
+            let [a, b, c] = face.map(|i| mesh.vertices()[i]);
+            assert_eq!([a.x, b.x, c.x], [0.5; 3]);
+            let normal = (b - a).cross(c - a);
+            assert!(normal.x > 0.0);
+            area += normal.x / 2.0;
+        }
+        assert_eq!(area, 1.0);
+        assert_eq!(
+            collider_mesh([&collider], ColliderTessellation::new(3, 3, 11)?).err(),
+            Some(AerodynamicsError::TessellationBudgetExceeded.into())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn level_set_mesh_voxelizes_across_shared_cell_boundaries() -> Result<(), crate::Error> {
+        let mut samples = vec![1.0; 27];
+        samples[13] = -1.0;
+        let field = LevelSet::from_vec(-Vec3::splat(1.0), [3; 3], Vec3::splat(1.0), samples)?;
+        let collider = Collider::new(Shape::LevelSet(field), Transform::identity());
+        let mesh = collider_mesh([&collider], ColliderTessellation::new(3, 3, 96)?)?;
+        let geometry = PreparedGeometry::prepare(
+            &[GeometryInstance {
+                mesh: &mesh,
+                local_transform: Transform::identity(),
+                owner: GeometryOwner::Body,
+            }],
+            GeometryConfig {
+                cell_size: 0.125,
+                max_cells: 10_000,
+                max_work: 1_000_000,
+                open_mesh_policy: OpenMeshPolicy::Reject,
+                weld_tolerance: Some(1e-10),
+                max_patch_work: 1,
+            },
+        )?;
+        assert!(geometry.occupied_at(Vec3::ZERO)?);
+        assert!(!geometry.occupied_at(Vec3::X)?);
+        Ok(())
+    }
     use crate::{
         aerodynamics::geometry::{
             GeometryConfig, GeometryInstance, GeometryOwner, OpenMeshPolicy, PreparedGeometry,
