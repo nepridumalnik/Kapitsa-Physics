@@ -205,3 +205,15 @@ one wing without and with a footprint, respectively. For 32 wings the
 medians were 21.44 and 12.94 us/step. These are workload timings. They do
 not establish peak allocation or an isolated speedup over the historical
 baseline.
+
+The follow-up run on `07c7285`, with independent predicate scaling on each
+axis, executed both targets before the workspace tests. The fixtures and
+benchmark procedure were unchanged.
+
+| Partial-visibility fixture | Median | Min/max |
+| --- | ---: | ---: |
+| Small | 25.96 us | 25.66 to 27.82 us |
+| Moderate | 2.166 ms | 2.109 to 2.403 ms |
+
+Wing-shielding medians without and with a footprint were 8.27 and
+2.18 us/step for one wing, and 20.82 and 12.56 us/step for 32 wings.

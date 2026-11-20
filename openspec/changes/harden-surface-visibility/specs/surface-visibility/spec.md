@@ -2,6 +2,32 @@
 
 ## ADDED Requirements
 
+### Requirement: Scale surface predicates independently by axis
+
+Visibility predicates SHALL use independent power-of-two scales for each
+axis and preserve a common positive determinant factor within a frame.
+Barycentric area calculations SHALL undo both in-plane scales.
+
+#### Scenario: Synthetic barycentric area spans different axis scales
+
+- **WHEN** `triangle_fraction_preserves_area_across_axis_scales` evaluates
+  the triangle with vertices `(0, 0, 0)`, `(2^-500, 0, 0)`, and `(0, 1, 0)`
+- **THEN** its barycentric area fraction is `2^-500` after reversing the two
+  in-plane scales
+
+#### Scenario: Synthetic thin source remains covered by its shadow
+
+- **WHEN** `shadow_covers_thin_source_across_axis_scales` constructs a source
+  with vertices `(0, 0, 0)`, `(0, 2^-500, 0)`, and `(0, 0, 1)`, a blocker
+  translated by `(1, 0, 0)`, and visibility direction `(1, 0, 0)`
+- **THEN** shadow construction succeeds and covers the source-affine point
+  `(0.25, 0.25, 0)` despite the different coordinate-axis scales
+
+#### Scenario: One coordinate axis exceeds the exponent span
+
+- **WHEN** the nonzero coordinates on one axis span more than 254 binary exponents
+- **THEN** predicate preparation returns `PrecisionLoss`
+
 ### Requirement: Preserve representable numeric intersections
 
 The surface-visibility intersection calculations SHALL handle finite endpoint

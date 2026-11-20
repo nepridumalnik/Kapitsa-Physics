@@ -3,12 +3,20 @@
 ## Summary
 
 Document the surface-visibility hardening on `feat/aero_rest` since
-`ccb5487`.
+`ccb5487`, including committed change `07c7285` for independent per-axis
+predicate scaling in generic surface geometry.
 
 ## Scope
 
 This change covers:
 
+- scaling predicate coordinates independently by a power of two per axis,
+  preserving the same positive determinant factor for orientation comparisons
+  within a frame, including comparisons used as affine distances;
+- recovering barycentric area by reversing the two in-plane scales, while
+  retaining exponent-span validation within each axis;
+- recording the two synthetic regressions in `07c7285`: barycentric area
+  preservation across axis scales and shadow coverage of a thin source;
 - preserving representable shadow intersections when finite floating-point
   distance or coordinate differences would overflow during intersection
   arithmetic;
