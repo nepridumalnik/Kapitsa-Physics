@@ -203,6 +203,7 @@ hull
 potential
 pressure
 slender
+vlm
 wave
 wing
 { AddChunkBatchError

@@ -313,7 +313,7 @@ fn panels(mesh: &TriangleMesh, flow: PressureFlow) -> Result<Vec<Panel>, crate::
     Ok(panels)
 }
 
-fn solve_dense(
+pub(crate) fn solve_dense(
     mut matrix: Vec<f64>,
     mut rhs: Vec<f64>,
     count: usize,

@@ -53,7 +53,9 @@ impl std::error::Error for PressureError {}
 /// error above Mach 5. `PotentialFlow` is a bounded incompressible source-panel
 /// model for closed isolated meshes at Mach <= 0.2. `KuttaLifting` derives an
 /// equivalent finite wing from a closed thin wing mesh and applies its
-/// trailing-vortex lifting-line wake. The default preserves existing behavior.
+/// trailing-vortex lifting-line wake. `VortexLattice` applies a bounded
+/// horseshoe-vortex wake lattice to a closed thin wing mesh. The default
+/// preserves existing behavior.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MeshPressureModel {
     /// Unmodified Newtonian impact pressure, `Cp = 2 sin²(theta)`, Mach >= 5.
@@ -71,6 +73,9 @@ pub enum MeshPressureModel {
     /// wing mesh. See
     /// [`crate::aerodynamics::potential::evaluate_kutta_lifting_mesh`].
     KuttaLifting,
+    /// Bounded horseshoe-vortex lattice for a closed thin wing mesh.
+    /// See [`crate::aerodynamics::vlm::evaluate_closed_wing`].
+    VortexLattice,
 }
 
 fn same_triangle(a: &[Vec3; 3], b: &[Vec3; 3]) -> bool {
@@ -627,7 +632,9 @@ impl PressurePatch {
     ) -> Result<PressureWrench, crate::Error> {
         if matches!(
             model,
-            MeshPressureModel::PotentialFlow | MeshPressureModel::KuttaLifting
+            MeshPressureModel::PotentialFlow
+                | MeshPressureModel::KuttaLifting
+                | MeshPressureModel::VortexLattice
         ) {
             return Err(crate::Error::from(PressureError::UnsupportedGeometry));
         }
@@ -762,7 +769,9 @@ impl PressurePatch {
                     1.0,
                 )
             }
-            MeshPressureModel::PotentialFlow | MeshPressureModel::KuttaLifting => {
+            MeshPressureModel::PotentialFlow
+            | MeshPressureModel::KuttaLifting
+            | MeshPressureModel::VortexLattice => {
                 return Err(crate::Error::from(PressureError::UnsupportedGeometry));
             }
         }

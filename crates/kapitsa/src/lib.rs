@@ -30,7 +30,7 @@ pub mod aerodynamics {
         Aerodynamics, AerodynamicsError, AerodynamicsTask, Atmosphere, AtmosphericState,
         ColliderTessellation, DensityProfile, MeshPressureModel, SphericalAtmosphere,
         SphericalAtmosphereBuilder, cache, colliders, geometry, hull, potential, pressure, slender,
-        wave, wing,
+        vlm, wave, wing,
     };
 }
 

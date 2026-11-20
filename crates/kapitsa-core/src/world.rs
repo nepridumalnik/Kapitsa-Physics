@@ -1710,8 +1710,10 @@ impl PhysicsWorld {
     /// support clusters/parts, rotation or separation. `KuttaLifting` derives
     /// an equivalent uncambered thin wing from a closed wing mesh and applies
     /// the finite-wing trailing-vortex lifting-line wake at Mach <= 0.3.
-    /// Changing the model does not invalidate prepared geometry; the next
-    /// aerodynamic evaluation uses the new closure.
+    /// `VortexLattice` applies a bounded horseshoe-vortex lattice with a flat
+    /// trailing wake to a closed thin wing mesh. Changing the model does not
+    /// invalidate prepared geometry; the next aerodynamic evaluation uses the
+    /// new closure.
     /// A body above the selected model's Mach domain returns an explicit
     /// pressure error and rolls back its step.
     pub fn set_mesh_pressure_model(
@@ -3574,6 +3576,30 @@ impl PhysicsWorld {
                         })?;
                         crate::aerodynamics::potential::evaluate_kutta_lifting_mesh(mesh, flow)
                     }
+                    crate::aerodynamics::pressure::MeshPressureModel::VortexLattice => {
+                        if cluster.is_some() {
+                            return Err(Error::from(StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                ),
+                            }));
+                        }
+                        let mesh = match primary {
+                            crate::aerodynamics::Aerodynamics::Mesh(mesh) => Some(mesh),
+                            crate::aerodynamics::Aerodynamics::Colliders => collider_mesh,
+                            _ => None,
+                        }
+                        .ok_or_else(|| {
+                            Error::from(StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                ),
+                            })
+                        })?;
+                        crate::aerodynamics::vlm::evaluate_closed_wing(mesh, flow)
+                    }
                 }
             }
             .map_err(|cause| StepError::Aerodynamics {
@@ -4683,6 +4709,7 @@ impl PhysicsWorld {
                     self.mesh_pressure_model,
                     crate::aerodynamics::pressure::MeshPressureModel::PotentialFlow
                         | crate::aerodynamics::pressure::MeshPressureModel::KuttaLifting
+                        | crate::aerodynamics::pressure::MeshPressureModel::VortexLattice
                 )
             {
                 continue;

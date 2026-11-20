@@ -460,6 +460,29 @@ control surfaces and spanwise load detail are not resolved. The existing COM
 atmosphere sample is used. Per-owner pressure diagnostics are not staged. Use
 `WingPolar` for measured or CFD lifting data.
 
+### Vortex-lattice wing model
+
+`MeshPressureModel::VortexLattice` implements a bounded three-dimensional
+horseshoe-vortex lattice on a closed thin wing mesh. A 3 chordwise by 6 spanwise
+lattice is extracted from the mesh: local leading and trailing edges capture
+sweep and taper, sampled mean height approximates camber, and finite span
+endpoints give tip relief. Each panel has a bound quarter-chord leg and two
+flat trailing legs to a distant downstream station. Circulation solves the
+no-penetration condition at three-quarter-chord control points, so the wake
+imposes the Kutta condition. Panel forces use Kutta–Joukowski with the local
+freestream plus induced velocity, and moments are about the COM.
+
+The explicit domain is a closed, outward-wound, isolated thin wing with
+`span >= chord`, `thickness <= 0.15 span`, Mach <= 0.3 and small attached
+incidence. Non-closed geometry returns `InvalidPatch`, non-wing bounds return
+`UnsupportedGeometry`, Mach returns `UnsupportedMach`, and singular systems or
+allocation failure return `ArithmeticOverflow`. This remains an engineering
+lattice, not a validated general lifting-surface solver: it omits finite
+thickness, boundary layers, separation, wake roll-up, viscosity, interference,
+control surfaces, compressibility above the incompressible domain and
+experimental validation. The COM atmosphere sample is used and per-owner
+pressure diagnostics are not staged. Use `WingPolar` for measured or CFD loads.
+
 ### Implemented patch pressure evaluator
 
 `kapitsa::aerodynamics::pressure::PressurePatch` implements the unmodified Newtonian equation above for caller-selected physical surface patches; `evaluate_modified_newtonian` selects the opt-in compression closure described above. `PressureFlow` supplies an explicit sound speed, the atmosphere sampled at the patch, the body's rigid transform, body-local COM, and world-space linear/angular velocities. The evaluator computes point velocity `v_COM + omega × r`, subtracts wind, and returns world-space `PressureWrench { force, moment }` about the COM. Patch centers are body-origin-relative, not COM-relative; changing COM does not rebuild patches. Normals are normalized at construction. Evaluation allocates nothing and does not mutate the body.
@@ -869,6 +892,7 @@ engine does not blend models to hide a domain limit.
 | Mesh/Colliders modified Newtonian | Mach 0–5 | attached potential lift, wake, base flow, friction |
 | Mesh/Colliders potential panel | Mach ≤ 0.2, closed isolated mesh ≤ 256 triangles | rotation, separation, base flow |
 | Mesh/Colliders Kutta lifting | closed thin wing, span ≥ chord, thickness ≤ 0.15 span, Mach ≤ 0.3 | camber, sweep, taper, tip relief, general 3D Kutta wake |
+| Mesh/Colliders vortex lattice | closed thin wing, 3×6 lattice, Mach ≤ 0.3 | finite thickness, separation, wake roll-up, control surfaces, validation |
 | Base pressure | caller Cp and inclusive Mach range | wake interaction |
 | Incompressible friction | Mach ≤ 0.3 | compressibility, transition above 0.3 |
 | Transitioned flat plate | 500,000 < Re < 100,000,000, Mach ≤ 0.3 | prescribed transition only |
@@ -884,8 +908,8 @@ engine does not blend models to hide a domain limit.
 | Transitional particle | 0.1 ≤ Kn ≤ 10, Re ≤ 45, Mach ≤ 10 | other Kn/Re |
 | `LothParticle` selector | transitional Re ≤ 45, compression Re > 45 | gaps such as Mach 0.22, Re 100 |
 
-General three-dimensional Kutta panel/wake flow with camber, sweep, taper and
-tip relief for Mesh/Colliders, rotational potential flow,
+Finite-thickness and multi-surface Kutta wake flow with wake roll-up and
+control surfaces for Mesh/Colliders, rotational potential flow,
 predictive stall onset/hysteresis/dynamic stall,
 wake/shielding physics beyond geometric occlusion, base-flow interaction,
 surface roughness, high-speed transition, real-gas properties, a validated

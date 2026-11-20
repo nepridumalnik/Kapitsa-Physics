@@ -245,7 +245,8 @@ impl SimulationBuilder {
     /// which requires Mach >= 5. `ModifiedNewtonian` enables the documented
     /// compression-only model for `0 <= Mach <= 5`; `PotentialFlow` enables the
     /// bounded closed-mesh source-panel model at Mach <= 0.2; `KuttaLifting`
-    /// enables the closed thin-wing lifting-line bridge.
+    /// enables the closed thin-wing lifting-line bridge; `VortexLattice`
+    /// enables the bounded horseshoe-wake lattice.
     pub fn mesh_pressure_model(
         mut self,
         model: kapitsa_core::aerodynamics::pressure::MeshPressureModel,
