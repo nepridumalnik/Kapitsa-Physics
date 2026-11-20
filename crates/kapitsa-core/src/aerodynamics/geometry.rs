@@ -1376,32 +1376,48 @@ impl PreparedGeometry {
                         distances
                             .try_reserve_exact(polygon.len())
                             .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
+                        let crosses = |a: f64, b: f64| (a > 0.0 && b < 0.0) || (a < 0.0 && b > 0.0);
+                        let mut positive_count = 0;
+                        let mut negative_count = 0;
+                        let mut crossings = 0;
+                        let mut previous = 0.0;
                         for point in &polygon {
                             let distance = visibility::distance(coefficients, *point)?;
+                            positive_count += usize::from(distance > 0.0);
+                            negative_count += usize::from(distance < 0.0);
+                            crossings += usize::from(crosses(previous, distance));
+                            previous = distance;
                             distances.push(distance);
                         }
-                        if !distances.iter().any(|d| *d > 0.0)
-                            || !distances.iter().any(|d| *d < 0.0)
-                        {
+                        if positive_count == 0 || negative_count == 0 {
                             checked_push(&mut next, polygon)?;
                             continue;
                         }
+                        crossings += usize::from(crosses(previous, distances[0]));
+                        // The precharged vertex count bounds both reservations:
+                        // each side keeps at most n vertices and adds at most n crossings.
                         let mut positive = Vec::new();
                         let mut negative = Vec::new();
+                        positive
+                            .try_reserve_exact(polygon.len() - negative_count + crossings)
+                            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
+                        negative
+                            .try_reserve_exact(polygon.len() - positive_count + crossings)
+                            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
                         for k in 0..polygon.len() {
                             let n = (k + 1) % polygon.len();
                             let (d, e) = (distances[k], distances[n]);
                             if d >= 0.0 {
-                                checked_push(&mut positive, polygon[k])?;
+                                positive.push(polygon[k]);
                             }
                             if d <= 0.0 {
-                                checked_push(&mut negative, polygon[k])?;
+                                negative.push(polygon[k]);
                             }
-                            if (d > 0.0 && e < 0.0) || (d < 0.0 && e > 0.0) {
+                            if crosses(d, e) {
                                 let point =
                                     visibility::crossing_point(polygon[k], polygon[n], d, e)?;
-                                checked_push(&mut positive, point)?;
-                                checked_push(&mut negative, point)?;
+                                positive.push(point);
+                                negative.push(point);
                             }
                         }
                         checked_push(&mut next, positive)?;

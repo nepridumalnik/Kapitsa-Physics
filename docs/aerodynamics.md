@@ -532,7 +532,13 @@ temporary storage includes the prepared source triangles and grid, candidate
 marks and the current candidate list, two successive polygon lists, distances
 for the largest polygon seen in the current partition, and the accumulated
 output. Those element counts are constrained by preparation, query, and
-clipping charges.
+clipping charges. For each clipping plane and polygon with `n` vertices, the
+charge of `1 + 16*n` precedes scratch growth and distance evaluation. The
+distance pass counts strict signs and crossed edges, including the closing
+edge. A split reserves each output for its retained vertices and crossings.
+At most `4*n` vertex slots are requested across both outputs, and the distance
+buffer requests at most `n` slots. A polygon confined to one side is moved
+without allocating a new vertex buffer.
 
 Affine shadow-plane distance evaluation uses compensated products and sums to
 reduce cancellation near a boundary. This corrects one previously demonstrated
