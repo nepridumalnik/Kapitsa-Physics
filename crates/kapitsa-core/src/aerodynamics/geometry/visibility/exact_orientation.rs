@@ -73,15 +73,32 @@ struct Determinant {
 
 impl Determinant {
     fn new([a, b, c, d]: [[Factor; 3]; 4]) -> Self {
-        let mut sums = [[0; LIMBS]; 2];
-        // det(a-d, b-d, c-d) expanded by multilinearity. Terms containing
-        // two copies of d cancel, leaving four signed 3x3 determinants.
-        for ([a, b, c], negative) in [
+        // Multilinearity cancels terms with two copies of d.
+        Self::from_terms([
             ([a, b, c], false),
             ([d, b, c], true),
             ([a, d, c], true),
             ([a, b, d], true),
-        ] {
+        ])
+    }
+
+    fn projected(
+        start: [Factor; 3],
+        end: [Factor; 3],
+        point: [Factor; 3],
+        direction: [Factor; 3],
+    ) -> Self {
+        // det(end-start, point-start, direction), expanded before subtraction.
+        Self::from_terms([
+            ([end, point, direction], false),
+            ([start, point, direction], true),
+            ([end, start, direction], true),
+        ])
+    }
+
+    fn from_terms(terms: impl IntoIterator<Item = ([[Factor; 3]; 3], bool)>) -> Self {
+        let mut sums = [[0; LIMBS]; 2];
+        for ([a, b, c], negative) in terms {
             for (i, x) in a.into_iter().enumerate() {
                 let j = (i + 1) % 3;
                 let k = (i + 2) % 3;
@@ -156,12 +173,24 @@ pub(super) fn area_fraction(points: [Vec3; 3]) -> Result<f64, crate::Error> {
     }
 }
 
-pub(super) fn sign(basis: [Vec3; 3], point: Vec3) -> Result<f64, crate::Error> {
-    if !point.is_finite() || basis.iter().any(|point| !point.is_finite()) {
+pub(super) fn projected_sign(
+    start: Vec3,
+    end: Vec3,
+    point: Vec3,
+    direction: Vec3,
+) -> Result<f64, crate::Error> {
+    if [start, end, point, direction]
+        .iter()
+        .any(|point| !point.is_finite())
+    {
         return Err(GeometryError::ArithmeticOverflow.into());
     }
-    let [a, b, c] = basis.map(factors);
-    let determinant = Determinant::new([a, b, c, factors(point)]);
+    let determinant = Determinant::projected(
+        factors(start),
+        factors(end),
+        factors(point),
+        factors(direction),
+    );
     Ok(match (determinant.leading_bit(), determinant.negative) {
         (None, _) => 0.0,
         (Some(_), true) => -1.0,
@@ -169,12 +198,32 @@ pub(super) fn sign(basis: [Vec3; 3], point: Vec3) -> Result<f64, crate::Error> {
     })
 }
 
+pub(super) fn projected_coefficients(
+    start: Vec3,
+    end: Vec3,
+    points: [Vec3; 3],
+    direction: Vec3,
+) -> Result<[f64; 3], crate::Error> {
+    if [start, end, direction]
+        .iter()
+        .chain(&points)
+        .any(|point| !point.is_finite())
+    {
+        return Err(GeometryError::ArithmeticOverflow.into());
+    }
+    let [start, end, direction] = [start, end, direction].map(factors);
+    scaled_values(points.map(|point| Determinant::projected(start, end, factors(point), direction)))
+}
+
 pub(super) fn orientations(basis: [Vec3; 3], points: [Vec3; 3]) -> Result<[f64; 3], crate::Error> {
     if basis.iter().chain(&points).any(|point| !point.is_finite()) {
         return Err(GeometryError::ArithmeticOverflow.into());
     }
     let [a, b, c] = basis.map(factors);
-    let determinants = points.map(|point| Determinant::new([a, b, c, factors(point)]));
+    scaled_values(points.map(|point| Determinant::new([a, b, c, factors(point)])))
+}
+
+fn scaled_values(determinants: [Determinant; 3]) -> Result<[f64; 3], crate::Error> {
     let leading = determinants.each_ref().map(Determinant::leading_bit);
     let Some(common) = leading.iter().flatten().copied().max() else {
         return Ok([0.0; 3]);
@@ -191,6 +240,34 @@ pub(super) fn orientations(basis: [Vec3; 3], points: [Vec3; 3]) -> Result<[f64; 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projected_determinants_preserve_displacement_lost_by_subtraction() -> Result<(), crate::Error>
+    {
+        let start = Vec3::X * 2.0_f64.powi(-500);
+        let end = Vec3::X + Vec3::Y;
+        let point = end * 2.0;
+        assert_eq!((end - start).cross(point - start), Vec3::ZERO);
+        assert_eq!(projected_sign(start, end, point, Vec3::Z)?, -1.0);
+        assert_eq!(
+            projected_coefficients(start, end, [point, end, Vec3::ZERO], Vec3::Z)?,
+            [-1.0, 0.0, 1.0],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn projected_determinants_accept_overflowing_endpoint_difference() -> Result<(), crate::Error> {
+        let start = Vec3::X * f64::MAX;
+        let end = -start;
+        assert!(!(end - start).is_finite());
+        let values =
+            projected_coefficients(start, end, [Vec3::Y, -Vec3::Y * 0.5, Vec3::ZERO], Vec3::Z)?;
+        assert!(values[0] < 0.0);
+        assert_eq!(values[1], -values[0] / 2.0);
+        assert_eq!(values[2], 0.0);
+        Ok(())
+    }
 
     #[test]
     fn determinants_share_scale_across_wide_products() -> Result<(), crate::Error> {

@@ -535,8 +535,11 @@ with ties to even. A nonzero coefficient that rounds to zero returns
 `PrecisionLoss`. The extra integer work does not widen the area consistency
 tolerance. Direction and edge-reference checks use the exact sign without
 conversion. Edge coefficients share a scaling factor independent of the
-reference determinant. The projected edge vectors and offsets are still
-formed in floating point before the predicate.
+reference determinant. The exact projection expands the determinant using
+the original vertices and direction so rounded differences do not enter
+the fallback. Overflowing intermediate differences also select this path.
+The fast projection continues to use floating-point edge vectors.
+An overflowing axial depth separation selects the general depth predicate.
 
 Windward and partition triangle areas use the same exact accumulator when
 the adaptive 2D frame exceeds its span. The result is the barycentric area

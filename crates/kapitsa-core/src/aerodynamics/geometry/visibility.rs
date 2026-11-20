@@ -227,16 +227,26 @@ impl Shadow {
                 ),
             );
         }
+        if !upstream.is_finite()
+            || blocker
+                .vertices
+                .iter()
+                .chain(&source.vertices)
+                .any(|point| !point.is_finite())
+        {
+            return Err(GeometryError::ArithmeticOverflow.into());
+        }
         let [a, b, c] = blocker.vertices;
         let edge = b - a;
         let other = c - a;
         let size = edge.abs().max_element().max(other.abs().max_element());
-        if !size.is_finite() || size == 0.0 {
+        if size == 0.0 {
             return Err(crate::Error::from(GeometryError::InvalidGeometry));
         }
         // Direction may be positively rescaled without changing a shadow plane.
         let direction = upstream * size;
-        let scaled_direction = direction.is_finite()
+        let scaled_direction = size.is_finite()
+            && direction.is_finite()
             && components(upstream)
                 .into_iter()
                 .zip(components(direction))
@@ -250,7 +260,7 @@ impl Shadow {
             -frame.orientation(Vec3::ZERO, edge, other, direction)?
         } else {
             charge(exact_orientation::WORK)?;
-            -exact_orientation::sign([Vec3::ZERO, edge, other], upstream)?
+            exact_orientation::projected_sign(a, b, c, upstream)?
         };
         if denominator == 0.0 {
             return Ok(None);
@@ -262,12 +272,17 @@ impl Shadow {
             .into_iter()
             .zip(components(other))
             .position(|(edge, other)| edge == 0.0 && other == 0.0);
-        if let Some(axis) = axial_depth {
-            let plane = components(a)[axis];
-            let sign = components(upstream)[axis].signum();
-            for (value, point) in depth.iter_mut().zip(source.vertices) {
-                *value = finite(plane - components(point)[axis])? * sign;
-            }
+        let axial_depth = axial_depth
+            .map(|axis| {
+                let plane = components(a)[axis];
+                let sign = components(upstream)[axis].signum();
+                source
+                    .vertices
+                    .map(|point| (plane - components(point)[axis]) * sign)
+            })
+            .filter(|depth| depth.iter().all(|value| value.is_finite()));
+        if let Some(separations) = axial_depth {
+            depth = separations;
         } else {
             if let Some(frame) = frame_or_exact(&[
                 a,
@@ -321,13 +336,17 @@ impl Shadow {
         {
             let edge = end - start;
             let offsets = source_vertices.map(|p| p - start);
-            let opposite = opposite - start;
-            let frame = if scaled_direction {
+            let opposite_offset = opposite - start;
+            let frame = if scaled_direction
+                && edge.is_finite()
+                && opposite_offset.is_finite()
+                && offsets.iter().all(|offset| offset.is_finite())
+            {
                 frame_or_exact(&[
                     Vec3::ZERO,
                     edge,
                     direction,
-                    opposite,
+                    opposite_offset,
                     offsets[0],
                     offsets[1],
                     offsets[2],
@@ -336,10 +355,10 @@ impl Shadow {
                 None
             };
             let reference = if let Some(frame) = &frame {
-                frame.orientation(Vec3::ZERO, edge, direction, opposite)?
+                frame.orientation(Vec3::ZERO, edge, direction, opposite_offset)?
             } else {
                 charge(exact_orientation::WORK)?;
-                exact_orientation::sign([Vec3::ZERO, edge, upstream], opposite)?
+                exact_orientation::projected_sign(start, end, opposite, upstream)?
             };
             if reference == 0.0 {
                 return Err(crate::Error::from(GeometryError::PrecisionLoss));
@@ -352,7 +371,7 @@ impl Shadow {
                 ]
             } else {
                 charge(3 * exact_orientation::WORK)?;
-                exact_orientation::orientations([Vec3::ZERO, edge, upstream], offsets)?
+                exact_orientation::projected_coefficients(start, end, source_vertices, upstream)?
             };
             *plane = values.map(|value| value * reference.signum());
             if !plane.iter().any(|v| *v > 0.0) {
@@ -858,6 +877,26 @@ mod tests {
         let blocker = SurfaceTriangle {
             vertices: [Vec3::X, Vec3::X + Vec3::Y, Vec3::X + Vec3::Z],
             ..source
+        };
+        let shadow = Shadow::new(&source, &blocker, 0, 1, Vec3::X, |_| Ok(()))?
+            .ok_or(GeometryError::PrecisionLoss)?;
+        assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
+        assert!(Shadow::new(&source, &blocker, 0, 1, -Vec3::X, |_| Ok(()))?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn axial_depth_accepts_overflowing_separation() -> Result<(), crate::Error> {
+        let side = Vec3::X * f64::MAX;
+        let blocker = SurfaceTriangle {
+            vertices: [side, side + Vec3::Y, side + Vec3::Z],
+            normal: Vec3::X,
+            area: 0.5,
+            owner: GeometryOwner::Body,
+        };
+        let source = SurfaceTriangle {
+            vertices: [-side, -side + Vec3::Y, -side + Vec3::Z],
+            ..blocker
         };
         let shadow = Shadow::new(&source, &blocker, 0, 1, Vec3::X, |_| Ok(()))?
             .ok_or(GeometryError::PrecisionLoss)?;
