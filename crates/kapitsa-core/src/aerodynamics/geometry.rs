@@ -1342,7 +1342,7 @@ impl PreparedGeometry {
                 .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
             check_surface_work(Some(work), max_work)?;
             let partition_start_work = work;
-            let mut exact_depth_work = 0;
+            let mut exact_orientation_work = 0;
             let mut next = Vec::new();
             let mut distances = Vec::new();
             for j in candidates {
@@ -1359,7 +1359,7 @@ impl PreparedGeometry {
                 let Some(shadow) =
                     visibility::Shadow::new(triangle, blocker, i, j, upstream, |amount| {
                         charge_surface_work(&mut work, amount, max_work)?;
-                        exact_depth_work += amount;
+                        exact_orientation_work += amount;
                         Ok(())
                     })?
                 else {
@@ -1494,9 +1494,9 @@ impl PreparedGeometry {
             }
             // Splitting must conserve the source's unit barycentric area.
             // Heuristic consistency tolerance based on this source partition.
-            // Exact depth work does not accumulate floating-point roundoff.
+            // Exact orientation work does not accumulate floating-point roundoff.
             // The initial triangle contributes one unit even before clipping.
-            let partition_work = work - partition_start_work - exact_depth_work;
+            let partition_work = work - partition_start_work - exact_orientation_work;
             let roundoff = (partition_work as f64 + 1.0) * f64::EPSILON;
             let allowance = roundoff / (1.0 - roundoff);
             let partition_fraction = partition_fraction.value();

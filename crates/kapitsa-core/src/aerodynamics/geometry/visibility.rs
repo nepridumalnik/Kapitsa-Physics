@@ -3,7 +3,7 @@
 use super::{GeometryError, SurfaceTriangle, Vec3, components};
 use robust::{Coord, Coord3D, orient2d, orient3d};
 
-mod exact_depth;
+mod exact_orientation;
 
 pub(super) struct Shadow {
     pub planes: [[f64; 3]; 4],
@@ -93,6 +93,18 @@ fn scale(mut value: f64, mut shift: i32) -> Result<f64, crate::Error> {
         shift -= step;
     }
     Ok(value)
+}
+
+fn frame_or_exact(points: &[Vec3]) -> Result<Option<PredicateFrame>, crate::Error> {
+    match PredicateFrame::new(points) {
+        Ok(frame) => Ok(Some(frame)),
+        Err(error)
+            if error.downcast_ref::<GeometryError>() == Some(&GeometryError::PrecisionLoss) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn finite(value: f64) -> Result<f64, crate::Error> {
@@ -224,16 +236,22 @@ impl Shadow {
         }
         // Direction may be positively rescaled without changing a shadow plane.
         let direction = upstream * size;
-        if !direction.is_finite()
-            || [upstream.x, upstream.y, upstream.z]
-                .iter()
-                .zip([direction.x, direction.y, direction.z])
-                .any(|(a, b)| *a != 0.0 && b == 0.0)
-        {
-            return Err(crate::Error::from(GeometryError::PrecisionLoss));
-        }
-        let frame = PredicateFrame::new(&[Vec3::ZERO, edge, other, direction])?;
-        let denominator = -frame.orientation(Vec3::ZERO, edge, other, direction)?;
+        let scaled_direction = direction.is_finite()
+            && components(upstream)
+                .into_iter()
+                .zip(components(direction))
+                .all(|(a, b)| a == 0.0 || b.is_normal());
+        let direction_frame = if scaled_direction {
+            frame_or_exact(&[Vec3::ZERO, edge, other, direction])?
+        } else {
+            None
+        };
+        let denominator = if let Some(frame) = direction_frame {
+            -frame.orientation(Vec3::ZERO, edge, other, direction)?
+        } else {
+            charge(exact_orientation::WORK)?;
+            -exact_orientation::sign([Vec3::ZERO, edge, other], upstream)?
+        };
         if denominator == 0.0 {
             return Ok(None);
         }
@@ -251,29 +269,21 @@ impl Shadow {
                 *value = finite(plane - components(point)[axis])? * sign;
             }
         } else {
-            let frame = PredicateFrame::new(&[
+            if let Some(frame) = frame_or_exact(&[
                 a,
                 b,
                 c,
                 source.vertices[0],
                 source.vertices[1],
                 source.vertices[2],
-            ]);
-            match frame {
-                Ok(frame) => {
-                    for (value, point) in depth.iter_mut().zip(source.vertices) {
-                        // orient(a,b,c,p) is minus the signed plane distance numerator.
-                        *value = frame.orientation(a, b, c, point)?;
-                    }
+            ])? {
+                for (value, point) in depth.iter_mut().zip(source.vertices) {
+                    // orient(a,b,c,p) is minus the signed plane distance numerator.
+                    *value = frame.orientation(a, b, c, point)?;
                 }
-                Err(error)
-                    if error.downcast_ref::<GeometryError>()
-                        == Some(&GeometryError::PrecisionLoss) =>
-                {
-                    charge(exact_depth::WORK)?;
-                    depth = exact_depth::depths(blocker.vertices, source.vertices)?;
-                }
-                Err(error) => return Err(error),
+            } else {
+                charge(3 * exact_orientation::WORK)?;
+                depth = exact_orientation::orientations(blocker.vertices, source.vertices)?;
             }
             depth = depth.map(|value| value * denominator.signum());
         }
@@ -312,23 +322,39 @@ impl Shadow {
             let edge = end - start;
             let offsets = source_vertices.map(|p| p - start);
             let opposite = opposite - start;
-            let frame = PredicateFrame::new(&[
-                Vec3::ZERO,
-                edge,
-                direction,
-                opposite,
-                offsets[0],
-                offsets[1],
-                offsets[2],
-            ])?;
-            let reference = frame.orientation(Vec3::ZERO, edge, direction, opposite)?;
+            let frame = if scaled_direction {
+                frame_or_exact(&[
+                    Vec3::ZERO,
+                    edge,
+                    direction,
+                    opposite,
+                    offsets[0],
+                    offsets[1],
+                    offsets[2],
+                ])?
+            } else {
+                None
+            };
+            let reference = if let Some(frame) = &frame {
+                frame.orientation(Vec3::ZERO, edge, direction, opposite)?
+            } else {
+                charge(exact_orientation::WORK)?;
+                exact_orientation::sign([Vec3::ZERO, edge, upstream], opposite)?
+            };
             if reference == 0.0 {
                 return Err(crate::Error::from(GeometryError::PrecisionLoss));
             }
-            for (value, offset) in plane.iter_mut().zip(offsets) {
-                *value =
-                    frame.orientation(Vec3::ZERO, edge, direction, offset)? * reference.signum();
-            }
+            let values = if let Some(frame) = &frame {
+                [
+                    frame.orientation(Vec3::ZERO, edge, direction, offsets[0])?,
+                    frame.orientation(Vec3::ZERO, edge, direction, offsets[1])?,
+                    frame.orientation(Vec3::ZERO, edge, direction, offsets[2])?,
+                ]
+            } else {
+                charge(3 * exact_orientation::WORK)?;
+                exact_orientation::orientations([Vec3::ZERO, edge, upstream], offsets)?
+            };
+            *plane = values.map(|value| value * reference.signum());
             if !plane.iter().any(|v| *v > 0.0) {
                 return Ok(None);
             }
@@ -801,6 +827,33 @@ mod tests {
     }
 
     #[test]
+    fn wide_direction_and_edges_recover_projected_shadow() -> Result<(), crate::Error> {
+        let tiny = 2.0_f64.powi(-500);
+        let blocker = SurfaceTriangle {
+            vertices: [Vec3::ZERO, Vec3::Y, Vec3::Z],
+            normal: Vec3::X,
+            area: 0.5,
+            owner: GeometryOwner::Body,
+        };
+        for (separation, upstream) in [(1.0, Vec3::X + Vec3::Y * tiny), (tiny, Vec3::X + Vec3::Y)] {
+            let source = SurfaceTriangle {
+                vertices: blocker.vertices.map(|point| point - Vec3::X * separation),
+                ..blocker
+            };
+            let mut work = 0;
+            let shadow = Shadow::new(&source, &blocker, 0, 1, upstream, |cost| {
+                work += cost;
+                Ok(())
+            })?
+            .ok_or(GeometryError::PrecisionLoss)?;
+            assert!(work >= 4 * exact_orientation::WORK);
+            assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
+            assert!(!shadow.covers(Vec3::new(0.75, 0.25, 0.0))?);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn wide_inclined_depth_charges_before_recovering_shadow() -> Result<(), crate::Error> {
         let source = SurfaceTriangle {
             vertices: [Vec3::ZERO, Vec3::Y + Vec3::X * 1e-100, Vec3::Z],
@@ -823,7 +876,7 @@ mod tests {
             Ok(())
         })?
         .ok_or(GeometryError::PrecisionLoss)?;
-        assert_eq!(work, exact_depth::WORK);
+        assert_eq!(work, 3 * exact_orientation::WORK);
         assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
         Ok(())
     }

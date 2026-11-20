@@ -1,4 +1,4 @@
-//! Exact binary64 determinant accumulation for wide depth predicates.
+//! Exact binary64 determinant accumulation for wide orientation predicates.
 use super::{GeometryError, Vec3, components, scale};
 
 // Products start at exponent -3222 (three smallest subnormals). Each of
@@ -6,9 +6,9 @@ use super::{GeometryError, Vec3, components, scale};
 const MIN_EXPONENT: i32 = -3222;
 const LIMBS: usize = 99;
 
-// Charges three fixed-size determinant accumulations, including limb scans
+// Charges one fixed-size determinant accumulation, including limb scans
 // and carry propagation on both signs of the sum.
-pub(super) const WORK: usize = 3 * (24 * 6 + 8) * LIMBS;
+pub(super) const WORK: usize = (24 * 6 + 8) * LIMBS;
 
 #[derive(Clone, Copy)]
 struct Factor {
@@ -141,17 +141,29 @@ impl Determinant {
     }
 }
 
-pub(super) fn depths(blocker: [Vec3; 3], source: [Vec3; 3]) -> Result<[f64; 3], crate::Error> {
-    if blocker
-        .iter()
-        .chain(&source)
-        .any(|point| !point.is_finite())
-    {
+fn factors(point: Vec3) -> [Factor; 3] {
+    components(point).map(Factor::new)
+}
+
+pub(super) fn sign(basis: [Vec3; 3], point: Vec3) -> Result<f64, crate::Error> {
+    if !point.is_finite() || basis.iter().any(|point| !point.is_finite()) {
         return Err(GeometryError::ArithmeticOverflow.into());
     }
-    let factors = |point| components(point).map(Factor::new);
-    let [a, b, c] = blocker.map(factors);
-    let determinants = source.map(|point| Determinant::new([a, b, c, factors(point)]));
+    let [a, b, c] = basis.map(factors);
+    let determinant = Determinant::new([a, b, c, factors(point)]);
+    Ok(match (determinant.leading_bit(), determinant.negative) {
+        (None, _) => 0.0,
+        (Some(_), true) => -1.0,
+        (Some(_), false) => 1.0,
+    })
+}
+
+pub(super) fn orientations(basis: [Vec3; 3], points: [Vec3; 3]) -> Result<[f64; 3], crate::Error> {
+    if basis.iter().chain(&points).any(|point| !point.is_finite()) {
+        return Err(GeometryError::ArithmeticOverflow.into());
+    }
+    let [a, b, c] = basis.map(factors);
+    let determinants = points.map(|point| Determinant::new([a, b, c, factors(point)]));
     let leading = determinants.each_ref().map(Determinant::leading_bit);
     let Some(common) = leading.iter().flatten().copied().max() else {
         return Ok([0.0; 3]);
@@ -175,12 +187,12 @@ mod tests {
         let minimum = f64::from_bits(1);
         let blocker = [Vec3::ZERO, Vec3::X * maximum, Vec3::Y * minimum];
         let source = [Vec3::Z * maximum, Vec3::Z * (-maximum / 2.0), Vec3::X];
-        let values = depths(blocker, source)?;
+        let values = orientations(blocker, source)?;
         assert!(values[0] < 0.0);
         assert_eq!(values[1], -values[0] / 2.0);
         assert_eq!(values[2], 0.0);
         assert_eq!(
-            depths([blocker[0], blocker[2], blocker[1]], source)?,
+            orientations([blocker[0], blocker[2], blocker[1]], source)?,
             values.map(|v| -v)
         );
         Ok(())
@@ -190,14 +202,14 @@ mod tests {
     fn determinant_conversion_preserves_smallest_subnormal_or_errors() -> Result<(), crate::Error> {
         let minimum = f64::from_bits(1);
         assert_eq!(
-            depths(
+            orientations(
                 [Vec3::ZERO, Vec3::X, Vec3::Y],
                 [Vec3::Z, Vec3::Z * minimum, Vec3::ZERO]
             )?,
             [-1.0, -minimum, 0.0],
         );
         assert_eq!(
-            depths(
+            orientations(
                 [Vec3::ZERO, Vec3::X, Vec3::Y],
                 [Vec3::Z * 2.0, Vec3::Z * minimum, Vec3::ZERO]
             ),
@@ -212,7 +224,7 @@ mod tests {
         let t = Vec3::splat(translation);
         let edge = 2.0_f64.powi(50);
         let blocker = [t, t + Vec3::X * edge, t + Vec3::Y * edge];
-        let values = depths(blocker, [t + Vec3::Z * edge, t - Vec3::Z * edge, t])?;
+        let values = orientations(blocker, [t + Vec3::Z * edge, t - Vec3::Z * edge, t])?;
         assert_eq!(values, [-1.0, 1.0, 0.0]);
         Ok(())
     }
