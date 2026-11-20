@@ -659,10 +659,66 @@ fn triangle_grid_bounds(
     )
 }
 
+fn has_nonzero_winding(instance: &GeometryInstance<'_>, point: Vec3) -> Result<bool, crate::Error> {
+    // Jacobson et al. (2013), section 4.1, equation (2), evaluated with unit rays.
+    // Away from an oriented closed surface the sum is an integer number of turns.
+    const MAX_WINDING_ERROR: f64 = 0.125;
+    let unit_ray = |index: usize| -> Result<Vec3, crate::Error> {
+        let vertex = instance
+            .local_transform
+            .transform_point(instance.mesh.vertices()[index]);
+        let ray = vertex - point;
+        let length = ray
+            .checked_length()
+            .filter(|length| *length > 0.0)
+            .ok_or(GeometryError::PrecisionLoss)?;
+        let unit = ray / length;
+        if !unit.is_finite() {
+            return Err(GeometryError::PrecisionLoss.into());
+        }
+        Ok(unit)
+    };
+    let mut solid_angle = 0.0;
+    for &[a, b, c] in instance.mesh.triangles() {
+        let (a, b, c) = (unit_ray(a)?, unit_ray(b)?, unit_ray(c)?);
+        let numerator = a.dot(b.cross(c));
+        let denominator = 1.0 + a.dot(b) + b.dot(c) + c.dot(a);
+        if numerator == 0.0 && denominator <= 0.0 {
+            return Err(GeometryError::PrecisionLoss.into());
+        }
+        solid_angle += 2.0 * numerator.atan2(denominator);
+    }
+    let winding = solid_angle / (4.0 * std::f64::consts::PI);
+    let integral = winding.round();
+    if !winding.is_finite() || (winding - integral).abs() > MAX_WINDING_ERROR {
+        return Err(GeometryError::PrecisionLoss.into());
+    }
+    Ok(integral != 0.0)
+}
+
 impl PreparedGeometry {
     pub fn prepare(
         instances: &[GeometryInstance<'_>],
         config: GeometryConfig,
+    ) -> Result<Self, crate::Error> {
+        Self::prepare_inner(instances, config, false)
+    }
+
+    /// Preserves resolved cavities in closed oriented meshes. The walls of a
+    /// cavity must have winding opposite to the enclosing shell in the same
+    /// instance. Cells touched by triangles remain conservatively occupied.
+    /// The worst-case solid-angle evaluation is charged to `config.max_work`.
+    pub fn prepare_with_oriented_cavities(
+        instances: &[GeometryInstance<'_>],
+        config: GeometryConfig,
+    ) -> Result<Self, crate::Error> {
+        Self::prepare_inner(instances, config, true)
+    }
+
+    fn prepare_inner(
+        instances: &[GeometryInstance<'_>],
+        config: GeometryConfig,
+        oriented_cavities: bool,
     ) -> Result<Self, crate::Error> {
         let h = config.cell_size;
         if !h.is_finite()
@@ -763,6 +819,12 @@ impl PreparedGeometry {
             .and_then(|n| n.checked_add(preprocessing_work))
             .and_then(|n| n.checked_add(triangle_count.saturating_mul(10)))
             .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
+        if oriented_cavities {
+            work = count
+                .checked_mul(triangle_count)
+                .and_then(|n| work.checked_add(n))
+                .ok_or(GeometryError::WorkBudgetExceeded)?;
+        }
         for instance in instances {
             for &[a, b, c] in instance.mesh.triangles() {
                 let triangle = [a, b, c].map(|i| {
@@ -862,7 +924,18 @@ impl PreparedGeometry {
                 }
             }
             for i in 0..count {
-                if shell[i] || (is_closed && !exterior[i]) {
+                let filled_interior = if is_closed && !exterior[i] && !shell[i] {
+                    if oriented_cavities {
+                        let p = coordinates(i, dimensions);
+                        let center = origin + vector(p.map(|v| (v as f64 + 0.5) * h));
+                        has_nonzero_winding(instance, center)?
+                    } else {
+                        true
+                    }
+                } else {
+                    false
+                };
+                if shell[i] || filled_interior {
                     occupancy[i] = Some(
                         occupancy[i].map_or(instance.owner, |owner| owner.min(instance.owner)),
                     );

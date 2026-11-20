@@ -69,6 +69,44 @@ fn config(h: f64) -> GeometryConfig {
         max_patch_work: 100_000,
     }
 }
+
+#[test]
+fn oriented_voxelization_preserves_a_sealed_hollow_cavity() -> Result<(), crate::Error> {
+    let shell = cube();
+    let vertices = shell
+        .vertices()
+        .iter()
+        .copied()
+        .chain(
+            shell
+                .vertices()
+                .iter()
+                .map(|v| Vec3::splat(0.25) + *v * 0.5),
+        )
+        .collect();
+    let faces = shell
+        .triangles()
+        .iter()
+        .copied()
+        .chain(
+            shell
+                .triangles()
+                .iter()
+                .map(|&[a, b, c]| [a + 8, c + 8, b + 8]),
+        )
+        .collect();
+    let mesh = TriangleMesh::new(vertices, faces)?;
+    let inputs = [instance(&mesh, Vec3::ZERO)];
+    let settings = config(0.0625);
+    let hollow = PreparedGeometry::prepare_with_oriented_cavities(&inputs, settings)?;
+    let solid = PreparedGeometry::prepare(&inputs, settings)?;
+    let center = Vec3::splat(0.5);
+    assert!(!hollow.occupied_at(center)?);
+    assert!(solid.occupied_at(center)?);
+    assert!(hollow.occupied_at(Vec3::new(0.125, 0.5, 0.5))?);
+    assert!(hollow.volume() < solid.volume());
+    Ok(())
+}
 fn instance(mesh: &TriangleMesh, offset: Vec3) -> GeometryInstance<'_> {
     GeometryInstance {
         mesh,

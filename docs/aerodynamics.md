@@ -38,6 +38,15 @@ Overlaps count once; the lowest `GeometryOwner` wins attribution ties, independe
 
 `max_cells` and `max_work` are mandatory budgets, with hard ceilings of 1,048,576 cells and 100,000,000 work units. Preparation bounds triangle/box tests, input vertex scans and per-instance cell scans before allocating the grid; edge closure sorting adds `O(triangles log triangles)` work. Triangle/box tests are restricted to each triangle's conservative grid-index bounds; per-instance occupancy and flood-fill passes still traverse the grid. The scalar baseline is measured in [the aerodynamic benchmark report](../benchmarks/aerodynamics.md). Allocation failures and invalid/unrepresentable input are explicit errors. This preparation primitive supplies no SIMD or background cache publication; world force integration and collider conversion are described below. World movement and center-of-mass edits do not change the prepared local geometry; construction edits require an explicit new preparation.
 
+`PreparedGeometry::prepare_with_oriented_cavities` offers cavity-aware occupancy
+for closed meshes. Oppositely oriented inner walls must belong to the same
+instance as the enclosing shell. The method sums [signed triangle solid
+angles](https://users.cs.utah.edu/~ladislav/jacobson13robust/jacobson13robust.pdf)
+for non-surface cells enclosed by the voxel shell, then fills cells with a
+nonzero winding number. Surface cells remain occupied. The work budget reserves
+one winding contribution per grid cell and source triangle before allocation.
+The existing `prepare` entry point and automatic world preparation use solid fill.
+
 References for geometric concepts: [Voxel](https://en.wikipedia.org/wiki/Voxel), [Hyperplane separation theorem — separating axis theorem](https://en.wikipedia.org/wiki/Hyperplane_separation_theorem), [Flood fill](https://en.wikipedia.org/wiki/Flood_fill). No FAR implementation code is used.
 
 ## World Mesh and Colliders integration
