@@ -14,6 +14,58 @@ fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepEr
 }
 
 #[test]
+fn transonic_wind_tunnel_wing_loads_advance_rigid_body() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::wing::{FiniteWing, WingSurface};
+
+    let model = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?
+        .with_ndarc_lift_correction(0.75, 1.2)?
+        .with_ndarc_drag_rise(0.75, 0.0, 0.04)?;
+    let area = 2.0;
+    let alpha = 0.04_f64;
+    let direction = Vec3::new(alpha.cos(), 0.0, -alpha.sin());
+    let lift_direction = Vec3::new(alpha.sin(), 0.0, alpha.cos());
+    let dt = 0.001;
+    let mass_kg = 250.0;
+    let sound_speed = 340.0;
+    let density = 1.2;
+
+    // Fixed-incidence wind-tunnel conditions with independently reset states.
+    for mach in [0.75, 0.85, 0.99, 1.0, 1.01, 1.15] {
+        let speed = mach * sound_speed;
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            density,
+            -direction * speed,
+        )?));
+        world.set_mesh_sound_speed(sound_speed)?;
+        let mass = MassProperties::new(mass_kg, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_aerodynamics(Aerodynamics::Wing(WingSurface::new(
+            model,
+            Transform::identity(),
+            area,
+        )?));
+        let id = world.add_body(body)?;
+
+        let coefficients = model.coefficients(alpha, mach)?;
+        let pressure_area = 0.5 * density * speed * speed * area;
+        let expected_velocity = (lift_direction * coefficients.lift
+            - direction * coefficients.drag)
+            * (pressure_area * dt / mass_kg);
+        world.step(dt)?;
+        let state = world.body(id).ok_or("wind-tunnel wing")?.state();
+        assert!(
+            (state.linear_velocity() - expected_velocity).length() < 1e-12,
+            "Mach {mach}"
+        );
+        assert!(state.linear_velocity().dot(direction) < 0.0);
+        assert!(state.linear_velocity().dot(lift_direction) > 0.0);
+        assert_eq!(state.angular_velocity(), Vec3::ZERO);
+    }
+    Ok(())
+}
+
+#[test]
 fn creeping_particle_steps_across_knudsen_regimes() -> Result<(), Box<dyn std::error::Error>> {
     use crate::aerodynamics::sphere_drag::{SphereDrag, creeping_particle_drag_ratio};
 
