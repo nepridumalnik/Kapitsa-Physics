@@ -80,8 +80,10 @@ pub enum HullError {
     GeometryNotPrepared,
     UnsupportedMach,
     UnsupportedReynolds,
-    /// The configured incompressible flat-plate correlation has no compressible closure.
+    /// Total local Mach exceeds the configured skin-friction domain.
     UnsupportedSkinFrictionMach,
+    /// The configured flat-plate transition model requires axial flow.
+    UnsupportedSkinFrictionIncidence,
     /// The slender-body normal-load model requires forward small-incidence flow.
     UnsupportedSlenderIncidence,
     /// This steady slender-body model does not include rotational derivatives.
@@ -696,6 +698,17 @@ impl HullSection {
             .checked_sub(axial)
             .ok_or_else(|| overflow.clone())?;
         let cross_speed = crossflow.checked_length().ok_or_else(|| overflow.clone())?;
+        // A transformed unit axis can leave a roundoff-sized transverse residual.
+        const AXIAL_ALIGNMENT_ROUNDOFF: f64 = 64.0 * f64::EPSILON;
+        let has_incidence = cross_speed > speed * AXIAL_ALIGNMENT_ROUNDOFF;
+        if has_incidence
+            && self.wetted_area != 0.0
+            && self
+                .skin_friction
+                .is_some_and(|friction| friction.law == SkinFrictionLaw::TransitionedFlatPlate)
+        {
+            return Err(HullError::UnsupportedSkinFrictionIncidence.into());
+        }
         let rotation_gradient = if let Some(cell) = self.potential {
             let transverse_rotation = flow
                 .angular_velocity
@@ -737,7 +750,7 @@ impl HullSection {
             if multiplier == 0.0 {
                 Vec3::ZERO
             } else {
-                if cross_speed > speed * (64.0 * f64::EPSILON) {
+                if has_incidence {
                     return Err(crate::Error::from(HullError::UnsupportedWaveIncidence));
                 }
                 {
@@ -1707,6 +1720,13 @@ mod tests {
             force,
             Vec3::X * (-0.5 * 1.2 * speed * speed * s.wetted_area * expected_cf),
         );
+        close(s.evaluate(flow(-Vec3::X * speed))?.force, -force);
+        for velocity in [Vec3::X * speed + Vec3::Y, Vec3::Y * speed] {
+            assert_eq!(
+                s.evaluate(flow(velocity)),
+                Err(HullError::UnsupportedSkinFrictionIncidence.into())
+            );
+        }
         for reynolds in [500_000.0, 100_000_000.0] {
             assert_eq!(
                 friction.mean_coefficient(reynolds, 0.0),

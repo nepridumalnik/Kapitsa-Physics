@@ -214,7 +214,9 @@ only; length is per-section development length, not accumulated automatically.
 correlation for a smooth plate at zero incidence with transition near
 `Re = 500,000`. It accepts `500,000 < Re < 100,000,000` and total Mach ≤ 0.3.
 See [NASA/TP-2006-213486, section 1.5](https://ntrs.nasa.gov/api/citations/20060053240/downloads/20060053240.pdf).
-The transition point is prescribed by the correlation. Zero axial speed
+The transition point is prescribed by the correlation. The transitioned plate
+rejects crossflow beyond the rounding error of an axial projection.
+For the other friction models, zero axial speed
 skips friction and its Reynolds check. Omitting friction is inviscid. These
 flat-plate correlations are incompressible only: an enabled wetted friction load
 above total Mach 0.3 returns `UnsupportedSkinFrictionMach`, even with an explicit
