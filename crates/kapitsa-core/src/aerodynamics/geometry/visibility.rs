@@ -257,13 +257,30 @@ impl Shadow {
         }
         let mut planes = [[0.0; 3]; 4];
         planes[3] = normalize(depth)?;
+        let axial_projection = match (upstream.x == 0.0, upstream.y == 0.0, upstream.z == 0.0) {
+            (false, true, true) => Some(Vec3::new(0.0, 1.0, 1.0)),
+            (true, false, true) => Some(Vec3::new(1.0, 0.0, 1.0)),
+            (true, true, false) => Some(Vec3::new(1.0, 1.0, 0.0)),
+            _ => None,
+        };
+        // The edge determinant already contains the axial direction.
+        // Dropping that component from its other vectors leaves it unchanged.
+        let (blocker_vertices, source_vertices) = if let Some(mask) = axial_projection {
+            (
+                blocker.vertices.map(|p| p * mask),
+                source.vertices.map(|p| p * mask),
+            )
+        } else {
+            (blocker.vertices, source.vertices)
+        };
+        let [a, b, c] = blocker_vertices;
         for (plane, (start, end, opposite)) in
             planes[..3]
                 .iter_mut()
                 .zip([(a, b, c), (b, c, a), (c, a, b)])
         {
             let edge = end - start;
-            let offsets = source.vertices.map(|p| p - start);
+            let offsets = source_vertices.map(|p| p - start);
             let opposite = opposite - start;
             let frame = PredicateFrame::new(&[
                 Vec3::ZERO,
@@ -708,15 +725,42 @@ mod tests {
     }
 
     #[test]
+    fn axial_shadow_preserves_small_representable_depth() -> Result<(), crate::Error> {
+        for (axis, u, v) in [
+            (Vec3::X, Vec3::Y, Vec3::Z),
+            (Vec3::Y, Vec3::Z, Vec3::X),
+            (Vec3::Z, Vec3::X, Vec3::Y),
+        ] {
+            for upstream in [axis, -axis] {
+                let source = SurfaceTriangle {
+                    vertices: [Vec3::ZERO, u, v],
+                    normal: upstream,
+                    area: 0.5,
+                    owner: GeometryOwner::Body,
+                };
+                let blocker = SurfaceTriangle {
+                    vertices: source.vertices.map(|p| p + upstream * 1e-100),
+                    ..source
+                };
+                let shadow = Shadow::new(&source, &blocker, 0, 1, upstream)?
+                    .ok_or(GeometryError::PrecisionLoss)?;
+                assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
+                assert!(Shadow::new(&source, &blocker, 0, 1, -upstream)?.is_none());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn unsupported_precision_is_an_error_instead_of_a_missed_blocker() {
         let source = SurfaceTriangle {
-            vertices: [Vec3::ZERO, Vec3::Y, Vec3::Z],
+            vertices: [Vec3::ZERO, Vec3::Y + Vec3::X * 1e-100, Vec3::Z],
             normal: Vec3::X,
             area: 0.5,
             owner: GeometryOwner::Body,
         };
         let blocker = SurfaceTriangle {
-            vertices: source.vertices.map(|p| p + Vec3::X * 1e-100),
+            vertices: [Vec3::X, Vec3::X + Vec3::Y, Vec3::X + Vec3::Z],
             ..source
         };
         assert!(matches!(

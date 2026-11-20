@@ -519,6 +519,10 @@ a power of two. Orientation comparisons within a frame share one positive
 determinant factor. Barycentric areas undo the product of the two in-plane
 scales. The existing exponent-span bound applies within each axis, so large
 differences between axis scales alone do not reject a thin triangle.
+For flow along a coordinate axis, the projected edge tests omit the upstream
+coordinate. It has no contribution to the edge determinants. The depth test
+uses the original three-dimensional coordinates so upstream and downstream
+blockers remain distinct even at small separations.
 
 Visibility preprocessing counts source triangles once and reuses that count
 when collecting the transformed triangles. The grid receives the portion of
