@@ -7,8 +7,8 @@ Document the surface-visibility hardening on `feat/aero_rest` since
 predicate scaling in generic surface geometry and `7d6e5a6` for stable,
 linear-work shadow-grid bucket construction without sorting entries, plus
 `8cf7271` for measured clipping split reservations and `0337ef5` for bounded
-exact inclined depth fallback, and `aec8f8d` for absolute-scale triangle-area
-fallback.
+exact inclined depth fallback, `aec8f8d` for absolute-scale triangle-area
+fallback, and `d5624ae` for exact projection from original vertex coordinates.
 
 ## Scope
 
@@ -24,11 +24,20 @@ This change covers:
   when a nonzero fraction rounds to zero;
 - recording the two synthetic regressions in `07c7285`: barycentric area
   preservation across axis scales and shadow coverage of a thin source;
-- evaluating coordinate-aligned blocker depth by signed axial separation;
-  direction, depth and projected-edge predicates fall back to exact
+- evaluating coordinate-aligned blocker depth by finite signed axial separation,
+  using the general depth predicate (3D frame, then exact fallback) when that
+  separation overflows;
+- direction, depth and projected-edge predicates fall back to exact
   orientations when their frames exceed span or direction scaling underflows;
   direction and edge references use sign-only orientation, with edge
   coefficients scaled separately;
+- expanding exact projection as `det(end-start, point-start, direction)` from
+  original finite endpoints and the original ray direction, before subtraction;
+  overflowing intermediate edges or offsets select exact projection, while the
+  fast path explicitly retains rounded floating-point edges and offsets;
+- recording `d5624ae` synthetic regressions for displacement erased by rounded
+  subtraction, overflowing endpoint differences and overflowing axial depth,
+  without claiming test execution or independent physical validation;
 - precharging fixed, allocation-free 99-word orientation accumulations;
   scaling coefficients and rounding ties to even, with `PrecisionLoss` if a
   nonzero coefficient rounds to zero;

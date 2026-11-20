@@ -8,7 +8,8 @@
 - [x] Record exact fallback for direction, depth and projected-edge frame-span
   rejection or direction-scale underflow; charge before exact work, use sign
   only for direction and edge references, and scale three edge coefficients
-  separately while retaining rounded-input and zero-coefficient limits.
+  separately; `d5624ae` removes rounded differences from exact projection only,
+  retaining rounded fast-path offsets and zero-coefficient limits.
 - [x] Document the two new synthetic regressions,
   `triangle_fraction_preserves_area_across_axis_scales` and
   `shadow_covers_thin_source_across_axis_scales`, without claiming execution
@@ -61,6 +62,16 @@
   smallest-subnormal area in either winding, exact work charge, underflow
   rejection and rejected precharge, without claiming execution or physical
   validation; remove the obsolete triangle-area frame-span limitation.
+- [x] Record `d5624ae`: expand exact projected determinants from original
+  endpoints and ray direction before subtraction; overflowing intermediate
+  edges or offsets select fallback, while fast-path edges and offsets stay
+  rounded. Non-finite original vertices or direction remain errors.
+- [x] Record general depth evaluation (3D frame, then exact fallback) when a
+  signed axial separation overflows, rather than rejecting the separation.
+- [x] Document `projected_determinants_preserve_displacement_lost_by_subtraction`,
+  `projected_determinants_accept_overflowing_endpoint_difference` and
+  `axial_depth_accepts_overflowing_separation` as synthetic regressions only,
+  without claiming execution or independent physical validation.
 - [ ] Audit and complete the remaining hard work budget coverage for every
   intermediate operation before treating the preparation path as production-
   complete.

@@ -259,3 +259,7 @@ The area fallback revision `aec8f8d` measured medians of 21.35 us and
 projected-edge fixture measured 6.24 us (6.21 to 6.29 us). The benchmark
 does not isolate the exact area fallback. Its subnormal-area behavior is
 covered by the focused regression.
+
+Projection from original coordinates on `d5624ae` measured medians of
+21.90 us and 1.346 ms on the small and moderate fixtures. The wide
+projected-edge fixture measured 6.06 us (6.05 to 6.20 us).

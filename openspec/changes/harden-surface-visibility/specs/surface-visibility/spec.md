@@ -27,8 +27,8 @@ Barycentric area calculations SHALL undo both in-plane scales.
 
 - **WHEN** a direction or projected edge predicate exceeds its supported
   exponent span
-- **THEN** preparation returns `PrecisionLoss`; exact depth fallback does
-  not remove those limits
+- **THEN** preparation precharges exact fallback instead of rejecting the
+  frame span alone
 
 #### Scenario: An aligned plane bypasses the 3D span limit
 
@@ -39,10 +39,10 @@ Barycentric area calculations SHALL undo both in-plane scales.
 
 ### Requirement: Omit axial depth only from projected edge tests
 
-For flow exactly along one coordinate axis, projected edge tests SHALL omit
-only that axial coordinate. Coordinate-aligned blocker depth SHALL use signed
-separation along the aligned axis; other planes SHALL try the 3D depth frame
-before exact fallback.
+For exactly axial flow, projected edge tests SHALL omit only that axial
+coordinate. Aligned blocker depth SHALL use finite signed axial separation.
+Overflowing separation or other planes SHALL use the general depth predicate:
+try the 3D frame, then precharged exact fallback.
 
 #### Scenario: Axial shadow uses signed separation for blocker depth
 
@@ -58,14 +58,22 @@ before exact fallback.
 - **THEN** the blocker covers the source-affine point `(0.25, 0.25, 0)` and
   the opposite flow direction rejects it
 
+#### Scenario: Synthetic axial separation overflows
+
+- **WHEN** `axial_depth_accepts_overflowing_separation` uses blocker vertices
+  `[s, s + Y, s + Z]`, source vertices `[-s, -s + Y, -s + Z]`, and
+  `s = X*f64::MAX`
+- **THEN** the overflowing separation selects the general depth predicate;
+  flow `X` covers affine point `(0.25, 0.25, 0)`, while `-X` yields no shadow
+- **AND** this is a synthetic assertion, not execution evidence or independent
+  physical validation
+
 ### Requirement: Fall back to exact orientation predicates
 
-If a direction, depth, or projected-edge frame exceeds its span, or direction
-scaling overflows or makes a nonzero component subnormal or zero, preparation
-SHALL charge exact work
-before evaluation. Direction and edge-reference predicates SHALL use sign only;
-the three edge coefficients SHALL use a separate scale. A nonzero coefficient
-that rounds to zero SHALL return `PrecisionLoss`.
+Frame-span rejection or direction scaling overflow, subnormalization or loss
+to zero SHALL trigger precharged exact work. Direction and edge references
+SHALL use sign only; three edge coefficients SHALL share a separate scale.
+Nonzero coefficients rounding to zero SHALL return `PrecisionLoss`.
 
 #### Scenario: Large determinant terms cancel
 
@@ -95,11 +103,41 @@ that rounds to zero SHALL return `PrecisionLoss`.
   direction and edge-reference orientation use only their sign, and the three
   edge coefficients are scaled independently of that reference
 
-#### Scenario: Rounded orientation inputs retain precision limits
+### Requirement: Project exactly from original endpoints
 
-- **WHEN** exact orientation receives rounded input vectors or a coefficient
-  rounds a nonzero value to zero
-- **THEN** the existing `PrecisionLoss` limits remain in force
+Exact projection SHALL expand `det(end-start, point-start, direction)` from
+original endpoints and ray direction before subtraction. Overflowing edges or
+offsets SHALL select precharged fallback. The fast path SHALL retain rounded
+floating-point edges and offsets. Non-finite original vertices or direction
+SHALL return `ArithmeticOverflow`.
+
+#### Scenario: Exact projection expands before subtraction
+
+- **WHEN** exact projection evaluates original endpoints `s`, `e`, point `p`
+  and ray direction `d`
+- **THEN** it accumulates `det(e,p,d) - det(s,p,d) - det(e,s,d)` exactly,
+  without first forming rounded differences; reference signs and commonly
+  scaled coefficients use this expansion
+- **AND** an overflowing intermediate edge, opposite offset or source offset
+  bypasses the fast projected-edge frame, not the finite-input check
+
+#### Scenario: Synthetic rounded subtraction erases displacement
+
+- **WHEN** `projected_determinants_preserve_displacement_lost_by_subtraction`
+  uses `s = X*2^-500`, `e = X + Y`, `p = 2*e`, and direction `Z`
+- **THEN** `(e-s).cross(p-s)` rounds to zero, but exact projected sign is `-1`
+  and coefficients for `[p, e, 0]` are `[-1, 0, 1]`
+- **AND** this is a synthetic assertion, not execution evidence or independent
+  physical validation
+
+#### Scenario: Synthetic endpoint difference overflows
+
+- **WHEN** `projected_determinants_accept_overflowing_endpoint_difference`
+  uses `s = X*f64::MAX`, `e = -s`, direction `Z`, and points `[Y, -Y*0.5, 0]`
+- **THEN** `e-s` is non-finite but exact coefficients succeed: the first is
+  negative, the second is minus half the first, and the third is zero
+- **AND** this is a synthetic assertion, not execution evidence or independent
+  physical validation
 
 ### Requirement: Recover absolute-scale triangle areas
 
@@ -122,14 +160,10 @@ to zero SHALL return `PrecisionLoss`.
 
 ### Requirement: Preserve representable numeric intersections
 
-The surface-visibility intersection calculations SHALL handle finite endpoint
-values whose direct difference overflows when the intersection remains
-representable. Crossing fractions SHALL use a ratio-preserving rescaling in
-that case, and coordinate interpolation SHALL avoid an overflowing endpoint
-difference where the alternative weighted form is representable.
-
-Genuine non-finite results and precision loss SHALL remain errors rather than
-being silently converted into a missed intersection.
+For finite endpoints with overflowing differences, crossings SHALL use
+ratio-preserving rescaling and coordinates SHALL use weighted interpolation
+when it preserves a representable intersection. Genuine non-finite results
+and precision loss SHALL remain errors, not missed intersections.
 
 #### Scenario: Finite distances have an overflowing difference
 
@@ -147,12 +181,10 @@ being silently converted into a missed intersection.
 
 ### Requirement: Check area consistency per source partition
 
-The clipping result SHALL check conservation of the source triangle's local
-barycentric area after partition reconstruction. Its tolerance SHALL be a
-heuristic based on work charged for the current source partition, including
-the initial triangle contribution, rather than on unrelated prior sources or
-global preprocessing work. The tolerance SHALL be documented as heuristic and
-not as a proven numerical error bound.
+Reconstructed pieces SHALL conserve source-local barycentric area. The check
+SHALL use a documented heuristic tolerance, not a proven error bound, based
+on current partition work including the initial triangle, not prior sources
+or global preprocessing.
 
 #### Scenario: A source triangle is split into clipping pieces
 
