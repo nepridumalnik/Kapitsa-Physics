@@ -637,6 +637,14 @@ nonrotating sphere centered on its center of mass. It derives the molecular
 speed from local sound speed assuming air with `gamma = 1.4`, and derives Kn
 from local density and configured or sampled dynamic viscosity.
 
+`sphere_drag::transitional_particle_drag_coefficient` covers `0.1 ≤ Kn ≤ 10`,
+`0 < Re ≤ 45`, and `0 < Mach ≤ 10` for the same isolated-sphere assumptions.
+It blends the slip and Reynolds-corrected molecular terms using [Palmer and
+Sahai, equations 13–18](https://ntrs.nasa.gov/api/citations/20220018430/downloads/AIAA_2023_Palmer_Drag_Model_Paper_v2.pdf).
+The molecular term uses the original Loth et al. equation (13). The empirical
+Mach branches are discontinuous at Mach 1. The lower-Mach branch supplies the
+value at the breakpoint. The coefficient is available independently of stepping.
+
 ## Skin friction
 
 For a laminar flat plate, the local Blasius relation is `c_f(x) = 0.664 / sqrt(Re_x)`. Integrating from the leading edge to plate length `L` gives the streamwise average `C_f = 1.328 / sqrt(Re_L)`. The distinction between local and averaged coefficients matters when summing sections.

@@ -27,6 +27,8 @@ const BROWN_LAWLER_INERTIAL_SCALE: f64 = 0.407;
 const BROWN_LAWLER_TRANSITION_REYNOLDS: f64 = 8_710.0;
 const INCOMPRESSIBLE_MAX_MACH: f64 = 0.2;
 const MIN_FREE_MOLECULAR_KNUDSEN: f64 = 10.0;
+const MAX_SLIP_KNUDSEN: f64 = 0.1;
+const MAX_RAREFACTION_REYNOLDS: f64 = 45.0;
 const SERIES_MAX_SPEED_RATIO: f64 = 0.05;
 
 /// Invalid or outside the deliberately restricted approximation domain.
@@ -358,12 +360,6 @@ pub fn slip_corrected_particle_drag_coefficient(
     mach: f64,
     reynolds: f64,
 ) -> Result<f64, crate::Error> {
-    const MAX_SLIP_KNUDSEN: f64 = 0.1;
-    const MAX_RAREFACTION_REYNOLDS: f64 = 45.0;
-    const SLIP_LINEAR: f64 = 2.514;
-    const SLIP_EXPONENTIAL: f64 = 0.8;
-    const SLIP_DECAY: f64 = 0.55;
-
     if !mach.is_finite() || mach <= 0.0 || !reynolds.is_finite() || reynolds <= 0.0 {
         return Err(SphereDragError::InvalidInput.into());
     }
@@ -374,9 +370,61 @@ pub fn slip_corrected_particle_drag_coefficient(
     {
         return Err(SphereDragError::UnsupportedDomain.into());
     }
-    let slip = 1.0 + knudsen * (SLIP_LINEAR + SLIP_EXPONENTIAL * (-SLIP_DECAY / knudsen).exp());
-    let cd = (STOKES_FACTOR / reynolds) * (1.0 + 0.15 * reynolds.powf(0.687)) / slip;
+    let cd = slip_drag_coefficient(reynolds, knudsen);
     if !cd.is_finite() {
+        return Err(SphereDragError::ArithmeticOverflow.into());
+    }
+    Ok(cd)
+}
+
+fn slip_drag_coefficient(reynolds: f64, knudsen: f64) -> f64 {
+    const SLIP_LINEAR: f64 = 2.514;
+    const SLIP_EXPONENTIAL: f64 = 0.8;
+    const SLIP_DECAY: f64 = 0.55;
+    let slip = 1.0 + knudsen * (SLIP_LINEAR + SLIP_EXPONENTIAL * (-SLIP_DECAY / knudsen).exp());
+    (STOKES_FACTOR / reynolds) * (1.0 + 0.15 * reynolds.powf(0.687)) / slip
+}
+
+/// Rarefaction-dominated transitional drag coefficient of an isolated sphere
+/// in air, with diffuse reflection and equal gas and particle temperatures.
+/// Uses the Loth model as reproduced in Palmer and Sahai (2023), equations
+/// (13–18), with the molecular term from Loth et al. (2021), equation (13).
+/// Accepts `0 < Mach ≤ 10`, `0 < Re ≤ 45` and diameter-based `0.1 ≤ Kn ≤ 10`.
+/// These are implementation limits. The published Mach branches retain their
+/// jump at Mach 1, where the lower-Mach expression is used.
+pub fn transitional_particle_drag_coefficient(
+    mach: f64,
+    reynolds: f64,
+) -> Result<f64, crate::Error> {
+    const MAX_TRANSITIONAL_MACH: f64 = 10.0;
+    if !mach.is_finite() || mach <= 0.0 || !reynolds.is_finite() || reynolds <= 0.0 {
+        return Err(SphereDragError::InvalidInput.into());
+    }
+    let kn = air_knudsen(mach, reynolds);
+    if mach > MAX_TRANSITIONAL_MACH
+        || reynolds > MAX_RAREFACTION_REYNOLDS
+        || !(MAX_SLIP_KNUDSEN..=MIN_FREE_MOLECULAR_KNUDSEN).contains(&kn)
+    {
+        return Err(SphereDragError::UnsupportedDomain.into());
+    }
+    let slip = slip_drag_coefficient(reynolds, kn);
+    let molecular = free_molecular_coefficient(mach * (GAMMA / 2.0).sqrt());
+    if !slip.is_finite() || !molecular.is_finite() {
+        return Err(SphereDragError::ArithmeticOverflow.into());
+    }
+    // Use 1/J_M to avoid forming the diverging low-Mach term.
+    let inverse_j = if mach <= 1.0 {
+        let cube = mach.powi(3);
+        cube / (2.26 * cube - 0.1 * mach * mach + 0.14)
+    } else {
+        let inverse = mach.recip();
+        (1.6 + inverse * (0.25 + inverse * (0.11 + 0.44 * inverse))).recip()
+    };
+    let re_weight = (reynolds / MAX_RAREFACTION_REYNOLDS).sqrt();
+    let corrected_molecular = ((1.0 - re_weight) / molecular + re_weight * inverse_j).recip();
+    let mach_weight = mach.powi(4);
+    let cd = (slip + mach_weight * corrected_molecular) / (1.0 + mach_weight);
+    if !cd.is_finite() || cd <= 0.0 {
         return Err(SphereDragError::ArithmeticOverflow.into());
     }
     Ok(cd)
@@ -408,10 +456,18 @@ pub fn free_molecular_particle_drag_coefficient(
     if diameter_knudsen < MIN_FREE_MOLECULAR_KNUDSEN {
         return Err(SphereDragError::UnsupportedDomain.into());
     }
+    let cd = free_molecular_coefficient(speed_ratio);
+    if !cd.is_finite() || cd <= 0.0 {
+        return Err(SphereDragError::ArithmeticOverflow.into());
+    }
+    Ok(cd)
+}
+
+fn free_molecular_coefficient(speed_ratio: f64) -> f64 {
     let sqrt_pi = std::f64::consts::PI.sqrt();
     let square = speed_ratio * speed_ratio;
     let thermal_reemission = 2.0 * sqrt_pi / 3.0;
-    let cd = if speed_ratio < SERIES_MAX_SPEED_RATIO {
+    if speed_ratio < SERIES_MAX_SPEED_RATIO {
         free_molecular_slow_gain(speed_ratio) / speed_ratio
     } else {
         let inverse = speed_ratio.recip();
@@ -419,11 +475,7 @@ pub fn free_molecular_particle_drag_coefficient(
         (-square).exp() * inverse * (2.0 + inverse_square) / sqrt_pi
             + (2.0 + inverse_square * (2.0 - 0.5 * inverse_square)) * libm::erf(speed_ratio)
             + thermal_reemission * inverse
-    };
-    if !cd.is_finite() || cd <= 0.0 {
-        return Err(SphereDragError::ArithmeticOverflow.into());
     }
-    Ok(cd)
 }
 
 fn air_mean_free_path_factor() -> f64 {
@@ -582,6 +634,27 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transitional_particle_drag_matches_published_blend() -> Result<(), crate::Error> {
+        for (mach, re, expected) in [
+            (0.1, 1.0, 20.065_781_694_276_63),
+            (0.8, 2.0, 5.354_421_657_059_875),
+            (1.0, 2.0, 4.491_027_916_320_485),
+            (1.25, 10.0, 2.904_812_519_882_347),
+            (8.0, 5.0, 1.983_081_270_132_716_5),
+        ] {
+            let actual = transitional_particle_drag_coefficient(mach, re)?;
+            assert!((actual - expected).abs() < 1e-12);
+        }
+        for (mach, re) in [(0.05, 45.0), (1.0, 0.01), (4.0, 46.0), (10.01, 5.0)] {
+            assert_eq!(
+                transitional_particle_drag_coefficient(mach, re),
+                Err(SphereDragError::UnsupportedDomain.into())
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn free_molecular_particle_drag_matches_kinetic_limits() -> Result<(), crate::Error> {
