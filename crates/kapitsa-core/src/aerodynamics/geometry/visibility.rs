@@ -431,23 +431,31 @@ impl AreaSum {
     }
 }
 
-pub(super) fn polygon_fraction(points: &[Vec3]) -> Result<f64, crate::Error> {
+pub(super) fn polygon_fraction(
+    points: &[Vec3],
+    mut charge: impl FnMut(usize) -> Result<(), crate::Error>,
+) -> Result<f64, crate::Error> {
     let mut area = AreaSum::default();
     for index in 1..points.len().saturating_sub(1) {
-        area.add(triangle_fraction([
-            points[0],
-            points[index],
-            points[index + 1],
-        ])?);
+        area.add(triangle_fraction(
+            [points[0], points[index], points[index + 1]],
+            &mut charge,
+        )?);
     }
     finite(area.value())
 }
 
-pub(super) fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, crate::Error> {
+pub(super) fn triangle_fraction(
+    points: [Vec3; 3],
+    mut charge: impl FnMut(usize) -> Result<(), crate::Error>,
+) -> Result<f64, crate::Error> {
     if points[0] == points[1] || points[1] == points[2] || points[2] == points[0] {
         return Ok(0.0);
     }
-    let frame = PredicateFrame::new(&points)?;
+    let Some(frame) = frame_or_exact(&points)? else {
+        charge(exact_orientation::WORK)?;
+        return exact_orientation::area_fraction(points);
+    };
     let [a, b, c] = [
         frame.point(points[0])?,
         frame.point(points[1])?,
@@ -465,6 +473,38 @@ pub(super) fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, crate::Error> 
 mod tests {
     use super::*;
     use crate::aerodynamics::geometry::GeometryOwner;
+
+    fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, crate::Error> {
+        super::triangle_fraction(points, |_| Ok(()))
+    }
+
+    fn polygon_fraction(points: &[Vec3]) -> Result<f64, crate::Error> {
+        super::polygon_fraction(points, |_| Ok(()))
+    }
+
+    #[test]
+    fn wide_triangle_area_preserves_absolute_scale_and_precharges_work() -> Result<(), crate::Error>
+    {
+        let tiny = f64::from_bits(1);
+        let points = [Vec3::ZERO, Vec3::X * tiny, Vec3::X + Vec3::Y];
+        let mut work = 0;
+        let area = super::triangle_fraction(points, |amount| {
+            work += amount;
+            Ok(())
+        })?;
+        assert_eq!(area, tiny);
+        assert_eq!(work, exact_orientation::WORK);
+        assert_eq!(triangle_fraction([points[0], points[2], points[1]])?, tiny);
+        assert_eq!(
+            triangle_fraction([points[0], points[1], Vec3::X + Vec3::Y * 0.5]),
+            Err(GeometryError::PrecisionLoss.into()),
+        );
+        assert_eq!(
+            super::triangle_fraction(points, |_| Err(GeometryError::WorkBudgetExceeded.into())),
+            Err(GeometryError::WorkBudgetExceeded.into()),
+        );
+        Ok(())
+    }
 
     #[test]
     fn crossing_uses_near_endpoint_independent_of_edge_direction() {

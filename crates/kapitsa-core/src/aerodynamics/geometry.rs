@@ -1291,7 +1291,9 @@ impl PreparedGeometry {
             let Some(initial) = visibility::windward_triangle(triangle.normal, velocities)? else {
                 continue;
             };
-            let initial_fraction = visibility::polygon_fraction(&initial)?;
+            let initial_fraction = visibility::polygon_fraction(&initial, |amount| {
+                charge_surface_work(&mut work, amount, max_work)
+            })?;
             if initial_fraction == 0.0 {
                 return Err(crate::Error::from(GeometryError::PrecisionLoss));
             }
@@ -1444,7 +1446,11 @@ impl PreparedGeometry {
                         .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                     check_surface_work(Some(work), max_work)?;
                     let coordinates = [polygon[0], polygon[k], polygon[k + 1]];
-                    let fraction = visibility::triangle_fraction(coordinates)?;
+                    let fraction = visibility::triangle_fraction(coordinates, |amount| {
+                        charge_surface_work(&mut work, amount, max_work)?;
+                        exact_orientation_work += amount;
+                        Ok(())
+                    })?;
                     partition_fraction.add(fraction);
                     let area = triangle.area * fraction;
                     let [a, b, c] = triangle.vertices;

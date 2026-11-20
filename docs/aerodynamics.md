@@ -538,6 +538,12 @@ conversion. Edge coefficients share a scaling factor independent of the
 reference determinant. The projected edge vectors and offsets are still
 formed in floating point before the predicate.
 
+Windward and partition triangle areas use the same exact accumulator when
+the adaptive 2D frame exceeds its span. The result is the barycentric area
+fraction rounded at its absolute scale. This preserves representable
+subnormal fractions. A nonzero fraction that rounds to zero returns
+`PrecisionLoss`. The exact calculation is charged before evaluation.
+
 Visibility preprocessing counts source triangles once and reuses that count
 when collecting the transformed triangles. The grid receives the portion of
 the shared 100,000,000-unit maximum that remains after preprocessing. Each

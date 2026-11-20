@@ -145,6 +145,17 @@ fn factors(point: Vec3) -> [Factor; 3] {
     components(point).map(Factor::new)
 }
 
+pub(super) fn area_fraction(points: [Vec3; 3]) -> Result<f64, crate::Error> {
+    let [a, b, c] = points.map(|point| factors(Vec3::new(point.x, point.y, 0.0)));
+    let determinant = Determinant::new([a, b, c, factors(Vec3::Z)]);
+    if let Some(leading) = determinant.leading_bit() {
+        // Each integer bit represents a power of two relative to MIN_EXPONENT.
+        Ok(determinant.scaled(leading, (-MIN_EXPONENT) as usize)?.abs())
+    } else {
+        Ok(0.0)
+    }
+}
+
 pub(super) fn sign(basis: [Vec3; 3], point: Vec3) -> Result<f64, crate::Error> {
     if !point.is_finite() || basis.iter().any(|point| !point.is_finite()) {
         return Err(GeometryError::ArithmeticOverflow.into());
