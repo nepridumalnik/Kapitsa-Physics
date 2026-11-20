@@ -325,16 +325,47 @@ fn sphere_drag_force(
     let speed = relative_velocity
         .checked_length()
         .ok_or(SphereDragError::ArithmeticOverflow)?;
-    let reynolds = (density * speed) * diameter / dynamic_viscosity;
+    let mass_flux = density * speed;
+    let reynolds_numerator = mass_flux * diameter;
+    let reynolds = if mass_flux.is_normal() && reynolds_numerator.is_normal() {
+        reynolds_numerator / dynamic_viscosity
+    } else {
+        super::hull::scaled_product(&[density, speed, diameter], dynamic_viscosity)
+            .map_err(|_| SphereDragError::ArithmeticOverflow)?
+    };
     if !reynolds.is_finite() || reynolds == 0.0 {
         return Err(SphereDragError::ArithmeticOverflow.into());
     }
     // Factor out Stokes drag so slow flow needs neither 1/Re nor speed².
     let correction = drag_relative_to_stokes(speed, reynolds)?;
-    let scale = (dynamic_viscosity * diameter) * (3.0 * std::f64::consts::PI * correction);
-    let force = relative_velocity
-        .checked_mul_scalar(-scale)
-        .ok_or(SphereDragError::ArithmeticOverflow)?;
+    const STOKES_FORCE_SCALE: f64 = 3.0 * std::f64::consts::PI;
+    let viscous_length = dynamic_viscosity * diameter;
+    let scale = viscous_length * (STOKES_FORCE_SCALE * correction);
+    let force = if viscous_length.is_normal() && scale.is_normal() {
+        relative_velocity
+            .checked_mul_scalar(-scale)
+            .ok_or(SphereDragError::ArithmeticOverflow)?
+    } else {
+        let component = |velocity: f64| {
+            super::hull::scaled_product(
+                &[
+                    dynamic_viscosity,
+                    diameter,
+                    STOKES_FORCE_SCALE,
+                    correction,
+                    velocity.abs(),
+                ],
+                1.0,
+            )
+            .map(|magnitude| -magnitude.copysign(velocity))
+            .map_err(|_| SphereDragError::ArithmeticOverflow)
+        };
+        Vec3::new(
+            component(relative_velocity.x)?,
+            component(relative_velocity.y)?,
+            component(relative_velocity.z)?,
+        )
+    };
     if force == Vec3::ZERO {
         return Err(SphereDragError::ArithmeticOverflow.into());
     }
@@ -638,6 +669,19 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sphere_force_preserves_representable_results_with_extreme_intermediates()
+    -> Result<(), crate::Error> {
+        let force = incompressible_drag_force(1e-308, 1e308, 1.0, Vec3::X * 10.0)?;
+        let expected = 30.0 * std::f64::consts::PI * stokes_multiplier(10.0)?;
+        assert!((force.x / -1e-308 - expected).abs() < 1e-12);
+
+        let force = incompressible_drag_force(1e-100, 1e-250, 1e-250, Vec3::Y * 1e100)?;
+        let expected = 3.0 * std::f64::consts::PI * stokes_multiplier(1.0)?;
+        assert!((force.y / -1e-250 - expected).abs() < 1e-12);
+        Ok(())
+    }
 
     #[test]
     fn transitional_particle_drag_matches_published_blend() -> Result<(), crate::Error> {
