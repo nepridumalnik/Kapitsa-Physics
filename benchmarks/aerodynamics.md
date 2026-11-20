@@ -273,3 +273,7 @@ The zero-determinant recheck on `e3cb8b5` measured medians of
 21.98 us (21.68 to 23.29 us) and 1.380 ms (1.375 to 1.384 ms)
 on the small and moderate fixtures. The wide projected-edge fixture
 measured 5.99 us (5.95 to 6.08 us).
+
+The direction and edge-reference sign filter on `b1ed96a` measured
+medians of 21.90 us and 1.334 ms on the small and moderate fixtures.
+The wide projected-edge fixture measured 6.38 us (6.35 to 6.56 us).

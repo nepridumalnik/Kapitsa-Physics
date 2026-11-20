@@ -158,19 +158,26 @@ Non-finite original inputs SHALL return `ArithmeticOverflow`.
 - **AND** this is a synthetic assertion, not execution evidence or independent
   physical validation
 
-### Requirement: Recheck selectively rounded zero projections
+### Requirement: Screen uncertain projected determinants
 
-Zero fast direction or edge-reference determinants SHALL select precharged exact
-projection only if a nonzero product can contain an inexact subtraction, detected
-by an error-free residual, before tangent/degenerate classification. An exact edge
-reference SHALL select exact coefficients. This check does not bound nonzero
-fast-determinant error.
+Fast direction and edge-reference determinants inside `32*f64::EPSILON` times the
+absolute triple-product sum SHALL check participating subtraction residuals.
+When a residual can affect a product, preparation SHALL charge and use exact
+orientation before classification. This screening applies to zero and nonzero
+determinants and does not bound affine-coefficient error.
 
-#### Scenario: A zero determinant has no participating inexact subtraction
+#### Scenario: A determinant has no participating inexact subtraction
 
-- **WHEN** the fast direction or edge-reference determinant is zero but no
-  nonzero product can contain an inexact subtraction
-- **THEN** the zero recheck does not select exact projection
+- **WHEN** a fast direction or edge-reference determinant is inside the margin
+  but no nonzero product can contain an inexact subtraction
+- **THEN** exact projection is not selected
+
+#### Scenario: A nonzero rounded sign is opposite the exact sign
+
+- **WHEN** a nonzero fast direction determinant lies inside the margin and its
+  participating subtraction residual can contain an inexact product
+- **THEN** exact orientation is charged and selected, rather than using the
+  opposite rounded sign
 
 #### Scenario: Synthetic neighboring decimal coordinates hide a thin blocker
 

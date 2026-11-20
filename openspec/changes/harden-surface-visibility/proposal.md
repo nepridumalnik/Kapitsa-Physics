@@ -40,13 +40,14 @@ This change covers:
   frame evaluation when a component difference `a-b` equals `a` with nonzero
   `b`, or equals `-b` with nonzero `a`; other cases retain the rounded
   floating-point edge and offset fast path, subject to the zero recheck below;
-- rechecking a zero fast direction or edge-reference determinant with precharged
-  exact projection only when a nonzero determinant product can contain an
-  inexact subtraction, detected by an error-free subtraction residual; this
-  occurs before tangent classification or degenerate-reference rejection;
-  an exact edge reference also selects exact edge coefficients;
-- retaining the limitation that this zero check does not bound the error of
-  nonzero fast determinants;
+- screening zero and nonzero fast direction or edge-reference determinants
+  inside `32*epsilon` times the absolute triple-product sum; an error-free
+  subtraction residual in a participating product selects charged exact
+  orientation before tangent classification or degenerate-reference rejection;
+  this does not bound affine-coefficient error;
+- recording the opposite-sign nonzero-determinant regression, where the rounded
+  fast sign differs from the exact projected sign and exact orientation is
+  selected;
 - recording `e3cb8b5` synthetic regression
   `partially_rounded_projection_does_not_hide_thin_blocker`: neighboring
   coordinates `x = 0.1` and `x.next_up()` produce a zero rounded edge cross

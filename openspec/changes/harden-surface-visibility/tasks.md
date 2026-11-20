@@ -87,11 +87,12 @@
   comprising twelve exact determinants at 15,048 units each and 382 ordinary
   units; the minimum successful budget and hard cap return identical complete
   output, while one unit less returns `WorkBudgetExceeded`.
-- [x] Record `e3cb8b5`: recheck zero fast direction or edge-reference
-  determinants by precharged exact projection only when a nonzero product
-  can contain an inexact subtraction, detected by an error-free residual;
-  do so before tangent classification or degenerate-reference rejection,
-  and use exact edge coefficients when the reference selects exact work.
+- [x] Record `b1ed96a`: screen zero and nonzero fast direction or
+  edge-reference determinants inside `32*epsilon` times the absolute
+  triple-product sum; inspect participating subtraction residuals and charge
+  exact orientation when needed before classification.
+- [x] Document the opposite-sign nonzero-determinant regression, without
+  claiming affine-coefficient error is bounded.
 - [x] Document `partially_rounded_projection_does_not_hide_thin_blocker` with
   neighboring `0.1` coordinates, retained endpoints, zero rounded edge cross
   product and successful shadow coverage, without claiming execution or
