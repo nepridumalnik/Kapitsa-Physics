@@ -1,9 +1,12 @@
 //! Caller-parameterized distributed hull resistance.
 //!
 //! The default constant coefficients retain Mach <= 0.3. Explicitly attaching a
-//! [`MachCurve`] enables a DATA-DRIVEN transonic resistance interface, not a
-//! predictive FAR solver. No transonic coefficients are supplied by the engine.
-//! Callers must supply measured/CFD coefficients consistent with each section's
+//! [`MachCurve`] enables a DATA-DRIVEN transonic resistance interface. Separately,
+//! [`HullSection::with_transonic_drag_rise`] supplies a geometry-derived
+//! Korn/Lock transonic estimate with a bounded Mach 1.05–1.2 handoff; it is an
+//! equivalent-section engineering correlation, not a validated body solver or
+//! FAR replacement. Callers may instead supply measured/CFD coefficients
+//! consistent with each section's
 //! reference areas, Reynolds range, angle of attack and component-speed convention
 //! below; a Mach-only table cannot infer their dependence on Re or angle of attack.
 //! The table replaces both constant Cd values throughout its inclusive domain;
@@ -89,6 +92,8 @@ pub enum HullError {
     UnsupportedSkinFrictionMach,
     /// The configured flat-plate transition model requires axial flow.
     UnsupportedSkinFrictionIncidence,
+    /// The section cannot produce a finite subsonic critical Mach estimate.
+    InvalidTransonicGeometry,
     /// The slender-body normal-load model requires forward small-incidence flow.
     UnsupportedSlenderIncidence,
     /// This steady slender-body model does not include rotational derivatives.
@@ -703,6 +708,75 @@ pub struct HullSection {
     potential: Option<super::slender::PotentialCell>,
     wave_drag_factor: Option<super::wave::PreparedWaveDrag>,
     wave_mach_curve: Option<super::wave::WaveMachCurve>,
+    transonic_drag_rise: Option<TransonicDragRise>,
+}
+
+/// Geometry-derived critical Mach and Lock drag-rise increment for a section.
+///
+/// The equivalent thickness ratio is `2 sqrt(A_axial / pi) / L`. The Korn
+/// equation at zero lift gives `Mdd = kappa - t/c`, and Lock's drag-rise shape
+/// fixes `Mcrit = Mdd - (0.1/80)^(1/3)`. The increment is
+/// `20 (M - Mcrit)^4` from `Mcrit` to Mach 1.05, then a C1 cubic handoff to
+/// zero at Mach 1.2. This is an equivalent-section engineering correlation,
+/// not a transonic body solver.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TransonicDragRise {
+    critical_mach: f64,
+}
+
+impl TransonicDragRise {
+    const HANDOFF_START: f64 = 1.05;
+    const HANDOFF_END: f64 = 1.2;
+    const LOCK_SCALE: f64 = 20.0;
+    const DRAG_DIVERGENCE_OFFSET: f64 = 0.107_721_734_506_266_54;
+
+    fn new(
+        technology_factor: f64,
+        axial_area: f64,
+        equivalent_length: f64,
+    ) -> Result<Self, crate::Error> {
+        if !technology_factor.is_finite()
+            || !(0.5..=1.0).contains(&technology_factor)
+            || !axial_area.is_finite()
+            || axial_area <= 0.0
+            || !equivalent_length.is_finite()
+            || equivalent_length <= 0.0
+        {
+            return Err(crate::Error::from(HullError::InvalidTransonicGeometry));
+        }
+        let thickness_ratio = 2.0 * (axial_area / std::f64::consts::PI).sqrt() / equivalent_length;
+        let critical_mach = technology_factor - thickness_ratio - Self::DRAG_DIVERGENCE_OFFSET;
+        if !critical_mach.is_finite() || critical_mach <= 0.0 || critical_mach >= 1.0 {
+            return Err(crate::Error::from(HullError::InvalidTransonicGeometry));
+        }
+        Ok(Self { critical_mach })
+    }
+
+    fn coefficient(self, mach: f64) -> Result<f64, crate::Error> {
+        if !mach.is_finite() || mach < 0.0 {
+            return Err(crate::Error::from(HullError::InvalidFlow));
+        }
+        if mach <= self.critical_mach || mach >= Self::HANDOFF_END {
+            return Ok(0.0);
+        }
+        let lock = |value: f64| Self::LOCK_SCALE * (value - self.critical_mach).powi(4);
+        if mach <= Self::HANDOFF_START {
+            return Ok(lock(mach));
+        }
+        let span = Self::HANDOFF_END - Self::HANDOFF_START;
+        let t = (mach - Self::HANDOFF_START) / span;
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let start_value = lock(Self::HANDOFF_START);
+        let start_slope =
+            4.0 * Self::LOCK_SCALE * (Self::HANDOFF_START - self.critical_mach).powi(3);
+        let value =
+            start_value * (2.0 * t3 - 3.0 * t2 + 1.0) + span * start_slope * (t3 - 2.0 * t2 + t);
+        value
+            .is_finite()
+            .then_some(value)
+            .ok_or_else(|| crate::Error::from(HullError::ArithmeticOverflow))
+    }
 }
 impl HullSection {
     /// Length must be positive; areas and coefficients must be nonnegative.
@@ -752,7 +826,49 @@ impl HullSection {
             potential: None,
             wave_drag_factor: None,
             wave_mach_curve: None,
+            transonic_drag_rise: None,
         })
+    }
+
+    /// Adds a predictive transonic drag-rise increment based on the section
+    /// axial area and development length.
+    ///
+    /// The equivalent thickness ratio is `2 sqrt(A_axial / pi) / L`, where
+    /// `A_axial` must be the physical section cross-sectional area and
+    /// `equivalent_length` is the physical section/body length, not the
+    /// friction development length from [`Self::new`]. The zero-lift Korn
+    /// equation gives `Mdd = kappa - t/c`; Lock's drag-rise shape gives
+    /// `Mcrit = Mdd - (0.1/80)^(1/3)` and `dCd = 20 (M - Mcrit)^4`. The
+    /// increment is referenced to `A_axial`, acts opposite axial flow and is
+    /// zero below `Mcrit`. It is blended smoothly to zero between Mach 1.05
+    /// and 1.2, so a separate supersonic wave model can take over without an
+    /// unbounded transonic term.
+    ///
+    /// `technology_factor` is the Korn airfoil technology factor, typically
+    /// 0.87 for a conventional NACA 6-series section or 0.95 for a
+    /// supercritical section; it must be finite and in `[0.5, 1]`. Geometry
+    /// that produces `Mcrit <= 0` or `Mcrit >= 1` is rejected. This is an
+    /// equivalent-section engineering estimate, not a body-of-revolution
+    /// transonic solver. It does not model lift-dependent critical Mach,
+    /// sweep, separation, shock-boundary-layer interaction, roughness or
+    /// real-gas effects. Do not combine it with a separate wave-drag model
+    /// over the same Mach interval without checking double counting.
+    pub fn with_transonic_drag_rise(
+        mut self,
+        technology_factor: f64,
+        equivalent_length: f64,
+    ) -> Result<Self, crate::Error> {
+        self.transonic_drag_rise = Some(TransonicDragRise::new(
+            technology_factor,
+            self.axial_area,
+            equivalent_length,
+        )?);
+        Ok(self)
+    }
+
+    /// Predicted critical Mach of the configured transonic model, if any.
+    pub fn transonic_critical_mach(&self) -> Option<f64> {
+        self.transonic_drag_rise.map(|model| model.critical_mach)
     }
 
     pub(super) fn with_potential(mut self, cell: super::slender::PotentialCell) -> Self {
@@ -879,12 +995,14 @@ impl HullSection {
             self.crossflow_cd != 0.0,
             MachCurve::has_crossflow_resistance,
         );
-        let drag_enabled = (self.axial_area != 0.0 && axial_enabled)
+        let constant_drag_enabled = (self.axial_area != 0.0 && axial_enabled)
             || (self.crossflow_area != 0.0 && crossflow_enabled);
+        let drag_enabled = constant_drag_enabled || self.transonic_drag_rise.is_some();
         if flow.atmosphere.density() == 0.0
             || !drag_enabled
                 && self.normal_curve.is_none()
                 && self.wave_drag_factor.is_none()
+                && self.transonic_drag_rise.is_none()
                 && self.potential.is_none()
                 && (self.wetted_area == 0.0 || self.skin_friction.is_none())
         {
@@ -909,7 +1027,7 @@ impl HullSection {
             return Err(crate::Error::from(HullError::UnsupportedMach));
         }
         // Unused drag coefficients must not gate normal-only or friction loads.
-        let (axial_cd, crossflow_cd) = if !drag_enabled {
+        let (axial_cd, crossflow_cd) = if !constant_drag_enabled {
             (0.0, 0.0)
         } else if let Some(curve) = &self.mach_curve {
             curve.coefficients(mach)?
@@ -1037,6 +1155,19 @@ impl HullSection {
                 )?)
                 .ok_or_else(|| overflow.clone())?;
         }
+        let transonic_force = if let Some(model) = self.transonic_drag_rise {
+            let axial_mach = axial_speed.abs() / flow.sound_speed;
+            let coefficient = model.coefficient(axial_mach)?;
+            resistance(
+                axial,
+                axial_speed.abs(),
+                density,
+                self.axial_area,
+                coefficient,
+            )?
+        } else {
+            Vec3::ZERO
+        };
         let cross_force = resistance(
             crossflow,
             cross_speed,
@@ -1085,7 +1216,8 @@ impl HullSection {
             None => Vec3::ZERO,
         };
         let force = axial_force
-            .checked_add(cross_force)
+            .checked_add(transonic_force)
+            .and_then(|f| f.checked_add(cross_force))
             .and_then(|f| f.checked_add(normal_force))
             .and_then(|f| f.checked_add(wave_force))
             .and_then(|f| f.checked_add(potential_force))
@@ -2068,6 +2200,117 @@ mod tests {
                 "accepted min={min} max={max} wall={wall}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn predicted_transonic_hull_critical_mach_and_drag_rise() -> Result<(), crate::Error> {
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            10.0,
+            std::f64::consts::PI,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?
+        .with_transonic_drag_rise(0.95, 10.0)?;
+        let critical = section
+            .transonic_critical_mach()
+            .ok_or_else(|| crate::Error::from(HullError::InvalidTransonicGeometry))?;
+        let expected_critical = 0.95 - 0.2 - 0.107_721_734_506_266_54;
+        assert!((critical - expected_critical).abs() < 1e-15);
+
+        // Equivalent-section Lock rise below the handoff Mach.
+        let speed = 340.0 * 0.7;
+        let mach = speed / 340.0;
+        let coefficient = 20.0 * (mach - critical).powi(4);
+        let force = section.evaluate(flow(Vec3::X * speed))?.force;
+        let expected = -0.5 * 1.2 * speed * speed * std::f64::consts::PI * coefficient;
+        assert!(
+            (force.x / expected - 1.0).abs() < 1e-12,
+            "force={:?} expected={expected} mach={mach} critical={critical}",
+            force
+        );
+        assert_eq!((force.y, force.z), (0.0, 0.0));
+        let reversed = section.evaluate(flow(-Vec3::X * speed))?.force;
+        assert!((reversed.x / -expected - 1.0).abs() < 1e-12);
+
+        // Zero below critical Mach.
+        assert_eq!(
+            section.evaluate(flow(Vec3::X * 340.0 * 0.6))?.force,
+            Vec3::ZERO
+        );
+        // The handoff is bounded and reaches exactly zero at Mach 1.2.
+        let model = section
+            .transonic_drag_rise
+            .ok_or_else(|| crate::Error::from(HullError::InvalidTransonicGeometry))?;
+        assert!(model.coefficient(0.7)? > 0.0);
+        assert!(model.coefficient(1.0)? > 0.0);
+        assert_eq!(model.coefficient(1.2)?, 0.0);
+        assert_eq!(model.coefficient(2.0)?, 0.0);
+        for mach in [0.7, 0.9, 1.04] {
+            assert!(model.coefficient(mach + 0.01)? > model.coefficient(mach)?);
+        }
+        assert!(model.coefficient(1.1)? < model.coefficient(1.05)?);
+        assert!(model.coefficient(1.1)? > 0.0);
+
+        // Pure crossflow has no axial transonic increment.
+        assert_eq!(section.evaluate(flow(Vec3::Y * speed))?.force, Vec3::ZERO);
+        assert_eq!(
+            model.coefficient(f64::NAN),
+            Err(HullError::InvalidFlow.into())
+        );
+
+        for technology_factor in [0.4, 1.1, f64::NAN] {
+            assert!(
+                HullSection::new(
+                    Transform::identity(),
+                    Vec3::X,
+                    10.0,
+                    std::f64::consts::PI,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    None,
+                )?
+                .with_transonic_drag_rise(technology_factor, 10.0)
+                .is_err()
+            );
+        }
+        let thick = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            std::f64::consts::PI,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?;
+        assert_eq!(
+            thick.with_transonic_drag_rise(0.95, 1.0),
+            Err(HullError::InvalidTransonicGeometry.into())
+        );
+        let no_area = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            10.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?;
+        assert_eq!(
+            no_area.with_transonic_drag_rise(0.95, 10.0),
+            Err(HullError::InvalidTransonicGeometry.into())
+        );
         Ok(())
     }
 

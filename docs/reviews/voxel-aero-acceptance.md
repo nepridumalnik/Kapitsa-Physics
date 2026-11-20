@@ -5,12 +5,13 @@ report. A checked build or an analytic-model test is not independent physical
 validation. FAR is a behavioral reference only; no GPL source is incorporated.
 The per-model domains in `docs/aerodynamics.md` are authoritative and have
 advanced since this map was written, notably for high-speed skin friction,
-rarefied particle drag and subsonic Mesh/Colliders compression pressure; the
-acceptance gaps below remain open.
+rarefied particle drag, subsonic Mesh/Colliders compression pressure and a
+geometry-derived predictive hull transonic drag-rise estimate; the acceptance
+gaps below remain open.
 
 | Plan | Available evidence | Remaining acceptance work |
 | --- | --- | --- |
-| 1.1 Predictive transonic hull | Caller-supplied Mach/normal-force tables; interpolation and world tests. Supersonic slender wave primitive. | Predict critical Mach and drag rise; join regimes; compare Sears–Haack and blunt-body curves with independent reference data. Tables alone are not a predictive closure. |
+| 1.1 Predictive transonic hull | Caller-supplied Mach/normal-force tables; geometry-derived Korn critical Mach with Lock drag rise and a bounded Mach 1.05–1.2 handoff; interpolation and world tests. Supersonic slender wave primitive. | Validate the equivalent-section estimate against independent body-of-revolution pressure/drag data, add lift/sweep effects, establish the supersonic handoff, and compare Sears–Haack and blunt-body curves with independent reference data. Tables and the Korn/Lock correlation are not a validated TSD solver. |
 | 1.2 Subsonic Mesh/Colliders Cp | Default unmodified Newtonian requires Mach >= 5. Opt-in modified Newtonian compression covers Mach 0–5 with isentropic/Rayleigh-pitot `Cp_max`; tests cover oblique/leeward patches, prepared and owner aggregation, mesh and collider world steps, atomic domain failure. Explicit base Cp supports selected faces and visibility checks. | The modified model is compression-only: no attached suction, potential-flow lift, wake or base physics. Compare it with independent sphere/cylinder pressure data at matched conditions and establish mesh convergence and rotating moments. This does not accept a subsonic panel solution. |
 | 1.3–1.6 Stall, interference, body lift, failures | Existing polars, geometric shielding and slender-body loads cover parts of the underlying infrastructure. | Predictive stall and spin demo, downwash interaction, non-slender crossflow validation and aerodynamic weld failure must be assessed against their individual criteria; none is accepted here. |
 | 2.1–2.5 Existing-model extensions | Some related features already exist; see `docs/aerodynamics.md` for their individual domains. | Audit each requested extension against current code and tests before declaring completion. |

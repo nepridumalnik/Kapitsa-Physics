@@ -2779,6 +2779,52 @@ fn normal_hull_table_range_failure_rolls_back_body_and_part_loads() {
 }
 
 #[test]
+fn predicted_transonic_hull_section_decelerates_body() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::hull::HullSection;
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            10.0,
+            std::f64::consts::PI,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?
+        .with_transonic_drag_rise(0.95, 10.0)?;
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+        )?;
+        body.set_linear_velocity(Vec3::X * 300.0)?;
+        body.set_aerodynamics(Aerodynamics::Hull(vec![section]));
+        let id = world.add_body(body)?;
+        if sharded {
+            world.step_with_shards(
+                0.01,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(0.01)?;
+        }
+        assert!(
+            world.body(id).ok_or("body")?.state().linear_velocity().x < 300.0,
+            "sharded={sharded}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn hull_sections_sample_spatial_density_independently() {
     use crate::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
     let atmosphere = Atmosphere::Sphere(

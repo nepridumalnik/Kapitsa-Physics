@@ -191,7 +191,8 @@ incidence, force-sign and full-speed reference-pressure convention; a signed
 planar lift table cannot be used unchanged. Regression tests cover incidence,
 domain handling and interpolation, including numerical extremes; these are checks
 of the implementation, not independent physical validation. No automatic lift or
-predictive transonic closure is supplied by this hull table. The separate Newtonian
+predictive transonic closure is supplied by that normal-force table; the separate
+opt-in predictive transonic estimate is described below. The separate Newtonian
 pressure and wing models have their own documented applicability limits. The same [drag equation](https://en.wikipedia.org/wiki/Drag_equation),
 [Mach number](https://en.wikipedia.org/wiki/Mach_number), and [angle of attack](https://en.wikipedia.org/wiki/Angle_of_attack)
 references define quantities, not coefficient data. Supply measured or
@@ -281,10 +282,44 @@ pressure or Reynolds numerators need not fit when the complete result does;
 truly nonfinite loads still fail rather than being clamped or discarded.
 
 The empirical sectional resistance alone is **not potential-flow normal force or
-lift**, predictive transonic continuation, area-rule wave drag, interference,
-shielding, separation prediction or FAR equivalence. Geometry/voxel preparation does not
-infer these empirical hull coefficients or automatically generate these resistance sections. Explicit
+lift**, area-rule wave drag, interference, shielding, separation prediction or
+FAR equivalence. Geometry/voxel preparation does not infer these empirical hull
+coefficients or automatically generate these resistance sections. Explicit
 wings are separate; callers must avoid counting a physical contribution twice.
+
+### Predictive transonic hull drag rise
+
+`HullSection::with_transonic_drag_rise(technology_factor, equivalent_length)`
+adds an opt-in equivalent-section transonic increment. `equivalent_length` is
+the physical section/body length, not the friction development length from
+`HullSection::new`. The critical Mach is estimated from the
+section's axial area and development length with the zero-lift
+[Korn equation](https://archive.aoe.vt.edu/mason/Mason_f/ConfigAeroTransonics.pdf),
+section 7.5.2:
+`t/c = 2 sqrt(A_axial / pi) / L`, where `A_axial` must be the physical section
+cross-sectional area rather than an arbitrary reference area; `Mdd = kappa - t/c`, and
+`Mcrit = Mdd - (0.1/80)^(1/3)`. The drag rise follows Lock's empirical shape,
+`dCd = 20 (M - Mcrit)^4`, for `Mcrit < M <= 1.05`. Between Mach 1.05 and 1.2 a
+C1 cubic handoff decays the increment to zero; above Mach 1.2 it contributes
+nothing, leaving the separate supersonic wave model to take over.
+
+The increment is referenced to `A_axial` and acts opposite axial flow:
+`F = -0.5 rho |u_axial|^2 A_axial dCd` along the axial direction. It uses axial
+Mach and axial speed; pure crossflow produces no transonic increment. The
+technology factor is the Korn section factor, typically 0.87 for a conventional
+NACA 6-series section or 0.95 for a supercritical section. It must be finite and
+in `[0.5, 1]`. Geometry producing `Mcrit <= 0` or `Mcrit >= 1`, zero axial
+area, or an invalid section length returns `InvalidTransonicGeometry`.
+
+This is an equivalent airfoil-section correlation applied to a hull section,
+not a body-of-revolution transonic small-disturbance solver. It does not model
+lift-dependent critical Mach, sweep, area-rule interference, separation,
+shock-boundary-layer interaction, roughness, real-gas effects or an
+experimentally validated peak drag. The cubic handoff is an explicit engineering
+boundary, not measured data. Do not combine it with a separate wave-drag curve
+or caller Mach curve over the same interval without checking double counting.
+Predicted `Mcrit` and the increment are geometry-derived estimates, not
+independent validation.
 
 ### Steady slender-body normal loads
 
@@ -735,6 +770,7 @@ engine does not blend models to hide a domain limit.
 | --- | --- | --- |
 | Hull constant Cd | total Mach ≤ 0.3 | predictive transonic/supersonic coefficients |
 | Hull `MachCurve` / `NormalForceCurve` | caller inclusive Mach/incidence table | data and their uncertainty |
+| Hull predictive transonic rise | `Mcrit` from section area/length, rise through Mach 1.2 | body-of-revolution validation, lift/sweep, separation |
 | Slender-body normal load | Mach ≤ 0.3, small incidence, steady aligned flow | separation, wave drag, rotational derivatives |
 | Slender wave drag | Mach > 1, axis aligned, caller area slopes | predictive transonic closure |
 | `FiniteWing` default | Mach ≤ 0.3, attached flow | stall, separation |
@@ -758,11 +794,12 @@ engine does not blend models to hide a domain limit.
 | Transitional particle | 0.1 ≤ Kn ≤ 10, Re ≤ 45, Mach ≤ 10 | other Kn/Re |
 | `LothParticle` selector | transitional Re ≤ 45, compression Re > 45 | gaps such as Mach 0.22, Re 100 |
 
-Predictive transonic hull drag rise, potential-flow attached suction or lift
-for Mesh/Colliders, wake/shielding physics beyond geometric occlusion,
-base-flow interaction, surface roughness, high-speed transition, real-gas
-properties and a general supersonic wing lifting model remain outside the
-implemented models. The modified Newtonian Mesh/Colliders closure supplies
+Potential-flow attached suction or lift for Mesh/Colliders, wake/shielding
+physics beyond geometric occlusion, base-flow interaction, surface roughness,
+high-speed transition, real-gas properties, a validated body-of-revolution
+transonic solver and a general supersonic wing lifting model remain outside the
+implemented models. The predictive hull transonic row is an equivalent-section
+Korn/Lock estimate, not a validated transonic body solution. The modified Newtonian Mesh/Colliders closure supplies
 compression pressure only; it does not constitute a subsonic panel solution. Callers must not treat the table as
 evidence of accuracy outside each cited correlation's tested conditions.
 
