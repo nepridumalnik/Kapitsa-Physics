@@ -2581,24 +2581,33 @@ mod tests {
             let before = world.body(id).ok_or("body")?.motion();
             assert!(step(&mut world).is_err());
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
-            let unsupported = world.add_part_collider(
+            let capsule = world.add_part_collider(
                 part,
                 Collider::new(
                     Shape::Capsule(Capsule::new(-Vec3::Z, Vec3::Z, 0.5)?),
                     Transform::identity(),
                 ),
             )?;
+            world.set_collider_tessellation(
+                id,
+                crate::aerodynamics::ColliderTessellation::new(12, 6, 1)?,
+            )?;
             assert_eq!(
                 step(&mut world),
                 Err(Error::from(StepError::Aerodynamics {
                     body_id: id,
                     cause: crate::Error::from(
-                        crate::aerodynamics::AerodynamicsError::UnsupportedModel
+                        crate::aerodynamics::AerodynamicsError::TessellationBudgetExceeded
                     )
                 }))
             );
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
-            world.remove_part_collider(unsupported)?;
+            world.set_collider_tessellation(
+                id,
+                crate::aerodynamics::ColliderTessellation::new(12, 6, 1024)?,
+            )?;
+            step(&mut world)?;
+            world.remove_part_collider(capsule)?;
             world.set_part_aerodynamic_mesh(part, Some(plate()?))?;
             assert!(!world.part_uses_aerodynamic_colliders(part));
             step(&mut world)?;

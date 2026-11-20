@@ -3090,16 +3090,19 @@ fn collider_pressure_cache_invalidation_and_sharded_parity()
                     Transform::identity(),
                 ),
             )?;
+            world.set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1)?)?;
             assert_eq!(
                 step(&mut world),
                 Err(crate::Error::from(crate::world::StepError::Aerodynamics {
                     body_id: id,
                     cause: crate::Error::from(
-                        crate::aerodynamics::AerodynamicsError::UnsupportedModel
+                        crate::aerodynamics::AerodynamicsError::TessellationBudgetExceeded
                     )
                 }))
             );
             assert_eq!(before, world.body(id).ok_or("body")?.motion());
+            world.set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1024)?)?;
+            step(&mut world)?;
         }
     }
     assert_eq!(outcomes[0], outcomes[2]);
