@@ -157,8 +157,10 @@ fn surface_triangle_count(instances: &[GeometryInstance<'_>]) -> Result<usize, c
     })
 }
 
+const MAX_SURFACE_WORK: usize = 100_000_000;
+
 fn check_surface_work(work: Option<usize>, max_work: usize) -> Result<(), crate::Error> {
-    if max_work == 0 || work.is_none_or(|w| w > max_work.min(100_000_000)) {
+    if max_work == 0 || work.is_none_or(|w| w > max_work.min(MAX_SURFACE_WORK)) {
         return Err(crate::Error::from(GeometryError::WorkBudgetExceeded));
     }
     Ok(())
@@ -1251,6 +1253,9 @@ impl PreparedGeometry {
         // Reserve the outer frame's vertex, center and normal transformations.
         const PATCH_FRAME_WORK: usize = 1;
 
+        // Grid operations must receive the remainder of the same hard budget
+        // that is used to charge their work after they return.
+        let max_work = max_work.min(MAX_SURFACE_WORK);
         let mut triangles = Self::surface_triangles(instances, max_work)?;
         // Exact canonical vertex triples avoid centroid/area aliasing and
         // many-to-one epsilon matching. Winding remains in the source normal.
