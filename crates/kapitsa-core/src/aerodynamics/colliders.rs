@@ -193,6 +193,7 @@ pub fn collider_mesh<'a>(
             Shape::Triangle(_) => 1,
             Shape::Convex(shape) => shape.faces().len(),
             Shape::TriangleMesh(shape) => shape.triangles().len(),
+            Shape::SkinnedTriangleMesh(shape) => shape.mesh().triangles().len(),
             Shape::HeightField(shape) => (shape.rows() - 1)
                 .checked_mul(shape.columns() - 1)
                 .and_then(|cells| cells.checked_mul(2))
@@ -240,6 +241,13 @@ pub fn collider_mesh<'a>(
             Shape::TriangleMesh(shape) => {
                 for face in shape.triangles() {
                     emit(face.map(|i| shape.vertices()[i]))?;
+                }
+            }
+            Shape::SkinnedTriangleMesh(shape) => {
+                let mesh = shape.mesh();
+                let vertices = collider.query_vertices().unwrap_or(mesh.vertices());
+                for face in mesh.triangles() {
+                    emit(face.map(|i| vertices[i]))?;
                 }
             }
             Shape::Convex(shape) => {
@@ -345,6 +353,39 @@ mod tests {
         },
         transform::Transform,
     };
+    use kapitsa_math::Affine3;
+
+    #[test]
+    fn skinned_mesh_conversion_uses_committed_pose() -> Result<(), crate::Error> {
+        use crate::shape::{BoneInfluence, SkinnedTriangleMesh};
+
+        let reference = vec![Vec3::ZERO, Vec3::X, Vec3::Y];
+        let mesh = TriangleMesh::new(reference.clone(), vec![[0, 1, 2]])?;
+        let skin = SkinnedTriangleMesh::new(
+            mesh,
+            vec![String::from("root")],
+            (0..3)
+                .map(|_| BoneInfluence::new(0, 1.0).map(|influence| vec![influence]))
+                .collect::<Result<_, _>>()?,
+            Affine3::IDENTITY,
+            vec![Affine3::IDENTITY],
+        )?;
+        let mut collider = Collider::new(Shape::SkinnedTriangleMesh(skin), Transform::identity());
+        let config = ColliderTessellation::new(3, 3, 1)?;
+        assert_eq!(collider_mesh([&collider], config)?.vertices(), reference);
+        let displacement = Vec3::Z * 2.0;
+        collider.set_skin_pose(&[Affine3::from_translation(displacement)])?;
+        let posed = collider_mesh([&collider], config)?;
+        assert!(
+            posed
+                .vertices()
+                .iter()
+                .copied()
+                .eq(reference.into_iter().map(|v| v + displacement))
+        );
+        assert_eq!(posed.triangles(), &[[0, 1, 2]]);
+        Ok(())
+    }
 
     #[test]
     fn height_field_mesh_uses_collision_diagonal_and_budget() -> Result<(), crate::Error> {

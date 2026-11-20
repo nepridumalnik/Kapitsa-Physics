@@ -6235,6 +6235,15 @@ impl PhysicsWorld {
             .get_mut(id.dense)
             .ok_or_else(|| Error::from(CollisionError::InvalidSkinPose))?;
         entry.collider.set_skin_pose(matrices)?;
+        let body = entry.body;
+        if let Some(entry) = self.bodies.get_mut(body.dense) {
+            entry.collider_aerodynamic_mesh = None;
+            entry.mesh_aerodynamics = None;
+            entry.body.invalidate_collider_base_patches();
+        }
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&body);
+        }
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
         self.collision_system.invalidate_collider_contacts(id);
