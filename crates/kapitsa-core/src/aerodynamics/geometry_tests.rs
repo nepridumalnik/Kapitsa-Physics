@@ -1164,6 +1164,61 @@ fn partially_clipped_patches_respect_exact_budget_boundary() {
 }
 
 #[test]
+fn wide_shadow_projection_obeys_end_to_end_budget() -> Result<(), crate::Error> {
+    const EPSILON: f64 = 0.01;
+    let x = -2.0_f64.powi(-500);
+    let mesh = TriangleMesh::new(
+        vec![
+            Vec3::ZERO,
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::new(x, 0.25, 0.25),
+            Vec3::new(x, 0.50, 0.25),
+            Vec3::new(x, 0.25, 0.50),
+        ],
+        vec![[0, 1, 2], [3, 4, 5]],
+    )?;
+    let instances = [instance(&mesh, Vec3::ZERO)];
+    let geometry = surface_geometry(&instances);
+    let evaluate =
+        |budget| geometry.exposed_surface_patches(&instances, Vec3::X + Vec3::Y, EPSILON, budget);
+    let (mut lower, mut upper) = (0, MAX_SURFACE_WORK);
+    let expected = evaluate(upper)?;
+    assert_eq!(expected.len(), 1);
+    assert_eq!(expected.iter().map(|patch| patch.area).sum::<f64>(), 0.5);
+    while upper - lower > 1 {
+        let mid = lower + (upper - lower) / 2;
+        match evaluate(mid) {
+            Ok(patches) => {
+                assert_eq!(patches, expected);
+                upper = mid;
+            }
+            Err(error)
+                if error.downcast_ref::<GeometryError>()
+                    == Some(&GeometryError::WorkBudgetExceeded) =>
+            {
+                lower = mid;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    assert_eq!(evaluate(upper)?, expected);
+    assert_eq!(
+        evaluate(upper - 1),
+        Err(GeometryError::WorkBudgetExceeded.into())
+    );
+    // Three edge planes each charge a reference sign and three coefficients.
+    const EXACT_DETERMINANTS: usize = 12;
+    const WORK_PER_DETERMINANT: usize = 15_048;
+    const ORDINARY_WORK: usize = 382;
+    assert_eq!(
+        upper,
+        EXACT_DETERMINANTS * WORK_PER_DETERMINANT + ORDINARY_WORK
+    );
+    Ok(())
+}
+
+#[test]
 fn multiple_shadow_budget_exhaustion_never_returns_partial_patches() {
     const MAX_WORK: usize = 100_000;
     const EPSILON: f64 = 0.01;

@@ -512,7 +512,7 @@ For nonzero density, patch area and relative speed, the default unmodified model
 
 `PreparedGeometry::surface_triangles(instances, max_work)` transforms source triangles while preserving physical normals. `exposed_surface_patches` partitions windward triangles along the projected edges and depth planes of candidate blockers, then tests the resulting polygon triangles upstream. Coplanar overlap is assigned once, in canonical owner/vertex order. Fully visible source triangles retain their original centroid sampling. Partially visible polygons are triangulated for area and first-moment integration under uniform pressure.
 
-The shadow construction uses adaptive orientation predicates from the MIT/Apache-2.0 `robust` crate. Clipping is performed in the source triangle's affine domain, with an area-partition consistency check. Its heuristic tolerance uses work charged for the current source partition, starting after the candidate query, plus one unit for the initial triangle. It does not depend on prior triangles or global preprocessing and is not a proven error bound. Unsupported predicate ranges and inconsistent partitions return `PrecisionLoss`. Crossing ratios and endpoint interpolation avoid overflow in differences between finite values when the intersection remains representable. Constructed intersections still use floating-point arithmetic; this is not an exact computational-geometry kernel. `epsilon` remains an API compatibility parameter and never offsets rays or ignores nearby blockers. The work budget checks a preprocessing estimate, instance preparation, grid construction, sorting comparisons and swaps, visited grid cells and entries, candidate shadow construction, clipping polygon and vertex visits, partition output and final shadow tests. Exceeding it rejects the result, rather than returning partial loads. Vector growth uses fallible reservation. The two polygon lists and vertex-distance scratch buffer reuse their allocations across clipping planes within each source partition. The grid preflights entry counts and fills the final index in triangle order using per-cell counts and prefix offsets. Grid construction is linear in source triangles, cells and triangle-to-cell entries. The budget bounds logical element counts and excludes allocator overhead. Work units are accounting weights, not a bound on processor instructions or elapsed time. A complete bound for every intermediate operation still requires audit before this preparation can be accepted as production-complete.
+The shadow construction uses adaptive orientation predicates from the MIT/Apache-2.0 `robust` crate. Clipping is performed in the source triangle's affine domain, with an area-partition consistency check. Its heuristic tolerance uses work charged for the current source partition, starting after the candidate query, plus one unit for the initial triangle. It does not depend on prior triangles or global preprocessing and is not a proven error bound. Unsupported predicate ranges and inconsistent partitions return `PrecisionLoss`. Crossing ratios and endpoint interpolation avoid overflow in differences between finite values when the intersection remains representable. Constructed intersections still use floating-point arithmetic; this is not an exact computational-geometry kernel. `epsilon` remains an API compatibility parameter and never offsets rays or ignores nearby blockers. The work budget checks a preprocessing estimate, instance preparation, grid construction, sorting comparisons and swaps, visited grid cells and entries, candidate shadow construction, clipping polygon and vertex visits, partition output and final shadow tests. Exceeding it rejects the result, rather than returning partial loads. Vector growth uses fallible reservation. The two polygon lists and vertex-distance scratch buffer reuse their allocations across clipping planes within each source partition. The grid preflights entry counts and fills the final index in triangle order using per-cell counts and prefix offsets. Grid construction is linear in source triangles, cells and triangle-to-cell entries. The budget bounds logical element counts and excludes allocator overhead. Work units are accounting weights, not a bound on processor instructions or elapsed time. The table below gives bounds on logical storage requests and the work that precedes them.
 
 Adaptive orientation predicates scale each coordinate axis independently by
 a power of two. Orientation comparisons within a frame share one positive
@@ -564,6 +564,28 @@ edge. A split reserves each output for its retained vertices and crossings.
 At most `4*n` vertex slots are requested across both outputs, and the distance
 buffer requests at most `n` slots. A polygon confined to one side is moved
 without allocating a new vertex buffer.
+
+### Visibility work and storage audit
+
+Let `W = min(max_patch_work, 100,000,000)` for world preparation, or the
+equivalent cap on the explicit work argument for direct queries. These are
+upper bounds on logical elements. Geometric vector growth can retain more
+capacity than its current length. Existing caches, input meshes, allocator
+overhead and elapsed time are outside this per-preparation accounting.
+
+| Stage | Check before work or allocation | Logical storage bound |
+| --- | --- | --- |
+| Relative instances and canonical source triangles | Preflight reserves four units per instance and at least 32 per triangle. Canonical sorting also charges individual comparisons and swaps. | At most `W/4` relative instances and `W/32` source triangles. |
+| Grid and candidates | Grid preflight checks `4*T + 3*C + 3*E + 1` for triangles, cells and entries. Each query charges bucket visits and index visits before inspecting or adding results. | `2*C + E + 1` index-sized elements at grid construction peak, at most `T` marks and `T` distinct candidates per query. |
+| Source polygons and shadows | Source work covers initial clipping and flow samples. Candidate work precedes shadow construction. The exact fallback charges each determinant before evaluation. | Up to four initial vertices per source, at most `W/64` shadow records. Exact accumulators use fixed stack storage. |
+| Partition cuts | Each polygon visit charges `1 + 16*n` before evaluating distances or allocating a split. | At most `4*n` output vertex slots requested per cut and `n` distance slots. Across cuts, split vertex requests total at most `W/4`, excluding the initial polygons. |
+| Patch emission and output transform | Fan triangles, centroid shadow tests and full-patch replacement are charged before their respective work. Frame conversion is reserved for the full output before returning it. | At most `W/16 + W/48` logical patch entries, counting fan emissions and at most one replacement per source. |
+
+The wide projected-edge regression needs 180,958 units, including twelve
+exact determinants. It returns the same complete output at the minimum
+budget as at the hard cap and returns `WorkBudgetExceeded` one unit below.
+Separate regressions cover ordinary clipping, multiple shadows and the final
+frame conversion boundary.
 
 Affine shadow-plane distance evaluation uses compensated products and sums to
 reduce cancellation near a boundary. This corrects one previously demonstrated
