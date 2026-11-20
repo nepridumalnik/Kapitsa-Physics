@@ -2,8 +2,8 @@
 
 ## Summary
 
-Document the surface-visibility hardening implemented in commits
-`1b07775`, `c850fdc`, and `e534657`.
+Document the surface-visibility hardening on `feat/aero_rest` since
+`ccb5487`.
 
 ## Scope
 
@@ -17,6 +17,7 @@ This change covers:
   that source partition;
 - reusing clipping polygon lists and the vertex-distance scratch buffer within
   a source partition;
+- reusing the triangle count obtained during visibility preflight;
 - carrying the remaining hard surface-work budget into grid operations and
   subsequent charged operations, subject to the existing hard cap; and
 - documenting that work units are heuristic accounting weights, not an exact

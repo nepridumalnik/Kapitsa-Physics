@@ -1044,6 +1044,13 @@ impl PreparedGeometry {
                 .and_then(|n| n.checked_add(instances.len())),
             max_work,
         )?;
+        Self::collect_surface_triangles(instances, total)
+    }
+
+    fn collect_surface_triangles(
+        instances: &[GeometryInstance<'_>],
+        total: usize,
+    ) -> Result<Vec<SurfaceTriangle>, crate::Error> {
         let mut triangles = Vec::new();
         triangles
             .try_reserve_exact(total)
@@ -1147,8 +1154,8 @@ impl PreparedGeometry {
         max_work: usize,
         flow: impl Fn(Vec3) -> Result<Vec3, crate::Error>,
     ) -> Result<PreparedSurfacePatches, crate::Error> {
-        // Counting, selecting a reference and constructing relative instances
-        // all visit every instance, even when its mesh has no triangles.
+        // Counting, selecting a reference, constructing relative instances
+        // and collecting triangles each visit every instance.
         check_surface_work(instances.len().checked_mul(4), max_work)?;
         let total = surface_triangle_count(instances)?;
         let preprocessing = sort_work_estimate(total)
@@ -1213,15 +1220,16 @@ impl PreparedGeometry {
                 ..*instance
             });
         }
-        let mut patches = self.surface_patches_in_frame(&relative, max_work, work, |point| {
-            let point = reference.transform_point(point);
-            if !point.is_finite() {
-                return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
-            }
-            inverse_rotation
-                .rotate_vector(flow(point)?)
-                .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))
-        })?;
+        let mut patches =
+            self.surface_patches_in_frame(&relative, total, max_work, work, |point| {
+                let point = reference.transform_point(point);
+                if !point.is_finite() {
+                    return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
+                }
+                inverse_rotation
+                    .rotate_vector(flow(point)?)
+                    .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))
+            })?;
         for patch in &mut patches.patches {
             patch.vertices = patch.vertices.map(|point| reference.transform_point(point));
             patch.center = reference.transform_point(patch.center);
@@ -1239,6 +1247,7 @@ impl PreparedGeometry {
     fn surface_patches_in_frame(
         &self,
         instances: &[GeometryInstance<'_>],
+        total: usize,
         max_work: usize,
         mut work: usize,
         flow: impl Fn(Vec3) -> Result<Vec3, crate::Error>,
@@ -1256,7 +1265,7 @@ impl PreparedGeometry {
         // Grid operations must receive the remainder of the same hard budget
         // that is used to charge their work after they return.
         let max_work = max_work.min(MAX_SURFACE_WORK);
-        let mut triangles = Self::surface_triangles(instances, max_work)?;
+        let mut triangles = Self::collect_surface_triangles(instances, total)?;
         // Exact canonical vertex triples avoid centroid/area aliasing and
         // many-to-one epsilon matching. Winding remains in the source normal.
         for triangle in &mut triangles {
