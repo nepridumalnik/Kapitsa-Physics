@@ -3,6 +3,8 @@
 use super::{GeometryError, SurfaceTriangle, Vec3, components};
 use robust::{Coord, Coord3D, orient2d, orient3d};
 
+mod exact_depth;
+
 pub(super) struct Shadow {
     pub planes: [[f64; 3]; 4],
     coplanar: bool,
@@ -201,6 +203,7 @@ impl Shadow {
         source_index: usize,
         blocker_index: usize,
         upstream: Vec3,
+        mut charge: impl FnMut(usize) -> Result<(), crate::Error>,
     ) -> Result<Option<Self>, crate::Error> {
         if source.vertices == blocker.vertices {
             return Ok(
@@ -255,11 +258,24 @@ impl Shadow {
                 source.vertices[0],
                 source.vertices[1],
                 source.vertices[2],
-            ])?;
-            for (value, point) in depth.iter_mut().zip(source.vertices) {
-                // orient(a,b,c,p) is minus the signed plane distance numerator.
-                *value = frame.orientation(a, b, c, point)? * denominator.signum();
+            ]);
+            match frame {
+                Ok(frame) => {
+                    for (value, point) in depth.iter_mut().zip(source.vertices) {
+                        // orient(a,b,c,p) is minus the signed plane distance numerator.
+                        *value = frame.orientation(a, b, c, point)?;
+                    }
+                }
+                Err(error)
+                    if error.downcast_ref::<GeometryError>()
+                        == Some(&GeometryError::PrecisionLoss) =>
+                {
+                    charge(exact_depth::WORK)?;
+                    depth = exact_depth::depths(blocker.vertices, source.vertices)?;
+                }
+                Err(error) => return Err(error),
             }
+            depth = depth.map(|value| value * denominator.signum());
         }
         let coplanar = depth.iter().all(|v| *v == 0.0);
         if coplanar {
@@ -687,7 +703,7 @@ mod tests {
                     let direction = direction
                         .try_normalize()
                         .ok_or_else(|| crate::Error::from(GeometryError::InvalidGeometry))?;
-                    let shadow = Shadow::new(&source, &blocker, 0, 1, direction)?;
+                    let shadow = Shadow::new(&source, &blocker, 0, 1, direction, |_| Ok(()))?;
                     for u in [0.13, 0.27, 0.51, 0.73] {
                         for v in [0.11, 0.29, 0.53] {
                             if u + v >= 0.95 {
@@ -732,8 +748,8 @@ mod tests {
             vertices: source.vertices.map(|point| point + Vec3::X),
             ..source
         };
-        let shadow =
-            Shadow::new(&source, &blocker, 0, 1, Vec3::X)?.ok_or(GeometryError::PrecisionLoss)?;
+        let shadow = Shadow::new(&source, &blocker, 0, 1, Vec3::X, |_| Ok(()))?
+            .ok_or(GeometryError::PrecisionLoss)?;
         assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
         Ok(())
     }
@@ -756,10 +772,10 @@ mod tests {
                     vertices: source.vertices.map(|p| p + upstream * 1e-100),
                     ..source
                 };
-                let shadow = Shadow::new(&source, &blocker, 0, 1, upstream)?
+                let shadow = Shadow::new(&source, &blocker, 0, 1, upstream, |_| Ok(()))?
                     .ok_or(GeometryError::PrecisionLoss)?;
                 assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
-                assert!(Shadow::new(&source, &blocker, 0, 1, -upstream)?.is_none());
+                assert!(Shadow::new(&source, &blocker, 0, 1, -upstream, |_| Ok(()))?.is_none());
             }
         }
         Ok(())
@@ -777,15 +793,15 @@ mod tests {
             vertices: [Vec3::X, Vec3::X + Vec3::Y, Vec3::X + Vec3::Z],
             ..source
         };
-        let shadow =
-            Shadow::new(&source, &blocker, 0, 1, Vec3::X)?.ok_or(GeometryError::PrecisionLoss)?;
+        let shadow = Shadow::new(&source, &blocker, 0, 1, Vec3::X, |_| Ok(()))?
+            .ok_or(GeometryError::PrecisionLoss)?;
         assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
-        assert!(Shadow::new(&source, &blocker, 0, 1, -Vec3::X)?.is_none());
+        assert!(Shadow::new(&source, &blocker, 0, 1, -Vec3::X, |_| Ok(()))?.is_none());
         Ok(())
     }
 
     #[test]
-    fn unsupported_precision_is_an_error_instead_of_a_missed_blocker() {
+    fn wide_inclined_depth_charges_before_recovering_shadow() -> Result<(), crate::Error> {
         let source = SurfaceTriangle {
             vertices: [Vec3::ZERO, Vec3::Y + Vec3::X * 1e-100, Vec3::Z],
             normal: Vec3::X,
@@ -796,9 +812,19 @@ mod tests {
             vertices: [Vec3::X, Vec3::X * 2.0 + Vec3::Y, Vec3::X + Vec3::Z],
             ..source
         };
+        let charge = |_| Err(GeometryError::WorkBudgetExceeded.into());
         assert!(matches!(
-            Shadow::new(&source, &blocker, 0, 1, Vec3::X),
-            Err(error) if error.downcast_ref::<GeometryError>() == Some(&GeometryError::PrecisionLoss)
+            Shadow::new(&source, &blocker, 0, 1, Vec3::X, charge),
+            Err(error) if error.downcast_ref::<GeometryError>() == Some(&GeometryError::WorkBudgetExceeded)
         ));
+        let mut work = 0;
+        let shadow = Shadow::new(&source, &blocker, 0, 1, Vec3::X, |cost| {
+            work += cost;
+            Ok(())
+        })?
+        .ok_or(GeometryError::PrecisionLoss)?;
+        assert_eq!(work, exact_depth::WORK);
+        assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
+        Ok(())
     }
 }

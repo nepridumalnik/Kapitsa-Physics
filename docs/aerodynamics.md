@@ -524,7 +524,15 @@ coordinate. It has no contribution to the edge determinants. Depth is
 computed independently. For a blocker in a coordinate-aligned plane, depth
 uses the signed separation along that plane's normal axis. The common
 projected-area factor cancels in normalization. Other planes use the
-three-dimensional orientation predicate and its exponent-span checks.
+three-dimensional orientation predicate. If the depth frame exceeds its
+exponent span, preparation charges the exact fallback before computing any
+of its three determinants. Each determinant sums signed products of binary64
+significands in fixed 99-word accumulators, without heap allocation.
+The three exact results share a power-of-two scale and round to binary64
+with ties to even. A nonzero coefficient that rounds to zero returns
+`PrecisionLoss`. The extra integer work does not widen the area consistency
+tolerance. The direction and projected edge predicates still enforce their
+exponent-span limits.
 
 Visibility preprocessing counts source triangles once and reuses that count
 when collecting the transformed triangles. The grid receives the portion of
