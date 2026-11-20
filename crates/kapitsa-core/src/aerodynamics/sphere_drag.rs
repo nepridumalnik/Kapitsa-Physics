@@ -62,7 +62,7 @@ pub(crate) enum SphereDragRegime {
 }
 
 impl SphereDrag {
-    /// Sets diameter in metres and constant dynamic viscosity in Pa·s. Both
+    /// Sets diameter in metres and fallback dynamic viscosity in Pa·s. Both
     /// must be finite and positive. The selected aerodynamic model determines
     /// the Mach and Reynolds limits. The caller supplies a sphere whose
     /// geometry remains unchanged during the run.
@@ -97,13 +97,16 @@ impl SphereDrag {
         if angular_velocity != Vec3::ZERO {
             return Err(SphereDragError::UnsupportedDomain.into());
         }
+        let viscosity = atmosphere
+            .dynamic_viscosity()
+            .unwrap_or(self.dynamic_viscosity);
         if matches!(regime, SphereDragRegime::CreepingParticle) {
             const MAX_CREEPING_REYNOLDS: f64 = 0.1;
             const MAX_CREEPING_MACH: f64 = 0.05;
             return sphere_drag_force(
                 self.diameter,
                 atmosphere.density(),
-                self.dynamic_viscosity,
+                viscosity,
                 relative_velocity,
                 |speed, reynolds| {
                     let mach = speed / sound_speed;
@@ -132,7 +135,7 @@ impl SphereDrag {
             return compressible_drag_force(
                 self.diameter,
                 atmosphere.density(),
-                self.dynamic_viscosity,
+                viscosity,
                 sound_speed,
                 relative_velocity,
                 coefficient,
@@ -147,7 +150,7 @@ impl SphereDrag {
         incompressible_drag_force(
             self.diameter,
             atmosphere.density(),
-            self.dynamic_viscosity,
+            viscosity,
             relative_velocity,
         )
     }

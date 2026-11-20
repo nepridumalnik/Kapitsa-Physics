@@ -91,6 +91,7 @@ pub struct AtmosphericState {
     density: f64,
     wind_velocity: Vec3,
     sound_speed: Option<f64>,
+    dynamic_viscosity: Option<f64>,
 }
 
 impl AtmosphericState {
@@ -106,6 +107,7 @@ impl AtmosphericState {
             density,
             wind_velocity,
             sound_speed: None,
+            dynamic_viscosity: None,
         })
     }
 
@@ -120,6 +122,11 @@ impl AtmosphericState {
     /// Optional locally sampled speed of sound in m/s.
     pub fn sound_speed(self) -> Option<f64> {
         self.sound_speed
+    }
+
+    /// Optional locally sampled dynamic viscosity in Pa·s.
+    pub fn dynamic_viscosity(self) -> Option<f64> {
+        self.dynamic_viscosity
     }
 }
 

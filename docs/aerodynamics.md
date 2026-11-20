@@ -523,7 +523,11 @@ velocity. It factors out the Stokes force to avoid squaring very small speeds.
 nonrotating, non-cluster body with the sphere centered on its center of mass.
 It samples density, wind and sound speed at the center of mass and uses the
 world sound-speed fallback when the atmosphere supplies none. Diameter and
-constant viscosity are set explicitly. The model rejects Mach above 0.2.
+fallback dynamic viscosity are set explicitly. A spherical atmosphere can
+supply dynamic viscosity in Pa·s via `dynamic_viscosity_profile(reference, top)`.
+It interpolates linearly from the reference radius to the outer radius. All
+sphere drag variants prefer that local sample when configured. The
+incompressible variant rejects Mach above 0.2.
 The separate `sphere_drag::continuum_drag_force` uses the continuum component
 of [Singh et al.](https://arxiv.org/abs/2012.04813v1), equations 5–13 and 23–26.
 It derives Mach and diameter Reynolds number from local flow inputs and applies
@@ -572,7 +576,7 @@ where Re and Kn use particle diameter. These limits restrict the approximation
 to low-speed continuum and slip flow. The slip factor tends to unity as Kn
 tends to zero. `Aerodynamics::SlipCorrectedParticle` applies this drag at
 the center of mass during stepping. It uses the same atmospheric sampling,
-constant viscosity and nonrotating sphere assumptions as the other sphere
+viscosity policy and nonrotating sphere assumptions as the other sphere
 variants. Selecting the variant is explicit.
 
 `sphere_drag::creeping_particle_drag_ratio` gives the ratio to Stokes drag
