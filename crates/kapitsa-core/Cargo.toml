@@ -17,6 +17,7 @@ bench-detailed-timing = ["bench-internals"]
 [dependencies]
 kapitsa-math.workspace = true
 robust = "1.2.0"
+libm = "0.2.16"
 
 [dev-dependencies]
 rayon = "1.12.0"

@@ -626,6 +626,14 @@ Reynolds number 0.1. These limits are implementation policy for approximating
 creeping flow. The model derives radius-based Kn from the sampled atmosphere
 and configured particle diameter and viscosity.
 
+`sphere_drag::free_molecular_particle_drag_coefficient` evaluates the isolated
+sphere correlation in [Loth et al., equation (13)](https://doi.org/10.2514/1.J060153).
+It assumes diffuse reflection, equal gas and particle temperatures, and
+diameter-based Kn ≥ 10. Its argument is relative speed divided by the gas's
+most probable molecular speed. A low-speed series avoids cancellation and
+recovers the Epstein limit. The coefficient tends to 2 at large speed ratio.
+This evaluator is separate from world stepping and the transitional model.
+
 ## Skin friction
 
 For a laminar flat plate, the local Blasius relation is `c_f(x) = 0.664 / sqrt(Re_x)`. Integrating from the leading edge to plate length `L` gives the streamwise average `C_f = 1.328 / sqrt(Re_L)`. The distinction between local and averaged coefficients matters when summing sections.

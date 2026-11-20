@@ -342,6 +342,52 @@ fn air_knudsen(mach: f64, reynolds: f64) -> f64 {
     mach / reynolds * air_mean_free_path_factor()
 }
 
+/// Frontal-area drag coefficient of an isolated spherical particle in the
+/// free-molecular limit. Assumes diffuse reflection and equal gas and particle
+/// temperatures. Uses Loth et al. (2021), equation (13), with a series at low
+/// speed to avoid cancellation. `speed_ratio` is relative speed divided by
+/// the gas's most probable molecular speed and must be finite and positive.
+/// `diameter_knudsen` is the mean free path divided by diameter. This model
+/// requires `Kn >= 10` as a free-molecular approximation policy.
+/// <https://doi.org/10.2514/1.J060153>
+pub fn free_molecular_particle_drag_coefficient(
+    speed_ratio: f64,
+    diameter_knudsen: f64,
+) -> Result<f64, crate::Error> {
+    const MIN_FREE_MOLECULAR_KNUDSEN: f64 = 10.0;
+    const SERIES_MAX_SPEED_RATIO: f64 = 0.05;
+    if !speed_ratio.is_finite()
+        || speed_ratio <= 0.0
+        || !diameter_knudsen.is_finite()
+        || diameter_knudsen < 0.0
+    {
+        return Err(SphereDragError::InvalidInput.into());
+    }
+    if diameter_knudsen < MIN_FREE_MOLECULAR_KNUDSEN {
+        return Err(SphereDragError::UnsupportedDomain.into());
+    }
+    let sqrt_pi = std::f64::consts::PI.sqrt();
+    let square = speed_ratio * speed_ratio;
+    let thermal_reemission = 2.0 * sqrt_pi / 3.0;
+    let cd = if speed_ratio < SERIES_MAX_SPEED_RATIO {
+        // Taylor expansion of s * Cd through s^6. The constant term is
+        // the diffuse Epstein limit.
+        let incident =
+            16.0 / 3.0 + square * (16.0 / 15.0 + square * (-8.0 / 105.0 + square * 8.0 / 945.0));
+        (incident / sqrt_pi + thermal_reemission) / speed_ratio
+    } else {
+        let inverse = speed_ratio.recip();
+        let inverse_square = inverse * inverse;
+        (-square).exp() * inverse * (2.0 + inverse_square) / sqrt_pi
+            + (2.0 + inverse_square * (2.0 - 0.5 * inverse_square)) * libm::erf(speed_ratio)
+            + thermal_reemission * inverse
+    };
+    if !cd.is_finite() || cd <= 0.0 {
+        return Err(SphereDragError::ArithmeticOverflow.into());
+    }
+    Ok(cd)
+}
+
 fn air_mean_free_path_factor() -> f64 {
     (GAMMA * std::f64::consts::PI / 2.0).sqrt()
 }
@@ -475,6 +521,35 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_molecular_particle_drag_matches_kinetic_limits() -> Result<(), crate::Error> {
+        let kn = 10.0;
+        let slow = 1e-150;
+        let sqrt_pi = std::f64::consts::PI.sqrt();
+        let epstein = 16.0 / (3.0 * sqrt_pi) + 2.0 * sqrt_pi / 3.0;
+        assert!(
+            (slow * free_molecular_particle_drag_coefficient(slow, kn)? - epstein).abs() < 1e-14
+        );
+        assert!(
+            (free_molecular_particle_drag_coefficient(1.0, kn)? - 4.753_749_922_058_572).abs()
+                < 1e-14
+        );
+        assert_eq!(free_molecular_particle_drag_coefficient(f64::MAX, kn)?, 2.0);
+        let boundary = 0.05_f64;
+        let before = free_molecular_particle_drag_coefficient(boundary.next_down(), kn)?;
+        let after = free_molecular_particle_drag_coefficient(boundary, kn)?;
+        assert!((before - after).abs() < 1e-10);
+        assert_eq!(
+            free_molecular_particle_drag_coefficient(1.0, kn.next_down()),
+            Err(SphereDragError::UnsupportedDomain.into())
+        );
+        assert_eq!(
+            free_molecular_particle_drag_coefficient(0.0, kn),
+            Err(SphereDragError::InvalidInput.into())
+        );
+        Ok(())
+    }
 
     #[test]
     fn creeping_particle_keeps_rarefaction_when_mach_underflows() -> Result<(), crate::Error> {
