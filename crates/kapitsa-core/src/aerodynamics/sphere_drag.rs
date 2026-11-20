@@ -113,7 +113,14 @@ impl SphereDrag {
                     if mach > MAX_CREEPING_MACH || reynolds > MAX_CREEPING_REYNOLDS {
                         return Err(SphereDragError::UnsupportedDomain.into());
                     }
-                    let radius_knudsen = 2.0 * air_knudsen(mach, reynolds);
+                    // Mach/Re cancels relative speed analytically. Form Kn
+                    // directly so underflow in Mach cannot erase rarefaction.
+                    let denominator = (atmosphere.density() * sound_speed) * self.diameter;
+                    if !denominator.is_finite() || denominator <= 0.0 {
+                        return Err(SphereDragError::ArithmeticOverflow.into());
+                    }
+                    let radius_knudsen =
+                        viscosity / denominator * (2.0 * air_mean_free_path_factor());
                     if !radius_knudsen.is_finite() {
                         return Err(SphereDragError::ArithmeticOverflow.into());
                     }
@@ -332,7 +339,11 @@ pub fn slip_corrected_particle_drag_coefficient(
 }
 
 fn air_knudsen(mach: f64, reynolds: f64) -> f64 {
-    mach / reynolds * (GAMMA * std::f64::consts::PI / 2.0).sqrt()
+    mach / reynolds * air_mean_free_path_factor()
+}
+
+fn air_mean_free_path_factor() -> f64 {
+    (GAMMA * std::f64::consts::PI / 2.0).sqrt()
 }
 
 /// Ratio of drag to Stokes drag for a slowly translating isolated sphere with
@@ -464,6 +475,31 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creeping_particle_keeps_rarefaction_when_mach_underflows() -> Result<(), crate::Error> {
+        let speed = 1e-320;
+        let sound_speed = 1e4;
+        let diameter = 0.001;
+        let density = 1e4;
+        let viscosity = 1e4;
+        assert_eq!(speed / sound_speed, 0.0);
+        let force = SphereDrag::new(diameter, viscosity)?.evaluate(
+            AtmosphericState::new(density, Vec3::ZERO)?,
+            sound_speed,
+            Vec3::X * speed,
+            Vec3::ZERO,
+            SphereDragRegime::CreepingParticle,
+        )?;
+        let radius_kn = (0.7 * std::f64::consts::PI).sqrt() / 5.0;
+        let expected = 3.0
+            * std::f64::consts::PI
+            * viscosity
+            * diameter
+            * creeping_particle_drag_ratio(radius_kn)?;
+        assert!((force.x / -speed - expected).abs() < 0.001);
+        Ok(())
+    }
 
     #[test]
     fn creeping_particle_drag_recovers_continuum_and_free_molecular_limits()
