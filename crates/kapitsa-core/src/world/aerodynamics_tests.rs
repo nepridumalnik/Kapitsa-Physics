@@ -14,6 +14,68 @@ fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepEr
 }
 
 #[test]
+fn world_rebuilds_body_mesh_occupancy_after_cavity_policy_switch()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::colliders::{ColliderTessellation, collider_mesh},
+        collider::Collider,
+        shape::{Cuboid, Shape},
+    };
+
+    let outer = Collider::new(
+        Shape::Cuboid(Cuboid::new(2.0, 2.0, 2.0)?),
+        Transform::identity(),
+    );
+    let inner = Collider::new(
+        Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+        Transform::identity(),
+    );
+    let config = ColliderTessellation::default();
+    let outer = collider_mesh([&outer], config)?;
+    let inner = collider_mesh([&inner], config)?;
+    let mut vertices = Vec::new();
+    let mut faces = Vec::new();
+    for (mesh, reverse) in [(outer, false), (inner, true)] {
+        for &face in mesh.triangles() {
+            let mut indices = face.map(|i| {
+                let point = mesh.vertices()[i];
+                if let Some(index) = vertices.iter().position(|&v| v == point) {
+                    index
+                } else {
+                    vertices.push(point);
+                    vertices.len() - 1
+                }
+            });
+            if reverse {
+                indices.swap(1, 2);
+            }
+            faces.push(indices);
+        }
+    }
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::X * -2_000.0,
+    )?));
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+    body.set_aerodynamics(Aerodynamics::Mesh(TriangleMesh::new(vertices, faces)?));
+    let id = world.add_body(body)?;
+    for enabled in [false, true, false] {
+        world.set_body_mesh_oriented_cavities(enabled);
+        world.step(1e-8)?;
+        let prepared = world
+            .bodies
+            .get(id.dense)
+            .and_then(|entry| entry.mesh_aerodynamics.as_ref())
+            .and_then(|prepared| prepared.cache.get())
+            .ok_or("prepared body mesh")?;
+        assert_eq!(prepared.occupied_at(Vec3::ZERO)?, !enabled);
+    }
+    Ok(())
+}
+
+#[test]
 fn transonic_wind_tunnel_wing_loads_advance_rigid_body() -> Result<(), Box<dyn std::error::Error>> {
     use crate::aerodynamics::wing::{FiniteWing, WingSurface};
 

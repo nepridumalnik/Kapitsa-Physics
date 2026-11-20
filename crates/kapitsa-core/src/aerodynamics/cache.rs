@@ -34,6 +34,7 @@ pub struct GeometryCacheKey {
 pub struct GeometryPreparation {
     key: GeometryCacheKey,
     config: GeometryConfig,
+    oriented_cavities: bool,
     incarnation: Arc<()>,
 }
 
@@ -59,7 +60,11 @@ impl GeometryPreparation {
         self,
         instances: &[GeometryInstance<'_>],
     ) -> Result<PreparedMeshGeometry, crate::Error> {
-        let geometry = PreparedGeometry::prepare(instances, self.config)?;
+        let geometry = if self.oriented_cavities {
+            PreparedGeometry::prepare_with_oriented_cavities(instances, self.config)?
+        } else {
+            PreparedGeometry::prepare(instances, self.config)?
+        };
         Ok(PreparedMeshGeometry {
             request: self,
             geometry,
@@ -81,6 +86,7 @@ pub struct PreparedGeometryCache {
     requested: Option<GeometryPreparation>,
     cached: Option<PreparedMeshGeometry>,
     wave: Option<CachedWave>,
+    oriented_cavities: bool,
 }
 
 #[derive(Debug)]
@@ -92,6 +98,16 @@ struct CachedWave {
 }
 
 impl PreparedGeometryCache {
+    /// Selects the occupancy rule used by subsequent preparation requests.
+    /// Changing the rule invalidates outstanding tickets and cached wave data.
+    pub fn set_oriented_cavities(&mut self, enabled: bool) {
+        if self.oriented_cavities != enabled {
+            self.oriented_cavities = enabled;
+            self.requested = None;
+            self.wave = None;
+        }
+    }
+
     /// Select the current identity before dispatching work. Actual config values
     /// are checked too, so forgetting to bump config_version cannot reuse a hit.
     /// Selecting a different identity invalidates all outstanding old tickets.
@@ -109,6 +125,7 @@ impl PreparedGeometryCache {
         let request = GeometryPreparation {
             key,
             config,
+            oriented_cavities: self.oriented_cavities,
             incarnation: Arc::new(()),
         };
         self.requested = Some(request.clone());
@@ -257,6 +274,25 @@ mod tests {
             geometry_version: 1,
             config_version: 1,
         }
+    }
+
+    #[test]
+    fn occupancy_rule_switch_invalidates_cached_geometry_and_old_tickets()
+    -> Result<(), crate::Error> {
+        let key = key();
+        let mesh = mesh();
+        let mut cache = PreparedGeometryCache::default();
+        let old = cache.request(key, config()).prepare(&mesh)?;
+        let current = cache.request(key, config()).prepare(&mesh)?;
+        assert!(cache.publish(current));
+        assert!(cache.get().is_some());
+        cache.set_oriented_cavities(true);
+        assert!(cache.get().is_none());
+        cache.prepare(key, &mesh, config())?;
+        assert!(!cache.publish(old));
+        cache.set_oriented_cavities(true);
+        assert!(cache.get().is_some());
+        Ok(())
     }
 
     #[test]

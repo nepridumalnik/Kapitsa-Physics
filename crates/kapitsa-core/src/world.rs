@@ -850,6 +850,7 @@ pub struct PhysicsWorld {
     /// Sound speed used by the Newtonian mesh pressure model (m/s).
     /// The default is 340 m/s; callers should set this for their atmosphere.
     mesh_sound_speed: f64,
+    preserve_body_mesh_cavities: bool,
     aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
     part_hull_published: Vec<PartHullWrench>,
     part_hull_pending: Vec<PartHullWrench>,
@@ -1579,6 +1580,7 @@ impl PhysicsWorld {
             part_gravity_pending: Vec::new(),
             atmosphere: Atmosphere::Vacuum,
             mesh_sound_speed: 340.0,
+            preserve_body_mesh_cavities: false,
             aerodynamics_body_updates: Vec::new(),
             part_hull_published: Vec::new(),
             part_hull_pending: Vec::new(),
@@ -1648,6 +1650,13 @@ impl PhysicsWorld {
         }
         self.mesh_sound_speed = sound_speed;
         Ok(())
+    }
+
+    /// Selects oriented cavity handling for primary Mesh/Colliders geometry
+    /// on non-cluster bodies. The default is solid fill. The next preparation
+    /// uses the new rule, with the existing voxel and work budgets.
+    pub fn set_body_mesh_oriented_cavities(&mut self, enabled: bool) {
+        self.preserve_body_mesh_cavities = enabled;
     }
 
     /// Returns the uniform Mesh/Colliders sound speed in m/s.
@@ -4286,6 +4295,9 @@ impl PhysicsWorld {
                             });
                     prepared.config = config;
                     prepared.sound_speed = self.mesh_sound_speed;
+                    prepared
+                        .cache
+                        .set_oriented_cavities(self.preserve_body_mesh_cavities);
                     let key = crate::aerodynamics::cache::GeometryCacheKey {
                         body: body_id,
                         geometry_version: 0,
