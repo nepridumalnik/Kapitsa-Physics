@@ -730,6 +730,14 @@ transition, real-gas properties and a general supersonic wing lifting model
 remain outside the implemented models. Callers must not treat the table as
 evidence of accuracy outside each cited correlation's tested conditions.
 
+The friction rows are separate opt-ins, not a stitched continuous closure.
+Coefficient values can step where the incompressible, high-subsonic and
+high-speed correlations overlap; choose one model consistent with the cited
+range instead of blending them. The Mach-dependent friction variants use axial
+Mach in their correlation and total local Mach for the domain check, so
+crossflow can make a flow unsupported even when the axial component alone
+would be inside the correlation's range.
+
 ## Skin friction
 
 For a laminar flat plate, the local Blasius relation is `c_f(x) = 0.664 / sqrt(Re_x)`. Integrating from the leading edge to plate length `L` gives the streamwise average `C_f = 1.328 / sqrt(Re_L)`. The distinction between local and averaged coefficients matters when summing sections.
