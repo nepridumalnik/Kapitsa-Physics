@@ -72,6 +72,13 @@
   `projected_determinants_accept_overflowing_endpoint_difference` and
   `axial_depth_accepts_overflowing_separation` as synthetic regressions only,
   without claiming execution or independent physical validation.
+- [x] Record `b449468`: before direction or projected-edge frame evaluation,
+  precharge exact projection if a component difference `a-b` equals `a` with
+  nonzero `b`, or `-b` with nonzero `a`; keep rounded fast-path edges and
+  offsets for other cases and use power-of-two direction rescaling.
+- [x] Document `rounded_edge_difference_does_not_make_blocker_tangent`: a thin
+  non-tangent blocker with a zero rounded edge cross product still casts a
+  covering shadow, without claiming execution or independent physical validation.
 - [ ] Audit and complete the remaining hard work budget coverage for every
   intermediate operation before treating the preparation path as production-
   complete.

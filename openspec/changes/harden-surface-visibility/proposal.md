@@ -8,7 +8,8 @@ predicate scaling in generic surface geometry and `7d6e5a6` for stable,
 linear-work shadow-grid bucket construction without sorting entries, plus
 `8cf7271` for measured clipping split reservations and `0337ef5` for bounded
 exact inclined depth fallback, `aec8f8d` for absolute-scale triangle-area
-fallback, and `d5624ae` for exact projection from original vertex coordinates.
+fallback, `d5624ae` for exact projection from original vertex coordinates, and
+`b449468` for early exact projection when subtraction erases a nonzero operand.
 
 ## Scope
 
@@ -33,8 +34,18 @@ This change covers:
   coefficients scaled separately;
 - expanding exact projection as `det(end-start, point-start, direction)` from
   original finite endpoints and the original ray direction, before subtraction;
-  overflowing intermediate edges or offsets select exact projection, while the
-  fast path explicitly retains rounded floating-point edges and offsets;
+  overflowing intermediate edges or offsets select exact projection;
+- selecting precharged exact projection before direction or projected-edge
+  frame evaluation when a component difference `a-b` equals `a` with nonzero
+  `b`, or equals `-b` with nonzero `a`; other cases retain the rounded
+  floating-point edge and offset fast path;
+- rescaling the projection direction by a power of two to preserve component
+  ratios, retaining exact fallback for unsafe scaling;
+- recording `b449468` synthetic regression
+  `rounded_edge_difference_does_not_make_blocker_tangent`: a thin non-tangent
+  blocker whose rounded edge cross product is zero still constructs a shadow
+  covering source-affine point `(0.25, 0.25, 0)`, without claiming execution or
+  independent physical validation;
 - recording `d5624ae` synthetic regressions for displacement erased by rounded
   subtraction, overflowing endpoint differences and overflowing axial depth,
   without claiming test execution or independent physical validation;

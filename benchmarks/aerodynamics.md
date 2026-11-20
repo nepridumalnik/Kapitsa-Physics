@@ -263,3 +263,8 @@ covered by the focused regression.
 Projection from original coordinates on `d5624ae` measured medians of
 21.90 us and 1.346 ms on the small and moderate fixtures. The wide
 projected-edge fixture measured 6.06 us (6.05 to 6.20 us).
+
+The erased-endpoint check on `b449468` measured medians of 22.18 us
+(21.69 to 24.09 us) and 1.381 ms (1.376 to 1.383 ms) on the small and
+moderate fixtures. The wide projected-edge fixture measured 6.09 us
+(6.01 to 6.31 us).

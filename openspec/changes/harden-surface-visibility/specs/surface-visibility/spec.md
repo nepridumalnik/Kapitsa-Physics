@@ -105,11 +105,11 @@ Nonzero coefficients rounding to zero SHALL return `PrecisionLoss`.
 
 ### Requirement: Project exactly from original endpoints
 
-Exact projection SHALL expand `det(end-start, point-start, direction)` from
-original endpoints and ray direction before subtraction. Overflowing edges or
-offsets SHALL select precharged fallback. The fast path SHALL retain rounded
-floating-point edges and offsets. Non-finite original vertices or direction
-SHALL return `ArithmeticOverflow`.
+Exact projection SHALL expand from original endpoints and direction before
+subtraction. Overflow or erasure of a nonzero operand in differences SHALL
+select precharged exact projection before direction/edge frames; other cases
+SHALL retain rounded edges/offsets. Direction rescaling SHALL use powers of two.
+Non-finite original inputs SHALL return `ArithmeticOverflow`.
 
 #### Scenario: Exact projection expands before subtraction
 
@@ -120,6 +120,25 @@ SHALL return `ArithmeticOverflow`.
   scaled coefficients use this expansion
 - **AND** an overflowing intermediate edge, opposite offset or source offset
   bypasses the fast projected-edge frame, not the finite-input check
+
+#### Scenario: Subtraction erases a nonzero operand
+
+- **WHEN** any checked component difference `a-b` equals `a` with `b != 0`,
+  or equals `-b` with `a != 0`
+- **THEN** original endpoints select precharged exact projection before the
+  direction or projected-edge frame can mistake a thin blocker for tangent
+- **AND** other differences retain the rounded fast path, subject to existing
+  frame-span and direction-scaling fallback checks
+
+#### Scenario: Synthetic thin non-tangent blocker survives rounded edges
+
+- **WHEN** `rounded_edge_difference_does_not_make_blocker_tangent` uses blocker
+  vertices `[s, e, 2*e]`, `s = X*2^-500`, `e = X + Y`, normal `-Z`, area
+  `s.x/2`, source vertices translated by `-Z`, and flow `Z`
+- **THEN** the rounded edge cross product is zero, but shadow construction
+  succeeds and covers source-affine point `(0.25, 0.25, 0)`
+- **AND** this is a synthetic assertion, not execution evidence or independent
+  physical validation
 
 #### Scenario: Synthetic rounded subtraction erases displacement
 
