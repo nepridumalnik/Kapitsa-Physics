@@ -23,11 +23,12 @@ Barycentric area calculations SHALL undo both in-plane scales.
 - **THEN** shadow construction succeeds and covers the source-affine point
   `(0.25, 0.25, 0)` despite the different coordinate-axis scales
 
-#### Scenario: A 3D predicate axis exceeds the exponent span
+#### Scenario: A direction or projected edge predicate exceeds its span
 
-- **WHEN** the nonzero coordinates on one axis span more than 254 binary
-  exponents for a non-coordinate-aligned plane using the 3D predicate
-- **THEN** predicate preparation returns `PrecisionLoss`
+- **WHEN** a direction or projected edge predicate exceeds its supported
+  exponent span
+- **THEN** preparation returns `PrecisionLoss`; exact depth fallback does
+  not remove those limits
 
 #### Scenario: An aligned plane bypasses the 3D span limit
 
@@ -40,7 +41,8 @@ Barycentric area calculations SHALL undo both in-plane scales.
 
 For flow exactly along one coordinate axis, projected edge tests SHALL omit
 only that axial coordinate. Coordinate-aligned blocker depth SHALL use signed
-separation along the aligned axis; other planes SHALL retain the 3D predicate.
+separation along the aligned axis; other planes SHALL try the 3D depth frame
+before exact fallback.
 
 #### Scenario: Axial shadow uses signed separation for blocker depth
 
@@ -55,6 +57,33 @@ separation along the aligned axis; other planes SHALL retain the 3D predicate.
   non-axial coordinate and the blocker is one unit downstream
 - **THEN** the blocker covers the source-affine point `(0.25, 0.25, 0)` and
   the opposite flow direction rejects it
+
+### Requirement: Fall back to exact inclined depth
+
+If an inclined depth frame exceeds the exponent span, preparation SHALL
+charge the fallback before computing its determinants. The fallback SHALL
+accumulate exactly in fixed-size storage and round the results with a common
+power-of-two scale. Nonzero values rounded to zero SHALL return `PrecisionLoss`.
+
+#### Scenario: Large determinant terms cancel
+
+- **WHEN** a blocker at `t = (2^100, 2^100, 2^100)` has X/Y edges of `2^50`
+  and source points `t + Z*2^50`, `t - Z*2^50`, and `t`
+- **THEN** exact depth coefficients are `[-1, 1, 0]` despite cancellation
+
+#### Scenario: Smallest subnormal is preserved or rejected on rounding
+
+- **WHEN** blocker vertices are `[0, X, Y]` and `m` is the smallest positive
+  binary64 subnormal
+- **THEN** sources `[Z, Z*m, 0]` give `[-1, -m, 0]`, while
+  `[2*Z, Z*m, 0]` returns `PrecisionLoss` on ties-to-even rounding to zero
+
+#### Scenario: Inclined fallback precharge is rejected or accepted
+
+- **WHEN** source vertices are `[0, Y + X*1e-100, Z]`, blocker vertices are
+  `[X, 2*X + Y, X + Z]`, and flow is `X`
+- **THEN** rejected precharge returns `WorkBudgetExceeded` before exact work;
+  accepted precharge recovers coverage at affine point `(0.25, 0.25, 0)`
 
 ### Requirement: Preserve representable numeric intersections
 

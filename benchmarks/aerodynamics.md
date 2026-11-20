@@ -241,3 +241,8 @@ The coordinate-aligned depth change on `9ac852c` measured 20.70 us
 (20.19 to 22.10 us) for the small fixture and 1.301 ms (1.288 to
 1.339 ms) for the moderate fixture. These fixtures use coordinate-aligned
 plates. The results give no timing estimate for inclined geometry.
+
+The exact depth fallback on `0337ef5` measured 20.66 us (20.13 to
+22.22 us) on the small fixture and 1.284 ms (1.279 to 1.287 ms)
+on the moderate fixture. These fixtures exercise the common path.
+The fallback itself has no timing measurement in this run.

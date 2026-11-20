@@ -5,8 +5,9 @@
 - [x] Record `07c7285` independent power-of-two scaling per coordinate axis,
   the shared positive determinant factor within each orientation frame, and
   reversal of the two in-plane scales for barycentric area.
-- [x] Record that exponent-span validation still applies within each axis;
-  differences between axis scales alone do not reject thin geometry.
+- [x] Record that direction and projected edge predicates retain within-axis
+  exponent limits; exact depth fallback has no span limit, but final
+  coefficient representation can return `PrecisionLoss`.
 - [x] Document the two new synthetic regressions,
   `triangle_fraction_preserves_area_across_axis_scales` and
   `shadow_covers_thin_source_across_axis_scales`, without claiming execution
@@ -19,8 +20,8 @@
   axial flow and its `1e-100` depth-separation regression across both signs
   of all three axes.
 - [x] Record `9ac852c` signed axial separation for coordinate-aligned blocker
-  depth, the wide within-axis-span regression, and the retained 3D predicate
-  limit for other planes.
+  depth and the wide within-axis-span regression; `0337ef5` supersedes the
+  inclined depth frame's span rejection with exact fallback.
 - [x] Record that work accounting does not provide an exact byte budget or
   exact instruction/elapsed-time bound.
 - [x] Record `7d6e5a6` stable grid bucket construction from preflight entry
@@ -41,6 +42,13 @@
   `n` distance slots, and no new vertex buffer for an unsplit polygon.
 - [x] Distinguish logical reservation requests from allocator capacity and
   bytes, without claiming test execution or closing the remaining work audit.
+- [x] Record `0337ef5`: exact signed binary64 products in fixed 99-word
+  accumulators, a shared power-of-two scale and ties-to-even conversion.
+- [x] Record the `3 * (24 * 6 + 8) * 99` precharge before any fallback
+  determinant; exclude exact depth work from the area consistency tolerance.
+- [x] Document synthetic cancellation, smallest-subnormal preservation,
+  underflow-to-zero `PrecisionLoss` and precharge `WorkBudgetExceeded`
+  scenarios without claiming test execution or physical validation.
 - [x] Keep the retrospective change limited to
   `openspec/changes/harden-surface-visibility/`.
 - [ ] Audit and complete the remaining hard work budget coverage for every
