@@ -579,7 +579,11 @@ section 2.2](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/
 It spans continuum, transitional and free-molecular conditions for slowly
 translating spheres with diffuse molecular reflection. Its Knudsen number
 uses particle **radius**, so it is twice the diameter-based value used by
-the preceding particle correlations. The caller establishes creeping flow.
+the preceding particle correlations. `Aerodynamics::CreepingParticle` applies
+the corrected Stokes force during stepping, up to Mach 0.05 and diameter
+Reynolds number 0.1. These limits are implementation policy for approximating
+creeping flow. The model derives radius-based Kn from the sampled atmosphere
+and configured particle diameter and viscosity.
 
 ## Skin friction
 

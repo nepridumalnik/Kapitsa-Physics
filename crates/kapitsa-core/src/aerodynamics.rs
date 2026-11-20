@@ -39,6 +39,9 @@ pub enum Aerodynamics {
     /// Low-Mach drag with gas slip on an isolated spherical particle.
     /// See [`sphere_drag::slip_corrected_particle_drag_coefficient`].
     SlipCorrectedParticle(sphere_drag::SphereDrag),
+    /// Creeping drag on an isolated spherical particle with diffuse molecular
+    /// reflection. Requires Mach ≤ 0.05 and diameter Reynolds number ≤ 0.1.
+    CreepingParticle(sphere_drag::SphereDrag),
     Wing(wing::WingSurface),
     Wings(Vec<wing::WingSurface>),
     Hull(Vec<hull::HullSection>),
@@ -51,6 +54,10 @@ impl fmt::Debug for Aerodynamics {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => formatter.write_str("None"),
+            Self::CreepingParticle(model) => formatter
+                .debug_tuple("CreepingParticle")
+                .field(model)
+                .finish(),
             Self::SlipCorrectedParticle(model) => formatter
                 .debug_tuple("SlipCorrectedParticle")
                 .field(model)

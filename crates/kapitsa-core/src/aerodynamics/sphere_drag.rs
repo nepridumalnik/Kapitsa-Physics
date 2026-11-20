@@ -58,6 +58,7 @@ pub(crate) enum SphereDragRegime {
     Continuum,
     CompressionDominatedParticle,
     SlipCorrectedParticle,
+    CreepingParticle,
 }
 
 impl SphereDrag {
@@ -96,8 +97,29 @@ impl SphereDrag {
         if angular_velocity != Vec3::ZERO {
             return Err(SphereDragError::UnsupportedDomain.into());
         }
+        if matches!(regime, SphereDragRegime::CreepingParticle) {
+            const MAX_CREEPING_REYNOLDS: f64 = 0.1;
+            const MAX_CREEPING_MACH: f64 = 0.05;
+            return sphere_drag_force(
+                self.diameter,
+                atmosphere.density(),
+                self.dynamic_viscosity,
+                relative_velocity,
+                |speed, reynolds| {
+                    let mach = speed / sound_speed;
+                    if mach > MAX_CREEPING_MACH || reynolds > MAX_CREEPING_REYNOLDS {
+                        return Err(SphereDragError::UnsupportedDomain.into());
+                    }
+                    let radius_knudsen = 2.0 * air_knudsen(mach, reynolds);
+                    if !radius_knudsen.is_finite() {
+                        return Err(SphereDragError::ArithmeticOverflow.into());
+                    }
+                    creeping_particle_drag_ratio(radius_knudsen)
+                },
+            );
+        }
         let coefficient = match regime {
-            SphereDragRegime::Incompressible => None,
+            SphereDragRegime::Incompressible | SphereDragRegime::CreepingParticle => None,
             SphereDragRegime::SlipCorrectedParticle => {
                 Some(slip_corrected_particle_drag_coefficient as fn(f64, f64) -> _)
             }

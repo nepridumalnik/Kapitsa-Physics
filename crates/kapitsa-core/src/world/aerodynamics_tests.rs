@@ -14,6 +14,52 @@ fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepEr
 }
 
 #[test]
+fn creeping_particle_steps_across_knudsen_regimes() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::sphere_drag::{SphereDrag, creeping_particle_drag_ratio};
+
+    let diameter = 0.01;
+    let viscosity = 0.001;
+    let speed = 0.005;
+    let sound_speed = 100.0;
+    let dt = 0.1;
+    let model = SphereDrag::new(diameter, viscosity)?;
+    let mut previous_speed = 0.0;
+    for density in [1.0, 0.001, 1e-6, 0.0] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            density,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_sound_speed(sound_speed)?;
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut particle = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        particle.set_linear_velocity(Vec3::X * speed)?;
+        particle.set_aerodynamics(Aerodynamics::CreepingParticle(model));
+        let body = world.add_body(particle)?;
+        world.step(dt)?;
+        let actual = world
+            .body(body)
+            .ok_or("spherical particle")?
+            .state()
+            .linear_velocity();
+        let pi = std::f64::consts::PI;
+        let expected = if density == 0.0 {
+            speed
+        } else {
+            let radius_kn =
+                viscosity / (density * sound_speed * (diameter / 2.0)) * (0.7 * pi).sqrt();
+            speed
+                - dt * (3.0 * pi * viscosity * diameter * speed)
+                    * creeping_particle_drag_ratio(radius_kn)?
+        };
+        assert!((actual - Vec3::X * expected).length() < 1e-14);
+        assert!(actual.x > previous_speed);
+        previous_speed = actual.x;
+    }
+    Ok(())
+}
+
+#[test]
 fn gas_slip_reduces_spherical_particle_deceleration() -> Result<(), Box<dyn std::error::Error>> {
     use crate::aerodynamics::sphere_drag::{SphereDrag, slip_corrected_particle_drag_coefficient};
 
