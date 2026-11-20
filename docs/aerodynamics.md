@@ -593,6 +593,29 @@ control-surface stall or roughness. It does not add a pitching-moment model.
 The flat-plate limit is not a validated substitute for a measured post-stall
 polar; use `WingPolar` when such data are available.
 
+`FiniteWing::with_oye_dynamic_stall(chord, time_constant_scale)` adds a
+rate-dependent separation-lag model following the Øye/Bergami formulation
+described in the [QBlade dynamic-stall documentation](https://docs.qblade.org/src/theory/aerodynamics/dynamic_stall/OYE_stall.html).
+The caller evaluates `FiniteWing::coefficients_dynamic(alpha, mach, V, dt,
+state)` with a caller-owned `DynamicStallState`. The static attached lift
+`CL_att` is the linear lift extrapolation and `CL_st` is the configured
+static polar. The static separation is
+`f_st = clamp((2 sqrt(CL_st / CL_att) - 1)^2, 0, 1)`, with
+`CL_sep = (CL_st - f_st CL_att) / (1 - f_st)` regularized near `f_st = 1`.
+The state evolves as `df/dt = (f_st - f) / tau` with
+`f_new = f_st + (f_old - f_st) exp(-dt / tau)` and
+`tau = time_constant_scale * chord / (2 V)`. Dynamic lift is
+`f CL_att + (1 - f) CL_sep`; drag uses the Bergami correction
+`CD_st + (CD_st - CD_0)[0.5(sqrt(f_st) - sqrt(f)) - 0.25(f - f_st)]`.
+
+The model requires the flat-plate post-stall branch and positive finite
+`chord`, `V` and `dt`, with state in `[0, 1]`. Missing configuration, invalid
+time/speed/state, nonfinite coefficients or negative drag are explicit errors.
+This is a reduced-order separation-lag model: it does not resolve a leading-edge
+vortex, pitching moment, dynamic-stall onset hysteresis of the vortex lift,
+wake memory, roughness or experimental validation. It is not a
+Beddoes–Leishman solver.
+
 `FiniteWing::with_subsonic_compressibility(max_mach)` optionally uses a
 Prandtl-Glauert lifting-line approximation, with slope
 `2 pi / (sqrt(1 - M^2) + 2/(e AR))`. The caller must choose a maximum Mach
@@ -888,7 +911,8 @@ engine does not blend models to hide a domain limit.
 | Slender-body normal load | Mach ≤ 0.3, small incidence, steady aligned flow | separation, wave drag, rotational derivatives |
 | Slender wave drag | Mach > 1, axis aligned, caller area slopes | predictive transonic closure |
 | `FiniteWing` default | Mach ≤ 0.3, attached flow | stall, separation |
-| Flat-plate post-stall | caller stall angle + blend, through ±π/2 | predictive onset, hysteresis, dynamic stall, wake geometry |
+| Flat-plate post-stall | caller stall angle + blend, through ±π/2 | predictive onset, wake geometry |
+| Øye dynamic stall | caller chord/V/dt/state, post-stall polar, rate-dependent separation | vortex lift, pitch moment, wake memory, validation |
 | Prandtl–Glauert wing | caller maximum below Mach 1 | shock onset, wave drag |
 | NDARC wing lift/drag rise | caller maximum; ratio ≤ 1.1 or explicit plateau | general high-supersonic wing model |
 | Supersonic wing linear theory | 1.2 ≤ Mach ≤ min(caller max, 5), attached small incidence | thickness, camber, sweep, tip relief, shock detachment |
@@ -915,7 +939,8 @@ engine does not blend models to hide a domain limit.
 
 Finite-thickness and multi-surface Kutta wake flow with wake roll-up and
 control surfaces for Mesh/Colliders, unsteady added-mass and rotating-wake
-effects, predictive stall onset/hysteresis/dynamic stall,
+effects, geometry-predicted stall onset, vortex-lift dynamic stall and
+validated hysteresis,
 wake/shielding physics beyond geometric occlusion, base-flow interaction,
 surface roughness, high-speed transition, real-gas properties, a validated
 body-of-revolution transonic solver and a validated general supersonic

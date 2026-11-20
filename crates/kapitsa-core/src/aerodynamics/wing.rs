@@ -7,8 +7,9 @@
 //! supersonic model uses `AR/(AR+2)` as an engineering finite-span factor and
 //! does not model thickness, sweep, tip relief or shock detachment. An optional
 //! flat-plate post-stall blend extends the attached limit through `±pi/2`; it
-//! uses a caller-selected stall onset and does not predict hysteresis or dynamic
-//! stall.
+//! uses a caller-selected stall onset. An optional stateful Øye/Bergami
+//! separation lag adds rate-dependent hysteresis but not a leading-edge vortex
+//! or pitching-moment state.
 //! `WingSurface` optionally replaces that closure with caller-supplied TOTAL
 //! CL/CD data and a quasi-steady control incidence shift. No wing interference.
 //! Coefficients refer to planform area; angles are in radians.
@@ -222,6 +223,40 @@ pub struct FiniteWing {
     compressibility: Compressibility,
     drag_rise: Option<DragRise>,
     post_stall: Option<PostStall>,
+    dynamic_stall: Option<DynamicStall>,
+}
+
+/// Caller chord and separation-lag scale for the Øye dynamic-stall model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DynamicStall {
+    chord: f64,
+    time_constant_scale: f64,
+}
+
+/// Mutable rate-dependent separation state for [`FiniteWing::coefficients_dynamic`].
+///
+/// `separation` is the attached-flow fraction `f`: one is fully attached and
+/// zero is fully separated. It is updated by the caller's time step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DynamicStallState {
+    separation: f64,
+}
+
+impl DynamicStallState {
+    /// Starts fully attached.
+    pub fn new() -> Self {
+        Self { separation: 1.0 }
+    }
+
+    pub fn separation(self) -> f64 {
+        self.separation
+    }
+}
+
+impl Default for DynamicStallState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Explicit flat-plate post-stall blend width beyond the attached limit.
@@ -664,6 +699,7 @@ impl FiniteWing {
             compressibility: Compressibility::Incompressible,
             drag_rise: None,
             post_stall: None,
+            dynamic_stall: None,
         })
     }
 
@@ -688,6 +724,34 @@ impl FiniteWing {
             return Err(crate::Error::from(WingError::InvalidParameters));
         }
         self.post_stall = Some(PostStall { blend_angle });
+        Ok(self)
+    }
+
+    /// Enables the Øye/Bergami rate-dependent separation model.
+    ///
+    /// `chord` is the section chord in metres and `time_constant_scale` is the
+    /// dimensionless Øye constant (typically about 8). The caller must also
+    /// enable [`Self::with_flat_plate_post_stall`] so a static separated polar
+    /// exists. Dynamic coefficients are evaluated with
+    /// [`Self::coefficients_dynamic`] and a caller-owned
+    /// [`DynamicStallState`]; this builder alone does not make the stateless
+    /// [`Self::coefficients`] rate-dependent.
+    pub fn with_oye_dynamic_stall(
+        mut self,
+        chord: f64,
+        time_constant_scale: f64,
+    ) -> Result<Self, crate::Error> {
+        if !chord.is_finite()
+            || chord <= 0.0
+            || !time_constant_scale.is_finite()
+            || time_constant_scale <= 0.0
+        {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        self.dynamic_stall = Some(DynamicStall {
+            chord,
+            time_constant_scale,
+        });
         Ok(self)
     }
 
@@ -965,6 +1029,118 @@ impl FiniteWing {
             return Err(crate::Error::from(WingError::ArithmeticOverflow));
         }
         Ok(WingCoefficients { lift, drag })
+    }
+
+    /// Evaluates the Øye/Bergami rate-dependent separation state.
+    ///
+    /// `relative_speed` is the section-relative speed in m/s and `dt` is the
+    /// positive integration step in seconds. The static attached polar is the
+    /// linear lift extrapolation; the static separated polar is derived from
+    /// [`Self::coefficients`] and the configured flat-plate post-stall branch.
+    /// `state` is updated only after a successful evaluation. This is a
+    /// reduced-order separation-lag model, not a Beddoes–Leishman vortex or
+    /// pitching-moment model. Invalid time/speed/state, missing post-stall or
+    /// dynamic-stall configuration, nonfinite coefficients and negative drag
+    /// are explicit errors.
+    pub fn coefficients_dynamic(
+        &self,
+        angle_of_attack: f64,
+        mach: f64,
+        relative_speed: f64,
+        dt: f64,
+        state: &mut DynamicStallState,
+    ) -> Result<WingCoefficients, crate::Error> {
+        let dynamic = self
+            .dynamic_stall
+            .ok_or_else(|| crate::Error::from(WingError::InvalidParameters))?;
+        if self.post_stall.is_none() {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        if !relative_speed.is_finite()
+            || relative_speed <= 0.0
+            || !dt.is_finite()
+            || dt <= 0.0
+            || !state.separation.is_finite()
+            || !(0.0..=1.0).contains(&state.separation)
+        {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        let static_coefficients = self.coefficients(angle_of_attack, mach)?;
+        let alpha = angle_of_attack - self.zero_lift_angle;
+        let attached = self.attached_lift(alpha, mach)?;
+        let ratio = static_coefficients.lift / attached;
+        let static_separation = if attached.abs() < 1e-12 {
+            1.0
+        } else if ratio > 0.0 {
+            let value = 2.0 * ratio.sqrt() - 1.0;
+            (value * value).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let separated_lift = if 1.0 - static_separation > 1e-9 {
+            (static_coefficients.lift - static_separation * attached) / (1.0 - static_separation)
+        } else {
+            static_coefficients.lift
+        };
+        let tau = dynamic.time_constant_scale * dynamic.chord / (2.0 * relative_speed);
+        if !tau.is_finite() || tau <= 0.0 {
+            return Err(crate::Error::from(WingError::ArithmeticOverflow));
+        }
+        let decay = (-dt / tau).exp();
+        if !decay.is_finite() {
+            return Err(crate::Error::from(WingError::ArithmeticOverflow));
+        }
+        let separation =
+            (static_separation + (state.separation - static_separation) * decay).clamp(0.0, 1.0);
+        let lift = separation * attached + (1.0 - separation) * separated_lift;
+        let zero_drag = self.coefficients(0.0, mach)?.drag;
+        let increment = (static_coefficients.drag - zero_drag)
+            * (0.5 * (static_separation.sqrt() - separation.sqrt())
+                - 0.25 * (separation - static_separation));
+        let drag = static_coefficients.drag + increment;
+        if !lift.is_finite() || !drag.is_finite() || drag < 0.0 {
+            return Err(crate::Error::from(WingError::ArithmeticOverflow));
+        }
+        state.separation = separation;
+        Ok(WingCoefficients { lift, drag })
+    }
+
+    fn attached_lift(self, alpha: f64, mach: f64) -> Result<f64, crate::Error> {
+        let effective_aspect = self.efficiency * self.aspect_ratio;
+        let beta = match self.compressibility {
+            Compressibility::Subsonic { .. } => (1.0 - mach * mach).sqrt(),
+            Compressibility::Supersonic { .. } => (mach * mach - 1.0).sqrt(),
+            _ => 1.0,
+        };
+        let slope = match self.compressibility {
+            Compressibility::Supersonic { .. } => {
+                let finite_span = self.aspect_ratio / (self.aspect_ratio + 2.0);
+                4.0 / beta * finite_span
+            }
+            _ if effective_aspect >= 2.0 => 2.0 * PI / (beta + 2.0 / effective_aspect),
+            _ => PI * effective_aspect / (1.0 + beta * effective_aspect / 2.0),
+        };
+        let lift_factor = match self.compressibility {
+            Compressibility::Ndarc {
+                divergence_mach, ..
+            } if mach < divergence_mach => 1.0 / (1.0 - mach * mach).sqrt(),
+            Compressibility::Ndarc {
+                divergence_mach, ..
+            } if mach < 1.0 => {
+                let decay = (1.0 - mach)
+                    / ((1.0 - divergence_mach) * (1.0 - divergence_mach * divergence_mach).sqrt());
+                if mach <= divergence_mach + 0.1 {
+                    decay
+                } else {
+                    decay + (mach - divergence_mach - 0.1) / (0.9 - divergence_mach)
+                }
+            }
+            _ => 1.0,
+        };
+        let lift = slope * alpha * lift_factor;
+        lift.is_finite()
+            .then_some(lift)
+            .ok_or_else(|| crate::Error::from(WingError::ArithmeticOverflow))
     }
 }
 
@@ -1434,6 +1610,57 @@ mod tests {
                 "accepted blend={blend}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn oye_dynamic_stall_has_rate_dependent_hysteresis() -> Result<(), crate::Error> {
+        let model = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?
+            .with_flat_plate_post_stall(0.3)?
+            .with_oye_dynamic_stall(1.0, 8.0)?;
+        let mut state = DynamicStallState::default();
+        let attached = model.coefficients_dynamic(0.2, 0.1, 20.0, 0.01, &mut state)?;
+        let static_attached = model.coefficients(0.2, 0.1)?;
+        assert!((attached.lift - static_attached.lift).abs() < 1e-12);
+        assert!((attached.drag - static_attached.drag).abs() < 1e-12);
+
+        let static_stalled = model.coefficients(0.5, 0.1)?;
+        let mut pitch_up = DynamicStallState::default();
+        let up = model.coefficients_dynamic(0.5, 0.1, 20.0, 0.01, &mut pitch_up)?;
+        assert!(up.lift > static_stalled.lift);
+        assert!(pitch_up.separation() > 0.0 && pitch_up.separation() < 1.0);
+
+        let mut pitch_down = DynamicStallState { separation: 0.0 };
+        let down = model.coefficients_dynamic(0.5, 0.1, 20.0, 0.01, &mut pitch_down)?;
+        assert!(down.lift < up.lift);
+        assert!(pitch_down.separation() > 0.0);
+
+        assert_eq!(
+            model.coefficients_dynamic(0.5, 0.1, 20.0, 0.0, &mut pitch_up),
+            Err(crate::Error::from(WingError::InvalidParameters))
+        );
+        assert_eq!(
+            model.coefficients_dynamic(0.5, 0.1, 0.0, 0.01, &mut pitch_up),
+            Err(crate::Error::from(WingError::InvalidParameters))
+        );
+        assert_eq!(
+            model.coefficients_dynamic(
+                0.5,
+                0.1,
+                20.0,
+                0.01,
+                &mut DynamicStallState { separation: 2.0 }
+            ),
+            Err(crate::Error::from(WingError::InvalidParameters))
+        );
+        assert!(
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?
+                .with_flat_plate_post_stall(0.3)?
+                .coefficients_dynamic(0.5, 0.1, 20.0, 0.01, &mut state)
+                .is_err()
+        );
+        assert!(model.with_oye_dynamic_stall(0.0, 8.0).is_err());
+        assert!(model.with_oye_dynamic_stall(1.0, 0.0).is_err());
         Ok(())
     }
 
