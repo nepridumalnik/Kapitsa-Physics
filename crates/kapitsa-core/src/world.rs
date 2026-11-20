@@ -1707,7 +1707,8 @@ impl PhysicsWorld {
     /// [`crate::aerodynamics::MeshPressureModel::PotentialFlow`] enables a
     /// bounded incompressible source-panel model for a closed isolated primary
     /// Mesh/Colliders body at Mach <= 0.2 and up to 256 triangles; it does not
-    /// support clusters/parts, rotation or separation. `KuttaLifting` derives
+    /// support clusters/parts or separation; it supports quasi-steady rigid
+    /// rotation through panel-local velocity. `KuttaLifting` derives
     /// an equivalent uncambered thin wing from a closed wing mesh and applies
     /// the finite-wing trailing-vortex lifting-line wake at Mach <= 0.3.
     /// `VortexLattice` applies a bounded horseshoe-vortex lattice with a flat

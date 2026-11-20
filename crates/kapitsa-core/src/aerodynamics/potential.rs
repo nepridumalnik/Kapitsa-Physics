@@ -9,10 +9,11 @@
 //! Assumptions:
 //! - one closed, outward-wound triangle mesh with no overlapping/internal
 //!   surfaces, no separate wake and no circulation;
-//! - isolated body in steady, uniform, incompressible flow;
-//! - Mach ≤ 0.2 and at most [`MAX_POTENTIAL_PANELS`] triangles;
-//! - no rotation, wind gradient, viscosity, separation, base pressure or
-//!   boundary layer. The pressure load is inviscid and has no Kutta condition.
+//! - isolated body in steady, uniform, incompressible flow, with quasi-steady
+//!   local velocity `V + omega × (x - x_COM)` at each panel center;
+//! - local Mach ≤ 0.2 and at most [`MAX_POTENTIAL_PANELS`] triangles;
+//! - no wind gradient, viscosity, separation, base pressure or boundary layer.
+//!   The pressure load is inviscid and has no Kutta condition.
 //!
 //! The cost is `O(N³)` for the solve and `O(N²)` scratch memory. Exceeding the
 //! panel budget, supplying an open/disconnected mesh or a singular panel system
@@ -41,9 +42,12 @@ struct Panel {
 /// The returned wrench is in world coordinates and its moment is about
 /// `flow.center_of_mass`, matching the other pressure evaluators. The caller
 /// must establish the closed/outward-wound, isolated, non-overlapping geometry
-/// assumptions and the Mach ≤ 0.2 domain. Empty or non-closed meshes, meshes
-/// above the panel budget, rotation, invalid flow and singular systems are
-/// explicit errors; a representable result is never clamped.
+/// assumptions and the local Mach ≤ 0.2 domain. Rotation is supported through
+/// panel-local `V + omega × (x - x_COM)` in the no-penetration RHS, local
+/// dynamic pressure and Cp; wind gradients are not supported. Empty or
+/// non-closed meshes, meshes above the panel budget, invalid flow, excessive
+/// local Mach and singular systems are explicit errors; a representable result
+/// is never clamped.
 pub fn evaluate_closed_mesh(
     mesh: &TriangleMesh,
     flow: PressureFlow,
@@ -78,23 +82,16 @@ pub fn evaluate_closed_mesh(
         .angular_velocity
         .checked_length()
         .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
-    // A uniform source-panel solve cannot represent rotation. Absorb only
-    // roundoff-scale angular velocity left by a force-free integration step.
-    if angular_speed > 64.0 * f64::EPSILON * speed.max(1.0) {
-        return Err(crate::Error::from(PressureError::UnsupportedGeometry));
-    }
     let zero = PressureWrench {
         force: Vec3::ZERO,
         moment: Vec3::ZERO,
     };
-    if speed == 0.0 || flow.atmosphere.density() == 0.0 {
+    if (speed == 0.0 && angular_speed == 0.0) || flow.atmosphere.density() == 0.0 {
         return Ok(zero);
-    }
-    if speed / flow.sound_speed > 0.2 {
-        return Err(crate::Error::from(PressureError::UnsupportedMach));
     }
 
     let panels = panels(mesh, flow)?;
+    let world_com = flow.transform.transform_point(flow.center_of_mass);
     let count = panels.len();
     let matrix_len = count
         .checked_mul(count)
@@ -112,7 +109,14 @@ pub fn evaluate_closed_mesh(
     let four_pi = 4.0 * PI;
     for i in 0..count {
         let pi = panels[i];
-        rhs[i] = -relative
+        let local = local_velocity(pi.center, world_com, relative, flow.angular_velocity)?;
+        let local_speed = local
+            .checked_length()
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
+        if local_speed / flow.sound_speed > 0.2 {
+            return Err(crate::Error::from(PressureError::UnsupportedMach));
+        }
+        rhs[i] = -local
             .checked_dot(pi.normal)
             .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         for j in 0..count {
@@ -141,11 +145,16 @@ pub fn evaluate_closed_mesh(
     }
     let strengths = solve_dense(matrix, rhs, count)?;
 
-    let world_com = flow.transform.transform_point(flow.center_of_mass);
-    let dynamic_pressure = 0.5 * flow.atmosphere.density() * speed * speed;
     let mut total = zero;
     for i in 0..count {
         let panel = panels[i];
+        let local = local_velocity(panel.center, world_com, relative, flow.angular_velocity)?;
+        let local_speed = local
+            .checked_length()
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
+        if local_speed == 0.0 {
+            continue;
+        }
         let mut induced = Vec3::ZERO;
         for j in 0..count {
             if i == j {
@@ -169,7 +178,7 @@ pub fn evaluate_closed_mesh(
                 .checked_add(contribution)
                 .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         }
-        let velocity = relative
+        let velocity = local
             .checked_add(induced)
             .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         let normal_speed = velocity
@@ -186,10 +195,11 @@ pub fn evaluate_closed_mesh(
         let tangential_speed = tangential
             .checked_length()
             .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
-        let cp = 1.0 - (tangential_speed / speed).powi(2);
+        let cp = 1.0 - (tangential_speed / local_speed).powi(2);
         if !cp.is_finite() {
             return Err(crate::Error::from(PressureError::ArithmeticOverflow));
         }
+        let dynamic_pressure = 0.5 * flow.atmosphere.density() * local_speed * local_speed;
         let area_pressure = dynamic_pressure * cp * panel.area;
         if !area_pressure.is_finite() {
             return Err(crate::Error::from(PressureError::ArithmeticOverflow));
@@ -287,6 +297,21 @@ pub fn evaluate_kutta_lifting_mesh(
     surface.evaluate(flow)
 }
 
+fn local_velocity(
+    center: Vec3,
+    world_com: Vec3,
+    relative: Vec3,
+    angular_velocity: Vec3,
+) -> Result<Vec3, crate::Error> {
+    let arm = center
+        .checked_sub(world_com)
+        .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
+    angular_velocity
+        .checked_cross(arm)
+        .and_then(|v| relative.checked_add(v))
+        .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))
+}
+
 fn panels(mesh: &TriangleMesh, flow: PressureFlow) -> Result<Vec<Panel>, crate::Error> {
     let mut panels = Vec::new();
     panels
@@ -373,6 +398,7 @@ mod tests {
     use crate::collider::Collider;
     use crate::shape::{Shape, Sphere};
     use crate::transform::Transform;
+    use kapitsa_math::Quat;
 
     fn sphere_mesh() -> Result<TriangleMesh, crate::Error> {
         let collider = Collider::new(Shape::Sphere(Sphere::new(1.0)?), Transform::identity());
@@ -397,6 +423,24 @@ mod tests {
         println!("force={:?} moment={:?}", wrench.force, wrench.moment);
         assert!(wrench.force.length() < 1e-6, "{:?}", wrench.force);
         assert!(wrench.moment.length() < 1e-6, "{:?}", wrench.moment);
+        Ok(())
+    }
+
+    #[test]
+    fn rotating_potential_flow_is_translation_invariant() -> Result<(), crate::Error> {
+        let mesh = sphere_mesh()?;
+        let base = PressureFlow {
+            angular_velocity: Vec3::Z,
+            ..flow(20.0)?
+        };
+        let reference = evaluate_closed_mesh(&mesh, base)?;
+        let translated = PressureFlow {
+            transform: Transform::new(Vec3::new(100.0, -20.0, 4.0), Quat::IDENTITY)?,
+            ..base
+        };
+        let moved = evaluate_closed_mesh(&mesh, translated)?;
+        assert!((moved.force - reference.force).length() < 1e-10);
+        assert!((moved.moment - reference.moment).length() < 1e-10);
         Ok(())
     }
 
@@ -461,15 +505,23 @@ mod tests {
             ),
             Err(crate::Error::from(PressureError::UnsupportedMach))
         );
+        let rotating = evaluate_closed_mesh(
+            &mesh,
+            PressureFlow {
+                angular_velocity: Vec3::Z,
+                ..flow(20.0)?
+            },
+        )?;
+        assert!(rotating.force.is_finite() && rotating.moment.is_finite());
         assert_eq!(
             evaluate_closed_mesh(
                 &mesh,
                 PressureFlow {
-                    angular_velocity: Vec3::Z,
+                    angular_velocity: Vec3::Z * 100.0,
                     ..flow(20.0)?
                 }
             ),
-            Err(crate::Error::from(PressureError::UnsupportedGeometry))
+            Err(crate::Error::from(PressureError::UnsupportedMach))
         );
         let open = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]])?;
         assert_eq!(

@@ -413,26 +413,31 @@ unrepresentable arithmetic are explicit errors.
 `MeshPressureModel::PotentialFlow` is an explicit opt-in incompressible
 source-panel model for a closed, isolated primary `Mesh` or `Colliders` body.
 It assigns one constant-strength source panel to each triangle, solves the
-no-penetration system with dense Gaussian elimination, and recovers
-`Cp = 1 - |v_t|² / |V|²` from the tangential surface velocity. Force is
-`-q Cp A n` with moment about the COM. This supplies attached pressure and
-suction from the geometry itself, including non-lifting lateral force on
-asymmetric bodies.
+no-penetration system with dense Gaussian elimination, and evaluates
+`Cp = 1 - |v_t|² / |V_i|²` from the local tangential surface velocity. The
+panel-local flow is `V_i = V + omega × (x_i - x_COM)`, and the local dynamic
+pressure is `0.5 rho |V_i|²`. This is a quasi-steady rigid-body rotation
+approximation: the freestream gradient across a panel and unsteady added-mass
+terms are not resolved. Force is `-q_i Cp A n` with moment about the COM. This
+supplies attached pressure and suction from the geometry itself, including
+non-lifting lateral force on asymmetric bodies.
 
 The explicit domain is:
 
-- Mach ≤ 0.2 and steady uniform incompressible flow;
+- local panel Mach ≤ 0.2 and steady incompressible flow with quasi-steady
+  rigid-body rotation;
 - one closed, outward-wound triangle mesh with at most 256 triangles;
-- no cluster/part assembly, no overlapping or internal surfaces, no rotation,
-  wind gradient or separate wake;
+- no cluster/part assembly, no overlapping or internal surfaces, no wind
+  gradient or separate wake;
 - no Kutta condition, circulation, boundary layer, separation, roughness or
   base pressure.
 
 The panel system is rebuilt for each evaluation with `O(N³)` solve and `O(N²)`
 scratch storage; the panel budget is deliberate. An open, reversed, disconnected
-or oversized mesh returns `InvalidPatch` or `WorkBudgetExceeded`, Mach above 0.2
-returns `UnsupportedMach`, and rotation or unsupported geometry returns
-`UnsupportedGeometry`. Cluster/part geometry returns `UnsupportedModel`.
+or oversized mesh returns `InvalidPatch` or `WorkBudgetExceeded`; local Mach
+above 0.2 returns `UnsupportedMach`; nonfinite motion returns `InvalidMotion`;
+unsupported geometry returns `UnsupportedGeometry`. Cluster/part geometry
+returns `UnsupportedModel`.
 Allocation and singular-system failures are explicit `ArithmeticOverflow`
 errors, never partial loads. Per-owner pressure diagnostics are not staged for
 this model. The sphere net-force regression is a model consistency check, not
@@ -890,7 +895,7 @@ engine does not blend models to hide a domain limit.
 | `WingPolar` | caller Mach/AoA grid only | interpolation outside the table |
 | Mesh/Colliders unmodified Newtonian | Mach ≥ 5 | subsonic/transonic pressure; use modified model |
 | Mesh/Colliders modified Newtonian | Mach 0–5 | attached potential lift, wake, base flow, friction |
-| Mesh/Colliders potential panel | Mach ≤ 0.2, closed isolated mesh ≤ 256 triangles | rotation, separation, base flow |
+| Mesh/Colliders potential panel | local Mach ≤ 0.2, closed isolated mesh ≤ 256 triangles, quasi-steady rotation | unsteady added mass, wind gradient, separation, base flow |
 | Mesh/Colliders Kutta lifting | closed thin wing, span ≥ chord, thickness ≤ 0.15 span, Mach ≤ 0.3 | camber, sweep, taper, tip relief, general 3D Kutta wake |
 | Mesh/Colliders vortex lattice | closed thin wing, 3×6 lattice, Mach ≤ 0.3 | finite thickness, separation, wake roll-up, control surfaces, validation |
 | Base pressure | caller Cp and inclusive Mach range | wake interaction |
@@ -909,8 +914,8 @@ engine does not blend models to hide a domain limit.
 | `LothParticle` selector | transitional Re ≤ 45, compression Re > 45 | gaps such as Mach 0.22, Re 100 |
 
 Finite-thickness and multi-surface Kutta wake flow with wake roll-up and
-control surfaces for Mesh/Colliders, rotational potential flow,
-predictive stall onset/hysteresis/dynamic stall,
+control surfaces for Mesh/Colliders, unsteady added-mass and rotating-wake
+effects, predictive stall onset/hysteresis/dynamic stall,
 wake/shielding physics beyond geometric occlusion, base-flow interaction,
 surface roughness, high-speed transition, real-gas properties, a validated
 body-of-revolution transonic solver and a validated general supersonic

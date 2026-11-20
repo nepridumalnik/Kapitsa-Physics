@@ -16,9 +16,10 @@
 //! viscous model; leeward pressure remains zero.
 //!
 //! [`MeshPressureModel::PotentialFlow`] is a bounded incompressible
-//! source-panel model for a closed isolated Mesh/Colliders body at Mach ≤ 0.2,
-//! up to 256 triangles, without rotation, Kutta wake, circulation or
-//! separation. See [`crate::aerodynamics::potential`].
+//! source-panel model for a closed isolated Mesh/Colliders body at local
+//! Mach ≤ 0.2 and up to 256 triangles, with quasi-steady rigid rotation but
+//! without Kutta wake, circulation or separation.
+//! See [`crate::aerodynamics::potential`].
 
 use super::{AtmosphericState, geometry::PreparedSurfacePatches};
 use crate::transform::Transform;
@@ -51,7 +52,8 @@ impl std::error::Error for PressureError {}
 /// Mach >= 5. `ModifiedNewtonian` is the compression-only extension in
 /// `0 <= Mach <= 5`; it still uses exposed windward patches and returns an
 /// error above Mach 5. `PotentialFlow` is a bounded incompressible source-panel
-/// model for closed isolated meshes at Mach <= 0.2. `KuttaLifting` derives an
+/// model for closed isolated meshes at local Mach <= 0.2 with quasi-steady
+/// rigid rotation. `KuttaLifting` derives an
 /// equivalent finite wing from a closed thin wing mesh and applies its
 /// trailing-vortex lifting-line wake. `VortexLattice` applies a bounded
 /// horseshoe-vortex wake lattice to a closed thin wing mesh. The default

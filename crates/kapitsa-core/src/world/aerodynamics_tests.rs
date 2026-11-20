@@ -885,6 +885,49 @@ fn vortex_lattice_mesh_and_collider_models_step_on_thin_wings()
 }
 
 #[test]
+fn potential_flow_supports_quasi_steady_body_rotation() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            MeshPressureModel,
+            colliders::{ColliderTessellation, collider_mesh},
+        },
+        collider::Collider,
+        shape::{Shape, Sphere},
+    };
+    let mesh = collider_mesh(
+        [&Collider::new(
+            Shape::Sphere(Sphere::new(1.0)?),
+            Transform::identity(),
+        )],
+        ColliderTessellation::new(16, 9, 1000)?,
+    )?;
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::ZERO,
+    )?));
+    world.set_mesh_pressure_model(MeshPressureModel::PotentialFlow);
+    let mut body = RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?;
+    body.set_linear_velocity(Vec3::X * 20.0)?;
+    body.set_angular_velocity(Vec3::Z)?;
+    body.set_aerodynamics(Aerodynamics::Mesh(mesh));
+    let id = world.add_body(body)?;
+    world.step(0.001)?;
+    assert!(
+        world
+            .body(id)
+            .ok_or("body")?
+            .state()
+            .angular_velocity()
+            .is_finite()
+    );
+    Ok(())
+}
+
+#[test]
 fn spherical_vacuum_skips_collider_preparation() -> Result<(), Box<dyn std::error::Error>> {
     use crate::{
         aerodynamics::{Atmosphere, ColliderTessellation, SphericalAtmosphere},
