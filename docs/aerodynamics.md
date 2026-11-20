@@ -559,6 +559,15 @@ during stepping, with the same atmosphere sampling and particle geometry
 assumptions as the other sphere variants. The rarefaction branch remains
 outside this model's domain.
 
+`sphere_drag::slip_corrected_particle_drag_coefficient` evaluates low-speed
+drag for an isolated sphere in air using Schiller–Naumann drag with the
+Clift–Gauvin slip correction. It uses [Palmer and Sahai (2023), equations
+13–14](https://ntrs.nasa.gov/api/citations/20220018430/downloads/AIAA_2023_Palmer_Drag_Model_Paper_v2.pdf).
+The implementation accepts `0 < Mach ≤ 0.2`, `0 < Re ≤ 45` and `Kn ≤ 0.1`,
+where Re and Kn use particle diameter. These limits restrict the approximation
+to low-speed continuum and slip flow. The slip factor tends to unity as Kn
+tends to zero. This is a coefficient evaluator with no world integration.
+
 ## Skin friction
 
 For a laminar flat plate, the local Blasius relation is `c_f(x) = 0.664 / sqrt(Re_x)`. Integrating from the leading edge to plate length `L` gives the streamwise average `C_f = 1.328 / sqrt(Re_L)`. The distinction between local and averaged coefficients matters when summing sections.

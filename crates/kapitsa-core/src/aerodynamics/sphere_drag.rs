@@ -266,6 +266,46 @@ fn stokes_multiplier(reynolds: f64) -> Result<f64, SphereDragError> {
             * (reynolds / (reynolds + BROWN_LAWLER_TRANSITION_REYNOLDS)))
 }
 
+/// Low-Mach air drag coefficient of an isolated spherical particle, referenced
+/// to frontal area. Uses Schiller–Naumann with the Clift–Gauvin slip correction
+/// from Palmer and Sahai (2023), equations 13–14.
+///
+/// Accepts `0 < Mach ≤ 0.2`, `0 < Re ≤ 45`, and diameter Knudsen number
+/// `Kn ≤ 0.1`. These are conservative implementation limits for low-Mach slip
+/// flow. All dimensionless inputs refer to the undisturbed air and particle
+/// diameter. Kn is inferred using the paper's air relation (gamma 1.4).
+pub fn slip_corrected_particle_drag_coefficient(
+    mach: f64,
+    reynolds: f64,
+) -> Result<f64, crate::Error> {
+    const MAX_SLIP_KNUDSEN: f64 = 0.1;
+    const MAX_RAREFACTION_REYNOLDS: f64 = 45.0;
+    const SLIP_LINEAR: f64 = 2.514;
+    const SLIP_EXPONENTIAL: f64 = 0.8;
+    const SLIP_DECAY: f64 = 0.55;
+
+    if !mach.is_finite() || mach <= 0.0 || !reynolds.is_finite() || reynolds <= 0.0 {
+        return Err(SphereDragError::InvalidInput.into());
+    }
+    let knudsen = air_knudsen(mach, reynolds);
+    if mach > INCOMPRESSIBLE_MAX_MACH
+        || reynolds > MAX_RAREFACTION_REYNOLDS
+        || knudsen > MAX_SLIP_KNUDSEN
+    {
+        return Err(SphereDragError::UnsupportedDomain.into());
+    }
+    let slip = 1.0 + knudsen * (SLIP_LINEAR + SLIP_EXPONENTIAL * (-SLIP_DECAY / knudsen).exp());
+    let cd = (STOKES_FACTOR / reynolds) * (1.0 + 0.15 * reynolds.powf(0.687)) / slip;
+    if !cd.is_finite() {
+        return Err(SphereDragError::ArithmeticOverflow.into());
+    }
+    Ok(cd)
+}
+
+fn air_knudsen(mach: f64, reynolds: f64) -> f64 {
+    mach / reynolds * (GAMMA * std::f64::consts::PI / 2.0).sqrt()
+}
+
 /// Compression-dominated, precritical drag coefficient of an isolated spherical
 /// particle, referenced to frontal area. Uses Loth et al. (2021), equations
 /// 6–8, as reproduced by Palmer and Sahai (2023), equations 19–22.
@@ -331,7 +371,7 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
     if !mach.is_finite() || !reynolds.is_finite() || mach <= 0.0 || reynolds <= 0.0 {
         return Err(crate::Error::from(SphereDragError::InvalidInput));
     }
-    let knudsen = mach / reynolds * (GAMMA * std::f64::consts::PI / 2.0).sqrt();
+    let knudsen = air_knudsen(mach, reynolds);
     if !(MIN_MACH..=MAX_MACH).contains(&mach)
         || !(MIN_REYNOLDS..=MAX_REYNOLDS).contains(&reynolds)
         || knudsen >= MAX_KNUDSEN
@@ -371,6 +411,27 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slip_correction_recovers_continuum_limit_and_rejects_transitional_flow()
+    -> Result<(), crate::Error> {
+        let continuum = slip_corrected_particle_drag_coefficient(f64::MIN_POSITIVE, 1.0)?;
+        assert!((continuum - 27.6).abs() < 1e-13);
+        let slip = slip_corrected_particle_drag_coefficient(0.05, 1.0)?;
+        assert!((slip - 23.262_844_124_467_1).abs() < 1e-13);
+        assert!(slip < continuum);
+        for (mach, re) in [(0.1, 1.0), (0.21, 45.0), (0.05, 45.01)] {
+            assert_eq!(
+                slip_corrected_particle_drag_coefficient(mach, re),
+                Err(SphereDragError::UnsupportedDomain.into())
+            );
+        }
+        assert_eq!(
+            slip_corrected_particle_drag_coefficient(0.0, 1.0),
+            Err(SphereDragError::InvalidInput.into())
+        );
+        Ok(())
+    }
 
     #[test]
     fn compression_dominated_particle_fit_covers_published_mach_branches()
