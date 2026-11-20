@@ -253,3 +253,9 @@ benchmark checks that only the blocker remains visible with area 0.5 m².
 End-to-end visibility preparation for this fixture measured 6.37 us
 (6.29 to 6.47 us). The run included the active workspace test suite and
 does not isolate determinant evaluation from geometry preparation.
+
+The area fallback revision `aec8f8d` measured medians of 21.35 us and
+1.308 ms for the small and moderate partial-visibility fixtures. The wide
+projected-edge fixture measured 6.24 us (6.21 to 6.29 us). The benchmark
+does not isolate the exact area fallback. Its subnormal-area behavior is
+covered by the focused regression.

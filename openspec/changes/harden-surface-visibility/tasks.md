@@ -53,6 +53,14 @@
   scenarios without claiming test execution or physical validation.
 - [x] Keep the retrospective change limited to
   `openspec/changes/harden-surface-visibility/`.
+- [x] Record `aec8f8d`: exact absolute-scale area fallback for windward and
+  partition triangles beyond the 2D frame span, precharged against the regular
+  surface-work budget; preserve representable subnormals or return
+  `PrecisionLoss` for nonzero fractions rounding to zero.
+- [x] Document `wide_triangle_area_preserves_absolute_scale_and_precharges_work`:
+  smallest-subnormal area in either winding, exact work charge, underflow
+  rejection and rejected precharge, without claiming execution or physical
+  validation; remove the obsolete triangle-area frame-span limitation.
 - [ ] Audit and complete the remaining hard work budget coverage for every
   intermediate operation before treating the preparation path as production-
   complete.

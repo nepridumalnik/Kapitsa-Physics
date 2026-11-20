@@ -101,6 +101,25 @@ that rounds to zero SHALL return `PrecisionLoss`.
   rounds a nonzero value to zero
 - **THEN** the existing `PrecisionLoss` limits remain in force
 
+### Requirement: Recover absolute-scale triangle areas
+
+Windward and partition triangles SHALL use exact absolute-scale area fallback
+when the 2D frame exceeds its span, precharging the regular surface-work budget.
+Representable subnormal fractions SHALL be preserved; nonzero fractions rounding
+to zero SHALL return `PrecisionLoss`.
+
+#### Scenario: Wide triangle area preserves absolute scale and precharges work
+
+- **WHEN** `wide_triangle_area_preserves_absolute_scale_and_precharges_work`
+  evaluates `[0, X*m, X + Y]`, where `m` is the smallest positive binary64
+  subnormal
+- **THEN** the fraction is `m` in either winding and the charge is exactly
+  `exact_orientation::WORK`
+- **AND** replacing the last vertex with `X + Y*0.5` returns `PrecisionLoss`,
+  while rejected precharge returns `WorkBudgetExceeded` before exact evaluation
+- **AND** these are synthetic regression assertions, not test execution evidence
+  or independent physical validation
+
 ### Requirement: Preserve representable numeric intersections
 
 The surface-visibility intersection calculations SHALL handle finite endpoint

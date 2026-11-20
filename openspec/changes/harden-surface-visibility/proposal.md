@@ -7,7 +7,8 @@ Document the surface-visibility hardening on `feat/aero_rest` since
 predicate scaling in generic surface geometry and `7d6e5a6` for stable,
 linear-work shadow-grid bucket construction without sorting entries, plus
 `8cf7271` for measured clipping split reservations and `0337ef5` for bounded
-exact inclined depth fallback.
+exact inclined depth fallback, and `aec8f8d` for absolute-scale triangle-area
+fallback.
 
 ## Scope
 
@@ -16,9 +17,11 @@ This change covers:
 - scaling predicate coordinates independently by a power of two per axis,
   preserving the same positive determinant factor for orientation comparisons
   within a frame, including comparisons used as affine distances;
-- recovering barycentric area by reversing the two in-plane scales, while
-  retaining applicable per-axis predicate limits, not a depth fallback span
-  limit;
+- recovering barycentric area by reversing the two in-plane scales, with exact
+  absolute-scale fallback for windward and partition triangles when the 2D
+  frame exceeds its span; precharging the regular surface-work budget,
+  preserving representable subnormal fractions and returning `PrecisionLoss`
+  when a nonzero fraction rounds to zero;
 - recording the two synthetic regressions in `07c7285`: barycentric area
   preservation across axis scales and shadow coverage of a thin source;
 - evaluating coordinate-aligned blocker depth by signed axial separation;
