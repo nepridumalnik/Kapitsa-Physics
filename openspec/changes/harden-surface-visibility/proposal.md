@@ -77,8 +77,16 @@ This change covers:
 - recording linear grid construction work in source triangles, cells and
   triangle-to-cell entries, including the exact synthetic grid layout and
   budget boundary regression in `7d6e5a6`;
+- recording the end-to-end wide projected-edge boundary at exactly 180,958
+  units: twelve exact determinants at 15,048 units each plus 382 ordinary
+  units; the minimum successful budget and the hard cap produce identical
+  complete output, while one unit less returns `WorkBudgetExceeded`;
 - carrying the remaining hard surface-work budget into grid operations and
   subsequent charged operations, subject to the existing hard cap; and
+- completing the logical per-preparation work and storage audit, distinguishing
+  logical element counts from allocator overhead, caller input, existing
+  caches and elapsed time; rounded numerical fast paths remain rounded and
+  are not claimed resolved; and
 - documenting that work units are heuristic accounting weights, not an exact
   byte or instruction budget.
 

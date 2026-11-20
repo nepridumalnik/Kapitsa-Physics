@@ -283,12 +283,10 @@ counts.
 
 ### Requirement: Charge and propagate the remaining hard work budget
 
-Surface preparation SHALL enforce the shared hard cap and pass the remaining
-budget to operations that need to charge work, including grid construction and
-candidate queries. Work units SHALL be treated as heuristic accounting
-weights for bounded effort, not as an exact bound on processor instructions,
-elapsed time, allocator overhead, or bytes allocated. No exact byte budget is
-claimed.
+Surface preparation SHALL enforce the shared hard cap and pass remaining work
+to charged operations, including grids and queries. Work units SHALL count
+logical per-preparation work, not caller input, existing caches, allocator
+overhead, bytes, or time; they are heuristic weights, not exact bounds.
 
 #### Scenario: A downstream operation receives the remaining budget
 
@@ -302,9 +300,12 @@ claimed.
 - **THEN** their logical element work may be charged, while the specification
   explicitly does not represent allocator overhead or exact bytes
 
-#### Scenario: Work accounting is incomplete
+#### Scenario: End-to-end wide projection reaches its exact boundary
 
-- **WHEN** an intermediate operation is not yet fully covered by the hard
-  work audit
-- **THEN** the remaining hard-work audit is tracked as outstanding work and
-  is not presented as a final completeness or validation claim
+- **WHEN** wide projected-edge preparation is evaluated at 180,958 units
+  (twelve exact determinants at 15,048 units each plus 382 ordinary units)
+- **THEN** the minimum successful budget and the hard cap return identical
+  complete output, while 180,957 returns `WorkBudgetExceeded`
+- **AND** logical work and storage counts remain distinct from allocator
+  overhead, caller input, existing caches and elapsed time
+- **AND** rounded numerical fast paths are not claimed to be resolved

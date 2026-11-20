@@ -79,6 +79,11 @@
 - [x] Document `rounded_edge_difference_does_not_make_blocker_tangent`: a thin
   non-tangent blocker with a zero rounded edge cross product still casts a
   covering shadow, without claiming execution or independent physical validation.
-- [ ] Audit and complete the remaining hard work budget coverage for every
-  intermediate operation before treating the preparation path as production-
-  complete.
+- [x] Record the completed logical per-preparation work and storage audit,
+  distinguishing logical element counts from allocator overhead, caller input,
+  existing caches and elapsed time; retain the rounded numerical fast path
+  without claiming its rounding is resolved.
+- [x] Record the end-to-end wide projected-edge boundary: 180,958 units,
+  comprising twelve exact determinants at 15,048 units each and 382 ordinary
+  units; the minimum successful budget and hard cap return identical complete
+  output, while one unit less returns `WorkBudgetExceeded`.
