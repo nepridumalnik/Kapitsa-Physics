@@ -160,11 +160,11 @@ Non-finite original inputs SHALL return `ArithmeticOverflow`.
 
 ### Requirement: Screen uncertain projected determinants
 
-Fast direction and edge-reference determinants inside `32*f64::EPSILON` times the
-absolute triple-product sum SHALL check participating subtraction residuals.
-When a residual can affect a product, preparation SHALL charge and use exact
-orientation before classification. This screening applies to zero and nonzero
-determinants and does not bound affine-coefficient error.
+Fast direction and edge-reference determinants within `32*f64::EPSILON` times
+the absolute triple-product sum SHALL check participating subtraction residuals.
+A residual affecting a product SHALL select precharged exact orientation before
+classification, for zero and nonzero determinants. This is not a global numeric
+error bound.
 
 #### Scenario: A determinant has no participating inexact subtraction
 
@@ -190,6 +190,48 @@ determinants and does not bound affine-coefficient error.
   point `(0.25, 0.25, 0)`
 - **AND** this is a synthetic assertion, not execution evidence or independent
   physical validation
+
+### Requirement: Refine uncertain affine coefficients on the same scale
+
+With an accepted frame and fast edge reference, preparation SHALL screen each
+affine coefficient and precharge exact recomputation only for uncertain ones.
+Exact results SHALL use the fast coefficients' binary scale before normalization.
+If either is unavailable, all three SHALL be computed together. This is not a
+global numeric error bound.
+
+#### Scenario: Only one coefficient needs exact recomputation
+
+- **WHEN** an accepted frame and fast edge reference leave one coefficient
+  uncertain under the projection screen
+- **THEN** only that determinant is recomputed exactly from original endpoints
+  and direction, after charging 1,224 units, on the fast coefficients' scale
+- **AND** normalization follows recomputation; accepted fast neighbors remain
+  on that scale
+
+#### Scenario: Synthetic coefficient uses the requested binary scale
+
+- **WHEN** `projected_coefficient_uses_the_requested_binary_scale` evaluates
+  points `[0, X, Y*0.25]`, direction `Z`, and exponents `-1000`, `0`, `1000`
+- **THEN** each result equals `2^(exponent-2)`
+- **AND** this is a synthetic assertion, not execution evidence or independent
+  physical validation
+
+### Requirement: Precharge exact work with amortized carry bounds
+
+Exact projected determinants SHALL precharge `18*6*4 + 8*99 = 1,224` units;
+other exact determinants SHALL precharge `24*6*4 + 8*99 = 1,368` units.
+These charges SHALL include initialization, fixed scans and amortized carry
+propagation, not an exact instruction or elapsed-time bound.
+
+#### Scenario: Intermediate carries consume all-ones limbs
+
+- **WHEN** each term places at most six payload words in the fixed accumulator
+- **THEN** each payload has one initial and at most one terminating carry
+  write; only these writes can create all-ones limbs
+- **AND** intermediate carries clear all-ones limbs, so their count is at most
+  two per payload amortized across a determinant, giving four writes per payload
+- **AND** projected determinants have at most 18 terms and other determinants
+  at most 24; both include `8*99` units for scans and initialization
 
 ### Requirement: Recover absolute-scale triangle areas
 
@@ -335,10 +377,10 @@ overhead, bytes, or time; they are heuristic weights, not exact bounds.
 
 #### Scenario: End-to-end wide projection reaches its exact boundary
 
-- **WHEN** wide projected-edge preparation is evaluated at 180,958 units
-  (twelve exact determinants at 15,048 units each plus 382 ordinary units)
+- **WHEN** wide projected-edge preparation is evaluated at 15,070 units
+  (twelve exact determinants at 1,224 units each plus 382 ordinary units)
 - **THEN** the minimum successful budget and the hard cap return identical
-  complete output, while 180,957 returns `WorkBudgetExceeded`
+  complete output, while 15,069 returns `WorkBudgetExceeded`
 - **AND** logical work and storage counts remain distinct from allocator
   overhead, caller input, existing caches and elapsed time
 - **AND** rounded numerical fast paths are not claimed to be resolved

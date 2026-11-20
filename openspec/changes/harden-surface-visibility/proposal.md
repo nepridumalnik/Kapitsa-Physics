@@ -10,7 +10,8 @@ linear-work shadow-grid bucket construction without sorting entries, plus
 exact inclined depth fallback, `aec8f8d` for absolute-scale triangle-area
 fallback, `d5624ae` for exact projection from original vertex coordinates, and
 `b449468` for early exact projection when subtraction erases a nonzero operand,
-and `e3cb8b5` for selective exact rechecks of zero projected determinants.
+`e3cb8b5` for selective exact rechecks of zero projected determinants, and
+`3144d7c` for selective exact affine coefficients and amortized carry charges.
 
 ## Scope
 
@@ -44,7 +45,16 @@ This change covers:
   inside `32*epsilon` times the absolute triple-product sum; an error-free
   subtraction residual in a participating product selects charged exact
   orientation before tangent classification or degenerate-reference rejection;
-  this does not bound affine-coefficient error;
+  this does not provide a global numeric error bound;
+- in an accepted frame with an accepted fast edge reference, screening each
+  affine coefficient and precharging exact recomputation only for uncertain
+  determinants; rounding each exact result on the same binary scale as its
+  fast neighbors before normalization; without an accepted frame or reference,
+  computing all three coefficients together;
+- recording `projected_coefficient_uses_the_requested_binary_scale`: points
+  `[0, X, Y*0.25]` and direction `Z` yield `2^(exponent-2)` at requested
+  exponents `-1000`, `0` and `1000`; this is a synthetic assertion, not test
+  execution evidence or independent physical validation;
 - recording the opposite-sign nonzero-determinant regression, where the rounded
   fast sign differs from the exact projected sign and exact orientation is
   selected;
@@ -67,6 +77,13 @@ This change covers:
 - precharging fixed, allocation-free 99-word orientation accumulations;
   scaling coefficients and rounding ties to even, with `PrecisionLoss` if a
   nonzero coefficient rounds to zero;
+- bounding carry writes amortized across each determinant: each payload has
+  one initial and at most one terminating write; intermediate carries clear
+  all-ones limbs, which only those writes can create, allowing at most two
+  intermediate writes per payload amortized; at most six payload words per
+  term give `18*6*4 + 8*99 = 1,224` projected and
+  `24*6*4 + 8*99 = 1,368` other determinant units, including fixed scans and
+  initialization;
 - recording synthetic cancellation, subnormal rounding and precharge budget
   rejection scenarios, without claiming execution or physical validation;
 - excluding exact integer depth work from the area consistency tolerance;
@@ -92,8 +109,8 @@ This change covers:
 - recording linear grid construction work in source triangles, cells and
   triangle-to-cell entries, including the exact synthetic grid layout and
   budget boundary regression in `7d6e5a6`;
-- recording the end-to-end wide projected-edge boundary at exactly 180,958
-  units: twelve exact determinants at 15,048 units each plus 382 ordinary
+- recording the end-to-end wide projected-edge boundary at exactly 15,070
+  units: twelve exact determinants at 1,224 units each plus 382 ordinary
   units; the minimum successful budget and the hard cap produce identical
   complete output, while one unit less returns `WorkBudgetExceeded`;
 - carrying the remaining hard surface-work budget into grid operations and

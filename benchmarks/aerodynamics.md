@@ -277,3 +277,7 @@ measured 5.99 us (5.95 to 6.08 us).
 The direction and edge-reference sign filter on `b1ed96a` measured
 medians of 21.90 us and 1.334 ms on the small and moderate fixtures.
 The wide projected-edge fixture measured 6.38 us (6.35 to 6.56 us).
+
+Selective coefficient refinement on `3144d7c` measured medians of
+20.88 us and 1.319 ms on the small and moderate fixtures. The wide
+projected-edge fixture measured 6.17 us (6.11 to 6.19 us).

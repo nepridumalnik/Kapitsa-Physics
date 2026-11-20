@@ -47,8 +47,9 @@
 - [x] Record `0337ef5` and `cdc3e66`: exact signed binary64 products in fixed
   99-word accumulators, ties-to-even conversion, and separate edge-coefficient
   scaling from sign-only references.
-- [x] Record the `3 * (24 * 6 + 8) * 99` precharge before any fallback
-  determinant; exclude exact depth work from the area consistency tolerance.
+- [x] Record precharge before fallback determinants: three other determinants
+  cost `3 * 1,368`, while each projected determinant costs `1,224` under
+  `3144d7c`; exclude exact depth work from the area consistency tolerance.
 - [x] Document synthetic cancellation, smallest-subnormal preservation,
   underflow-to-zero `PrecisionLoss` and precharge `WorkBudgetExceeded`
   scenarios without claiming test execution or physical validation.
@@ -83,8 +84,8 @@
   distinguishing logical element counts from allocator overhead, caller input,
   existing caches and elapsed time; retain the rounded numerical fast path
   without claiming its rounding is resolved.
-- [x] Record the end-to-end wide projected-edge boundary: 180,958 units,
-  comprising twelve exact determinants at 15,048 units each and 382 ordinary
+- [x] Record the end-to-end wide projected-edge boundary: 15,070 units,
+  comprising twelve exact determinants at 1,224 units each and 382 ordinary
   units; the minimum successful budget and hard cap return identical complete
   output, while one unit less returns `WorkBudgetExceeded`.
 - [x] Record `b1ed96a`: screen zero and nonzero fast direction or
@@ -97,5 +98,17 @@
   neighboring `0.1` coordinates, retained endpoints, zero rounded edge cross
   product and successful shadow coverage, without claiming execution or
   independent physical validation.
-- [x] Retain the limitation that the zero recheck does not bound the error
-  of nonzero fast determinants.
+- [x] Record `3144d7c`: screen affine coefficients in an accepted frame with
+  an accepted fast reference; precharge and recompute only uncertain
+  determinants on the same binary scale before normalization. Without an
+  accepted frame or reference, compute all three coefficients together.
+- [x] Record amortized carry bounds: initial and terminating writes alone can
+  create all-ones limbs; intermediate carries clear them, bounding intermediate
+  writes by two per payload amortized. Include six payload words per term,
+  scans and initialization: projected charge `18*6*4 + 8*99 = 1,224`, other
+  charge `24*6*4 + 8*99 = 1,368`.
+- [x] Document `projected_coefficient_uses_the_requested_binary_scale` at
+  exponents `-1000`, `0` and `1000`, without claiming execution or independent
+  physical validation; record budget rejection at 15,069 units.
+- [x] Retain rounded fast-path limitations without claiming a global numeric
+  error bound.
