@@ -1707,9 +1707,11 @@ impl PhysicsWorld {
     /// [`crate::aerodynamics::MeshPressureModel::PotentialFlow`] enables a
     /// bounded incompressible source-panel model for a closed isolated primary
     /// Mesh/Colliders body at Mach <= 0.2 and up to 256 triangles; it does not
-    /// support clusters/parts, rotation, Kutta wake or separation. Changing the
-    /// model does not invalidate prepared geometry; the next aerodynamic
-    /// evaluation uses the new closure.
+    /// support clusters/parts, rotation or separation. `KuttaLifting` derives
+    /// an equivalent uncambered thin wing from a closed wing mesh and applies
+    /// the finite-wing trailing-vortex lifting-line wake at Mach <= 0.3.
+    /// Changing the model does not invalidate prepared geometry; the next
+    /// aerodynamic evaluation uses the new closure.
     /// A body above the selected model's Mach domain returns an explicit
     /// pressure error and rolls back its step.
     pub fn set_mesh_pressure_model(
@@ -3548,6 +3550,30 @@ impl PhysicsWorld {
                         })?;
                         crate::aerodynamics::potential::evaluate_closed_mesh(mesh, flow)
                     }
+                    crate::aerodynamics::pressure::MeshPressureModel::KuttaLifting => {
+                        if cluster.is_some() {
+                            return Err(Error::from(StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                ),
+                            }));
+                        }
+                        let mesh = match primary {
+                            crate::aerodynamics::Aerodynamics::Mesh(mesh) => Some(mesh),
+                            crate::aerodynamics::Aerodynamics::Colliders => collider_mesh,
+                            _ => None,
+                        }
+                        .ok_or_else(|| {
+                            Error::from(StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                ),
+                            })
+                        })?;
+                        crate::aerodynamics::potential::evaluate_kutta_lifting_mesh(mesh, flow)
+                    }
                 }
             }
             .map_err(|cause| StepError::Aerodynamics {
@@ -4653,8 +4679,11 @@ impl PhysicsWorld {
         // unchanged. The workspace is committed only after the entire step.
         for update in &self.aerodynamics_body_updates {
             if update.loads.sphere_patches.is_some()
-                || self.mesh_pressure_model
-                    == crate::aerodynamics::pressure::MeshPressureModel::PotentialFlow
+                || matches!(
+                    self.mesh_pressure_model,
+                    crate::aerodynamics::pressure::MeshPressureModel::PotentialFlow
+                        | crate::aerodynamics::pressure::MeshPressureModel::KuttaLifting
+                )
             {
                 continue;
             }

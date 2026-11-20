@@ -779,6 +779,59 @@ fn potential_flow_mesh_and_collider_models_step_on_closed_spheres()
 }
 
 #[test]
+fn kutta_lifting_mesh_and_collider_models_step_on_thin_wings()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            MeshPressureModel,
+            colliders::{ColliderTessellation, collider_mesh},
+        },
+        collider::Collider,
+        shape::{Cuboid, Shape},
+    };
+    for collider_mode in [false, true] {
+        let mesh = collider_mesh(
+            [&Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 4.0, 0.1)?),
+                Transform::identity(),
+            )],
+            ColliderTessellation::new(16, 9, 1000)?,
+        )?;
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_pressure_model(MeshPressureModel::KuttaLifting);
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::new(20.0, 0.0, -2.0))?;
+        if collider_mode {
+            body.set_aerodynamics(Aerodynamics::Colliders);
+        } else {
+            body.set_aerodynamics(Aerodynamics::Mesh(mesh));
+        }
+        let id = world.add_body(body)?;
+        if collider_mode {
+            world.add_collider(
+                id,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(1.0, 4.0, 0.1)?),
+                    Transform::identity(),
+                ),
+            )?;
+        }
+        world.step(0.001)?;
+        let velocity = world.body(id).ok_or("body")?.state().linear_velocity();
+        assert!(
+            velocity.z > -2.0 && (velocity.x - 20.0).abs() > 1e-9,
+            "collider={collider_mode}: {velocity:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn spherical_vacuum_skips_collider_preparation() -> Result<(), Box<dyn std::error::Error>> {
     use crate::{
         aerodynamics::{Atmosphere, ColliderTessellation, SphericalAtmosphere},

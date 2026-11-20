@@ -439,6 +439,27 @@ this model. The sphere net-force regression is a model consistency check, not
 experimental validation. For lifting wings use `WingPolar` or `FiniteWing`;
 this panel model has no wake or Kutta condition.
 
+### Kutta lifting-line for closed thin wing meshes
+
+`MeshPressureModel::KuttaLifting` bridges a closed thin wing mesh to the
+finite-wing lifting-line primitive. It measures span along body-local `+Y`,
+chord along `+X`, thickness along `+Z`, and projected planform area from the
+mesh triangles. The quarter-chord point becomes the load application point;
+planform aspect ratio is `span² / area`; the lifting-line slope, induced drag,
+zero-lift angle and attached-flow limit are the standard `FiniteWing` values
+with efficiency 0.8 and zero profile drag. The trailing-vortex wake and Kutta
+condition are those implied by the lifting line.
+
+The geometry domain is strict: one closed, outward-wound, uncambered thin wing
+with `span >= chord`, `thickness <= 0.15 span`, Mach <= 0.3 and the usual
+attached-flow incidence limit. Non-closed geometry returns `InvalidPatch`,
+non-wing-like bounds return `UnsupportedGeometry`, and Mach/incidence limits
+return the `FiniteWing` flow error. This is not a three-dimensional Kutta panel
+method: camber, sweep, taper, tip relief, finite thickness, separated wakes,
+control surfaces and spanwise load detail are not resolved. The existing COM
+atmosphere sample is used. Per-owner pressure diagnostics are not staged. Use
+`WingPolar` for measured or CFD lifting data.
+
 ### Implemented patch pressure evaluator
 
 `kapitsa::aerodynamics::pressure::PressurePatch` implements the unmodified Newtonian equation above for caller-selected physical surface patches; `evaluate_modified_newtonian` selects the opt-in compression closure described above. `PressureFlow` supplies an explicit sound speed, the atmosphere sampled at the patch, the body's rigid transform, body-local COM, and world-space linear/angular velocities. The evaluator computes point velocity `v_COM + omega × r`, subtracts wind, and returns world-space `PressureWrench { force, moment }` about the COM. Patch centers are body-origin-relative, not COM-relative; changing COM does not rebuild patches. Normals are normalized at construction. Evaluation allocates nothing and does not mutate the body.
@@ -846,7 +867,8 @@ engine does not blend models to hide a domain limit.
 | `WingPolar` | caller Mach/AoA grid only | interpolation outside the table |
 | Mesh/Colliders unmodified Newtonian | Mach ≥ 5 | subsonic/transonic pressure; use modified model |
 | Mesh/Colliders modified Newtonian | Mach 0–5 | attached potential lift, wake, base flow, friction |
-| Mesh/Colliders potential panel | Mach ≤ 0.2, closed isolated mesh ≤ 256 triangles | Kutta wake/circulation, rotation, separation, base flow |
+| Mesh/Colliders potential panel | Mach ≤ 0.2, closed isolated mesh ≤ 256 triangles | rotation, separation, base flow |
+| Mesh/Colliders Kutta lifting | closed thin wing, span ≥ chord, thickness ≤ 0.15 span, Mach ≤ 0.3 | camber, sweep, taper, tip relief, general 3D Kutta wake |
 | Base pressure | caller Cp and inclusive Mach range | wake interaction |
 | Incompressible friction | Mach ≤ 0.3 | compressibility, transition above 0.3 |
 | Transitioned flat plate | 500,000 < Re < 100,000,000, Mach ≤ 0.3 | prescribed transition only |
@@ -862,8 +884,9 @@ engine does not blend models to hide a domain limit.
 | Transitional particle | 0.1 ≤ Kn ≤ 10, Re ≤ 45, Mach ≤ 10 | other Kn/Re |
 | `LothParticle` selector | transitional Re ≤ 45, compression Re > 45 | gaps such as Mach 0.22, Re 100 |
 
-Kutta-condition lifting potential flow with a wake for Mesh/Colliders,
-rotational potential flow, predictive stall onset/hysteresis/dynamic stall,
+General three-dimensional Kutta panel/wake flow with camber, sweep, taper and
+tip relief for Mesh/Colliders, rotational potential flow,
+predictive stall onset/hysteresis/dynamic stall,
 wake/shielding physics beyond geometric occlusion, base-flow interaction,
 surface roughness, high-speed transition, real-gas properties, a validated
 body-of-revolution transonic solver and a validated general supersonic

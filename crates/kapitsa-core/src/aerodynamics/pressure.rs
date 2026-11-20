@@ -51,8 +51,9 @@ impl std::error::Error for PressureError {}
 /// Mach >= 5. `ModifiedNewtonian` is the compression-only extension in
 /// `0 <= Mach <= 5`; it still uses exposed windward patches and returns an
 /// error above Mach 5. `PotentialFlow` is a bounded incompressible source-panel
-/// model for closed isolated meshes at Mach <= 0.2. The default preserves
-/// existing behavior.
+/// model for closed isolated meshes at Mach <= 0.2. `KuttaLifting` derives an
+/// equivalent finite wing from a closed thin wing mesh and applies its
+/// trailing-vortex lifting-line wake. The default preserves existing behavior.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MeshPressureModel {
     /// Unmodified Newtonian impact pressure, `Cp = 2 sin²(theta)`, Mach >= 5.
@@ -66,6 +67,10 @@ pub enum MeshPressureModel {
     /// Mesh/Colliders body. Mach ≤ 0.2 and at most 256 mesh triangles.
     /// See [`crate::aerodynamics::potential::evaluate_closed_mesh`].
     PotentialFlow,
+    /// Kutta-condition finite-wing lifting-line derived from a closed thin
+    /// wing mesh. See
+    /// [`crate::aerodynamics::potential::evaluate_kutta_lifting_mesh`].
+    KuttaLifting,
 }
 
 fn same_triangle(a: &[Vec3; 3], b: &[Vec3; 3]) -> bool {
@@ -620,7 +625,10 @@ impl PressurePatch {
         explicit: Option<ExplicitPressure>,
         model: MeshPressureModel,
     ) -> Result<PressureWrench, crate::Error> {
-        if model == MeshPressureModel::PotentialFlow {
+        if matches!(
+            model,
+            MeshPressureModel::PotentialFlow | MeshPressureModel::KuttaLifting
+        ) {
             return Err(crate::Error::from(PressureError::UnsupportedGeometry));
         }
         if !flow.center_of_mass.is_finite()
@@ -754,7 +762,7 @@ impl PressurePatch {
                     1.0,
                 )
             }
-            MeshPressureModel::PotentialFlow => {
+            MeshPressureModel::PotentialFlow | MeshPressureModel::KuttaLifting => {
                 return Err(crate::Error::from(PressureError::UnsupportedGeometry));
             }
         }
