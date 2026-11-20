@@ -33,6 +33,9 @@ pub enum Aerodynamics {
     /// Restricted compressible air drag on an isolated nonrotating sphere
     /// outside a cluster. See [`sphere_drag::continuum_drag_coefficient`].
     ContinuumSphere(sphere_drag::SphereDrag),
+    /// Precritical, compression-dominated drag on isolated spherical particles.
+    /// See [`sphere_drag::compression_dominated_particle_drag_coefficient`].
+    CompressionDominatedParticle(sphere_drag::SphereDrag),
     Wing(wing::WingSurface),
     Wings(Vec<wing::WingSurface>),
     Hull(Vec<hull::HullSection>),
@@ -52,6 +55,10 @@ impl fmt::Debug for Aerodynamics {
                 .finish(),
             Self::ContinuumSphere(model) => formatter
                 .debug_tuple("ContinuumSphere")
+                .field(model)
+                .finish(),
+            Self::CompressionDominatedParticle(model) => formatter
+                .debug_tuple("CompressionDominatedParticle")
                 .field(model)
                 .finish(),
             Self::Wing(surface) => formatter.debug_tuple("Wing").field(surface).finish(),

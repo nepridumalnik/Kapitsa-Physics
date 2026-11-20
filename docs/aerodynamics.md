@@ -553,8 +553,11 @@ compression-dominated precritical branch of [Loth et al. (2021), equations
 6–8](https://doi.org/10.2514/1.J060153), transcribed from [Palmer and Sahai
 (2023), equations 19–22](https://ntrs.nasa.gov/api/citations/20220018430/downloads/AIAA_2023_Palmer_Drag_Model_Paper_v2.pdf).
 Its domain is Mach 0.25–10 and diameter-based `45 < Re < 200,000`. At the fit's
-internal breakpoints the lower-Mach expression takes precedence. This evaluator
-does not change either world sphere model or provide the rarefaction branch.
+internal breakpoints the lower-Mach expression takes precedence.
+`Aerodynamics::CompressionDominatedParticle` applies the corresponding force
+during stepping, with the same atmosphere sampling and particle geometry
+assumptions as the other sphere variants. The rarefaction branch remains
+outside this model's domain.
 
 ## Skin friction
 

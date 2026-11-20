@@ -1726,6 +1726,7 @@ impl PhysicsWorld {
                     | crate::aerodynamics::Aerodynamics::VoxelWave(_)
                     | crate::aerodynamics::Aerodynamics::IncompressibleSphere(_)
                     | crate::aerodynamics::Aerodynamics::ContinuumSphere(_)
+                    | crate::aerodynamics::Aerodynamics::CompressionDominatedParticle(_)
                     | crate::aerodynamics::Aerodynamics::Colliders
             )
         {
@@ -3339,8 +3340,19 @@ impl PhysicsWorld {
             .world_center_of_mass()
             .map_err(|_| error())?
             .ok_or_else(error)?;
-        use crate::aerodynamics::Aerodynamics::{ContinuumSphere, IncompressibleSphere};
-        if let IncompressibleSphere(model) | ContinuumSphere(model) = primary {
+        use crate::aerodynamics::{
+            Aerodynamics::{CompressionDominatedParticle, ContinuumSphere, IncompressibleSphere},
+            sphere_drag::SphereDragRegime,
+        };
+        let sphere = match primary {
+            IncompressibleSphere(model) => Some((model, SphereDragRegime::Incompressible)),
+            ContinuumSphere(model) => Some((model, SphereDragRegime::Continuum)),
+            CompressionDominatedParticle(model) => {
+                Some((model, SphereDragRegime::CompressionDominatedParticle))
+            }
+            _ => None,
+        };
+        if let Some((model, regime)) = sphere {
             if cluster.is_some() {
                 return Err(StepError::Aerodynamics {
                     body_id,
@@ -3357,7 +3369,7 @@ impl PhysicsWorld {
                     state.sound_speed().unwrap_or(mesh_sound_speed),
                     body.state().linear_velocity(),
                     body.state().angular_velocity(),
-                    matches!(primary, ContinuumSphere(_)),
+                    regime,
                 )
                 .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             body.apply_force(force).map_err(|_| error())?;
@@ -3366,6 +3378,7 @@ impl PhysicsWorld {
             crate::aerodynamics::Aerodynamics::None
             | IncompressibleSphere(_)
             | ContinuumSphere(_)
+            | CompressionDominatedParticle(_)
             | crate::aerodynamics::Aerodynamics::Wing(_)
             | crate::aerodynamics::Aerodynamics::Wings(_)
             | crate::aerodynamics::Aerodynamics::Hull(_)

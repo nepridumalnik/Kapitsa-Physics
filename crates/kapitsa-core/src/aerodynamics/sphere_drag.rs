@@ -52,6 +52,13 @@ pub struct SphereDrag {
 /// Parameters for [`super::Aerodynamics::IncompressibleSphere`].
 pub type IncompressibleSphereDrag = SphereDrag;
 
+#[derive(Clone, Copy)]
+pub(crate) enum SphereDragRegime {
+    Incompressible,
+    Continuum,
+    CompressionDominatedParticle,
+}
+
 impl SphereDrag {
     /// Sets diameter in metres and constant dynamic viscosity in Pa·s. Both
     /// must be finite and positive. The selected aerodynamic model determines
@@ -77,7 +84,7 @@ impl SphereDrag {
         sound_speed: f64,
         linear_velocity: Vec3,
         angular_velocity: Vec3,
-        compressible: bool,
+        regime: SphereDragRegime,
     ) -> Result<Vec3, crate::Error> {
         if atmosphere.density() == 0.0 {
             return Ok(Vec3::ZERO);
@@ -88,13 +95,21 @@ impl SphereDrag {
         if angular_velocity != Vec3::ZERO {
             return Err(SphereDragError::UnsupportedDomain.into());
         }
-        if compressible {
-            return continuum_drag_force(
+        let coefficient = match regime {
+            SphereDragRegime::Incompressible => None,
+            SphereDragRegime::Continuum => Some(continuum_drag_coefficient as fn(f64, f64) -> _),
+            SphereDragRegime::CompressionDominatedParticle => {
+                Some(compression_dominated_particle_drag_coefficient as fn(f64, f64) -> _)
+            }
+        };
+        if let Some(coefficient) = coefficient {
+            return compressible_drag_force(
                 self.diameter,
                 atmosphere.density(),
                 self.dynamic_viscosity,
                 sound_speed,
                 relative_velocity,
+                coefficient,
             );
         }
         let speed = relative_velocity
@@ -165,6 +180,24 @@ pub fn continuum_drag_force(
     sound_speed: f64,
     relative_velocity: Vec3,
 ) -> Result<Vec3, crate::Error> {
+    compressible_drag_force(
+        diameter,
+        density,
+        dynamic_viscosity,
+        sound_speed,
+        relative_velocity,
+        continuum_drag_coefficient,
+    )
+}
+
+fn compressible_drag_force(
+    diameter: f64,
+    density: f64,
+    dynamic_viscosity: f64,
+    sound_speed: f64,
+    relative_velocity: Vec3,
+    coefficient: impl FnOnce(f64, f64) -> Result<f64, crate::Error>,
+) -> Result<Vec3, crate::Error> {
     if !sound_speed.is_finite() || sound_speed <= 0.0 {
         return Err(SphereDragError::InvalidInput.into());
     }
@@ -178,7 +211,7 @@ pub fn continuum_drag_force(
             if !mach.is_finite() || mach == 0.0 {
                 return Err(SphereDragError::ArithmeticOverflow.into());
             }
-            Ok(continuum_drag_coefficient(mach, reynolds)? * reynolds / STOKES_FACTOR)
+            Ok(coefficient(mach, reynolds)? * reynolds / STOKES_FACTOR)
         },
     )
 }

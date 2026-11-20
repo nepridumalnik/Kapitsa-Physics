@@ -14,6 +14,43 @@ fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepEr
 }
 
 #[test]
+fn spherical_particle_applies_compression_dominated_drag_at_mach_quarter()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::sphere_drag::{
+        SphereDrag, compression_dominated_particle_drag_coefficient,
+    };
+
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::ZERO,
+    )?));
+    world.set_mesh_sound_speed(100.0)?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut particle = RigidBody::new_dynamic(Transform::identity(), mass)?;
+    let speed = 25.0;
+    let diameter = 0.02;
+    particle.set_linear_velocity(Vec3::X * speed)?;
+    let body = world.add_body(particle)?;
+    world.set_aerodynamics(
+        body,
+        Aerodynamics::CompressionDominatedParticle(SphereDrag::new(diameter, 0.001)?),
+    )?;
+    let dt = 0.001;
+    let area = std::f64::consts::PI * diameter * diameter / 4.0;
+    let cd = compression_dominated_particle_drag_coefficient(0.25, 500.0)?;
+    let expected_speed = speed - 0.5 * speed * speed * area * cd * dt;
+    world.step(dt)?;
+    let velocity = world
+        .body(body)
+        .ok_or("spherical particle")?
+        .state()
+        .linear_velocity();
+    assert!((velocity - Vec3::X * expected_speed).length() < 1e-12);
+    Ok(())
+}
+
+#[test]
 fn continuum_sphere_uses_relative_mach_and_sonic_drag() -> Result<(), Box<dyn std::error::Error>> {
     use crate::aerodynamics::sphere_drag::{SphereDrag, SphereDragError, continuum_drag_force};
 
