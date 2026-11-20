@@ -1,6 +1,6 @@
 //! Shadow half-spaces evaluated in the source triangle's affine domain.
 //! Adaptive orientation predicates come from GeoRust's MIT/Apache-2.0 `robust`.
-use super::{GeometryError, SurfaceTriangle, Vec3};
+use super::{GeometryError, SurfaceTriangle, Vec3, components};
 use robust::{Coord, Coord3D, orient2d, orient3d};
 
 pub(super) struct Shadow {
@@ -234,18 +234,32 @@ impl Shadow {
         if denominator == 0.0 {
             return Ok(None);
         }
-        let frame = PredicateFrame::new(&[
-            a,
-            b,
-            c,
-            source.vertices[0],
-            source.vertices[1],
-            source.vertices[2],
-        ])?;
         let mut depth = [0.0; 3];
-        for (value, point) in depth.iter_mut().zip(source.vertices) {
-            // orient(a,b,c,p) is minus the signed plane distance numerator.
-            *value = frame.orientation(a, b, c, point)? * denominator.signum();
+        // A coordinate-aligned plane has only one depth coordinate. The
+        // common projected area factor cancels during normalization.
+        let axial_depth = components(edge)
+            .into_iter()
+            .zip(components(other))
+            .position(|(edge, other)| edge == 0.0 && other == 0.0);
+        if let Some(axis) = axial_depth {
+            let plane = components(a)[axis];
+            let sign = components(upstream)[axis].signum();
+            for (value, point) in depth.iter_mut().zip(source.vertices) {
+                *value = finite(plane - components(point)[axis])? * sign;
+            }
+        } else {
+            let frame = PredicateFrame::new(&[
+                a,
+                b,
+                c,
+                source.vertices[0],
+                source.vertices[1],
+                source.vertices[2],
+            ])?;
+            for (value, point) in depth.iter_mut().zip(source.vertices) {
+                // orient(a,b,c,p) is minus the signed plane distance numerator.
+                *value = frame.orientation(a, b, c, point)? * denominator.signum();
+            }
         }
         let coplanar = depth.iter().all(|v| *v == 0.0);
         if coplanar {
@@ -752,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_precision_is_an_error_instead_of_a_missed_blocker() {
+    fn axial_plane_depth_accepts_wide_coordinate_span() -> Result<(), crate::Error> {
         let source = SurfaceTriangle {
             vertices: [Vec3::ZERO, Vec3::Y + Vec3::X * 1e-100, Vec3::Z],
             normal: Vec3::X,
@@ -761,6 +775,25 @@ mod tests {
         };
         let blocker = SurfaceTriangle {
             vertices: [Vec3::X, Vec3::X + Vec3::Y, Vec3::X + Vec3::Z],
+            ..source
+        };
+        let shadow =
+            Shadow::new(&source, &blocker, 0, 1, Vec3::X)?.ok_or(GeometryError::PrecisionLoss)?;
+        assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
+        assert!(Shadow::new(&source, &blocker, 0, 1, -Vec3::X)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_precision_is_an_error_instead_of_a_missed_blocker() {
+        let source = SurfaceTriangle {
+            vertices: [Vec3::ZERO, Vec3::Y + Vec3::X * 1e-100, Vec3::Z],
+            normal: Vec3::X,
+            area: 0.5,
+            owner: GeometryOwner::Body,
+        };
+        let blocker = SurfaceTriangle {
+            vertices: [Vec3::X, Vec3::X * 2.0 + Vec3::Y, Vec3::X + Vec3::Z],
             ..source
         };
         assert!(matches!(
