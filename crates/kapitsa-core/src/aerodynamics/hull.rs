@@ -329,11 +329,18 @@ pub enum BoundaryLayer {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SkinFriction {
     dynamic_viscosity: f64,
-    regime: BoundaryLayer,
-    compressible: bool,
+    law: SkinFrictionLaw,
     min_reynolds: f64,
     max_reynolds: f64,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SkinFrictionLaw {
+    Incompressible(BoundaryLayer),
+    CompressibleTurbulent,
+    TransitionedFlatPlate,
+}
+
 impl SkinFriction {
     pub fn new(
         dynamic_viscosity: f64,
@@ -352,8 +359,7 @@ impl SkinFriction {
         }
         Ok(Self {
             dynamic_viscosity,
-            regime,
-            compressible: false,
+            law: SkinFrictionLaw::Incompressible(regime),
             min_reynolds,
             max_reynolds,
         })
@@ -381,13 +387,29 @@ impl SkinFriction {
             min_reynolds,
             max_reynolds,
         )?;
-        friction.compressible = true;
+        friction.law = SkinFrictionLaw::CompressibleTurbulent;
+        Ok(friction)
+    }
+
+    /// Mean Prandtl–Schlichting friction for a smooth flat plate at zero
+    /// incidence, assuming transition at Reynolds number about 500,000.
+    /// Fallback viscosity is in Pa·s and must be finite and positive. The
+    /// range is `500,000 < Re < 100,000,000`, with total Mach ≤ 0.3.
+    /// See NASA/TP-2006-213486, section 1.5. Transition location is prescribed.
+    pub fn transitioned_flat_plate(dynamic_viscosity: f64) -> Result<Self, crate::Error> {
+        let mut friction = Self::new(
+            dynamic_viscosity,
+            BoundaryLayer::Laminar,
+            500_000.0_f64.next_up(),
+            100_000_000.0_f64.next_down(),
+        )?;
+        friction.law = SkinFrictionLaw::TransitionedFlatPlate;
         Ok(friction)
     }
 
     fn max_mach(self) -> f64 {
         const MAX_COMPRESSIBLE_MACH: f64 = 0.95;
-        if self.compressible {
+        if self.law == SkinFrictionLaw::CompressibleTurbulent {
             MAX_COMPRESSIBLE_MACH
         } else {
             0.3
@@ -401,18 +423,22 @@ impl SkinFriction {
         if reynolds < self.min_reynolds || reynolds > self.max_reynolds {
             return Err(crate::Error::from(HullError::UnsupportedReynolds));
         }
-        if self.compressible {
-            const SCHLICHTING_SCALE: f64 = 0.455;
-            const REYNOLDS_LOG_EXPONENT: f64 = 2.58;
-            const MACH_SCALE: f64 = 0.144;
-            const MACH_EXPONENT: f64 = 0.65;
-            return Ok(SCHLICHTING_SCALE
-                / (reynolds.log10().powf(REYNOLDS_LOG_EXPONENT)
-                    * (1.0 + MACH_SCALE * axial_mach * axial_mach).powf(MACH_EXPONENT)));
-        }
-        Ok(match self.regime {
-            BoundaryLayer::Laminar => 1.328 / reynolds.sqrt(),
-            BoundaryLayer::Turbulent => 0.072 / reynolds.powf(0.2),
+        const SCHLICHTING_SCALE: f64 = 0.455;
+        const REYNOLDS_LOG_EXPONENT: f64 = 2.58;
+        const MACH_SCALE: f64 = 0.144;
+        const MACH_EXPONENT: f64 = 0.65;
+        const TRANSITION_CORRECTION: f64 = 1_700.0;
+        let smooth_turbulent = || SCHLICHTING_SCALE / reynolds.log10().powf(REYNOLDS_LOG_EXPONENT);
+        Ok(match self.law {
+            SkinFrictionLaw::Incompressible(BoundaryLayer::Laminar) => 1.328 / reynolds.sqrt(),
+            SkinFrictionLaw::Incompressible(BoundaryLayer::Turbulent) => 0.072 / reynolds.powf(0.2),
+            SkinFrictionLaw::CompressibleTurbulent => {
+                smooth_turbulent()
+                    / (1.0 + MACH_SCALE * axial_mach * axial_mach).powf(MACH_EXPONENT)
+            }
+            SkinFrictionLaw::TransitionedFlatPlate => {
+                smooth_turbulent() - TRANSITION_CORRECTION / reynolds
+            }
         })
     }
 }
@@ -1662,6 +1688,35 @@ mod tests {
             Err(HullError::UnsupportedReynolds.into())
         );
         assert!(SkinFriction::compressible_turbulent(viscosity, 1e5, 1e8).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn transitioned_flat_plate_resistance_matches_reference_expression() -> Result<(), crate::Error>
+    {
+        let mut s = section(Vec3::ZERO);
+        s.axial_cd = 0.0;
+        s.crossflow_cd = 0.0;
+        let speed = 20.0;
+        let viscosity = 1.2 * speed * s.length / 1e6;
+        let friction = SkinFriction::transitioned_flat_plate(viscosity)?;
+        s.skin_friction = Some(friction);
+        let expected_cf = 0.002_770_758_085_611_551_6;
+        let force = s.evaluate(flow(Vec3::X * speed))?.force;
+        close(
+            force,
+            Vec3::X * (-0.5 * 1.2 * speed * speed * s.wetted_area * expected_cf),
+        );
+        for reynolds in [500_000.0, 100_000_000.0] {
+            assert_eq!(
+                friction.mean_coefficient(reynolds, 0.0),
+                Err(HullError::UnsupportedReynolds.into())
+            );
+        }
+        assert_eq!(
+            s.evaluate(flow(Vec3::X * 110.0)),
+            Err(HullError::UnsupportedSkinFrictionMach.into())
+        );
         Ok(())
     }
 
