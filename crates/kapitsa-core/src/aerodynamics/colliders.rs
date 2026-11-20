@@ -55,6 +55,29 @@ impl ColliderTessellation {
     }
 }
 
+fn emit_latitude_mesh(
+    rings: usize,
+    segments: usize,
+    point: impl Fn(usize, usize) -> Vec3,
+    emit: &mut impl FnMut([Vec3; 3]) -> Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+    for ring in 0..rings - 1 {
+        for segment in 0..segments {
+            let a = point(ring, segment);
+            let b = point(ring + 1, segment);
+            let c = point(ring + 1, segment + 1);
+            let d = point(ring, segment + 1);
+            if ring != rings - 2 {
+                emit([a, b, c])?;
+            }
+            if ring != 0 {
+                emit([a, c, d])?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Converts real surfaces into one body-local mesh. Collider transforms are baked
 /// in, not world poses or COM offsets. Source winding is preserved for meshes.
 /// Empty sets and unsupported shapes are rejected, never approximated by AABBs.
@@ -69,6 +92,7 @@ pub fn collider_mesh<'a>(
             Shape::Cuboid(_) => 12,
             Shape::Sphere(_) => 2 * config.radial_segments * (config.sphere_rings - 2),
             Shape::Cylinder(_) => 4 * config.radial_segments,
+            Shape::Capsule(_) => 4 * config.radial_segments * (config.sphere_rings / 2),
             Shape::Triangle(_) => 1,
             Shape::Convex(shape) => shape.faces().len(),
             Shape::TriangleMesh(shape) => shape.triangles().len(),
@@ -148,20 +172,46 @@ pub fn collider_mesh<'a>(
                         theta.cos(),
                     ) * shape.radius()
                 };
-                for ring in 0..config.sphere_rings - 1 {
-                    for segment in 0..config.radial_segments {
-                        let a = point(ring, segment);
-                        let b = point(ring + 1, segment);
-                        let c = point(ring + 1, segment + 1);
-                        let d = point(ring, segment + 1);
-                        if ring != config.sphere_rings - 2 {
-                            emit([a, b, c])?;
-                        }
-                        if ring != 0 {
-                            emit([a, c, d])?;
-                        }
+                emit_latitude_mesh(
+                    config.sphere_rings,
+                    config.radial_segments,
+                    point,
+                    &mut emit,
+                )?;
+            }
+            Shape::Capsule(shape) => {
+                let axis = (shape.end() - shape.start())
+                    .try_normalize()
+                    .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+                let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+                let u = axis
+                    .cross(helper)
+                    .try_normalize()
+                    .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+                let v = axis.cross(u);
+                let cap_steps = config.sphere_rings / 2;
+                let last = 2 * cap_steps + 1;
+                let point = |ring: usize, segment: usize| {
+                    let radius = shape.radius();
+                    if ring == 0 {
+                        return shape.end() + axis * radius;
                     }
-                }
+                    if ring == last {
+                        return shape.start() - axis * radius;
+                    }
+                    let phi = std::f64::consts::TAU * (segment % config.radial_segments) as f64
+                        / config.radial_segments as f64;
+                    let radial = u * phi.cos() + v * phi.sin();
+                    let (center, direction, distance_from_equator) = if ring <= cap_steps {
+                        (shape.end(), axis, cap_steps - ring)
+                    } else {
+                        (shape.start(), -axis, ring - cap_steps - 1)
+                    };
+                    let latitude = std::f64::consts::FRAC_PI_2 * distance_from_equator as f64
+                        / cap_steps as f64;
+                    center + (radial * latitude.cos() + direction * latitude.sin()) * radius
+                };
+                emit_latitude_mesh(last + 1, config.radial_segments, point, &mut emit)?;
             }
             Shape::Cylinder(shape) => {
                 let axis = (shape.end() - shape.start())
@@ -203,7 +253,10 @@ pub fn collider_mesh<'a>(
 mod tests {
     use super::*;
     use crate::{
-        shape::{Cuboid, Cylinder, Plane, Sphere},
+        aerodynamics::geometry::{
+            GeometryConfig, GeometryInstance, GeometryOwner, OpenMeshPolicy, PreparedGeometry,
+        },
+        shape::{Capsule, Cuboid, Cylinder, Plane, Sphere},
         transform::Transform,
     };
 
@@ -218,6 +271,7 @@ mod tests {
             Shape::Cuboid(Cuboid::new(2.0, 2.0, 2.0)?),
             Shape::Sphere(Sphere::new(1.0)?),
             Shape::Cylinder(Cylinder::new(-Vec3::Z, Vec3::Z, 1.0)?),
+            Shape::Capsule(Capsule::new(-Vec3::Z, Vec3::Z, 1.0)?),
         ] {
             let collider = Collider::new(shape, Transform::identity());
             let mesh = collider_mesh([&collider], config)?;
@@ -240,6 +294,46 @@ mod tests {
             collider_mesh([&plane], config).err(),
             Some(crate::Error::from(AerodynamicsError::UnsupportedModel))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn capsule_mesh_fills_both_caps_and_barrel_after_transform() -> Result<(), crate::Error> {
+        let offset = Vec3::new(2.0, 3.0, 4.0);
+        let collider = Collider::new(
+            Shape::Capsule(Capsule::new(-Vec3::X, Vec3::X, 0.5)?),
+            Transform::new(offset, kapitsa_math::Quat::IDENTITY)?,
+        );
+        let triangles = 4 * 12 * (8 / 2);
+        let mesh = collider_mesh([&collider], ColliderTessellation::new(12, 8, triangles)?)?;
+        assert_eq!(mesh.triangles().len(), triangles);
+        assert_eq!(
+            collider_mesh(
+                [&collider],
+                ColliderTessellation::new(12, 8, triangles - 1)?
+            )
+            .err(),
+            Some(AerodynamicsError::TessellationBudgetExceeded.into())
+        );
+        let geometry = PreparedGeometry::prepare(
+            &[GeometryInstance {
+                mesh: &mesh,
+                local_transform: Transform::identity(),
+                owner: GeometryOwner::Body,
+            }],
+            GeometryConfig {
+                cell_size: 0.05,
+                max_cells: 100_000,
+                max_work: 10_000_000,
+                open_mesh_policy: OpenMeshPolicy::Reject,
+                weld_tolerance: Some(1e-10),
+                max_patch_work: 1,
+            },
+        )?;
+        for x in [-1.25, 0.0, 1.25] {
+            assert!(geometry.occupied_at(offset + Vec3::X * x)?);
+        }
+        assert!(!geometry.occupied_at(offset + Vec3::Y * 0.8)?);
         Ok(())
     }
 }
