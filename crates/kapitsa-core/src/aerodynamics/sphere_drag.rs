@@ -1,4 +1,4 @@
-//! Restricted continuum approximation for drag on an isolated sphere.
+//! Continuum drag coefficients for an isolated sphere.
 //!
 //! Implements the continuum component of Singh et al., equations 5–13 and
 //! 23–26: <https://arxiv.org/abs/2012.04813v1>. This is not their full
@@ -16,6 +16,11 @@ const MAX_MACH: f64 = 2.0;
 const MIN_REYNOLDS: f64 = 300.0;
 const MAX_REYNOLDS: f64 = 10_000.0;
 const MAX_KNUDSEN: f64 = 0.01;
+const BROWN_LAWLER_MAX_REYNOLDS: f64 = 200_000.0;
+const BROWN_LAWLER_VISCOUS_SCALE: f64 = 0.150;
+const BROWN_LAWLER_VISCOUS_EXPONENT: f64 = 0.681;
+const BROWN_LAWLER_INERTIAL_SCALE: f64 = 0.407;
+const BROWN_LAWLER_TRANSITION_REYNOLDS: f64 = 8_710.0;
 
 /// Invalid or outside the deliberately restricted approximation domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +36,30 @@ impl std::fmt::Display for SphereDragError {
     }
 }
 impl std::error::Error for SphereDragError {}
+
+/// Incompressible drag coefficient for a smooth isolated sphere, referenced
+/// to frontal area. Implements Brown and Lawler (2003), equation (19):
+/// <https://doi.org/10.1061/(ASCE)0733-9372(2003)129:3(222)>.
+///
+/// `reynolds` is diameter-based and must satisfy `0 < Re < 200_000`.
+/// The caller must establish incompressible continuum conditions. The fit
+/// includes the Stokes limit and excludes the drag crisis. It returns a
+/// coefficient only. At rest the force is zero and the coefficient is undefined.
+pub fn incompressible_drag_coefficient(reynolds: f64) -> Result<f64, crate::Error> {
+    if !reynolds.is_finite() || reynolds <= 0.0 {
+        return Err(crate::Error::from(SphereDragError::InvalidInput));
+    }
+    if reynolds >= BROWN_LAWLER_MAX_REYNOLDS {
+        return Err(crate::Error::from(SphereDragError::UnsupportedDomain));
+    }
+    let cd = (STOKES_FACTOR / reynolds)
+        * (1.0 + BROWN_LAWLER_VISCOUS_SCALE * reynolds.powf(BROWN_LAWLER_VISCOUS_EXPONENT))
+        + BROWN_LAWLER_INERTIAL_SCALE * (reynolds / (reynolds + BROWN_LAWLER_TRANSITION_REYNOLDS));
+    if !cd.is_finite() {
+        return Err(crate::Error::from(SphereDragError::ArithmeticOverflow));
+    }
+    Ok(cd)
+}
 
 /// Continuum drag coefficient, referenced to the sphere's frontal area.
 ///
@@ -85,6 +114,34 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incompressible_fit_reaches_stokes_limit_and_precrisis_domain() -> Result<(), crate::Error> {
+        let creeping_re = 1e-12;
+        assert!((incompressible_drag_coefficient(creeping_re)? * creeping_re - 24.0).abs() < 1e-7);
+        let cd_at_1000 = incompressible_drag_coefficient(1_000.0)?;
+        assert!((cd_at_1000 - 0.463_383_854_143_119_2).abs() < 1e-14);
+        assert!(incompressible_drag_coefficient(BROWN_LAWLER_MAX_REYNOLDS.next_down())? > 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn incompressible_fit_checks_input_and_representability() {
+        for re in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                incompressible_drag_coefficient(re),
+                Err(SphereDragError::InvalidInput.into())
+            );
+        }
+        assert_eq!(
+            incompressible_drag_coefficient(200_000.0),
+            Err(SphereDragError::UnsupportedDomain.into())
+        );
+        assert_eq!(
+            incompressible_drag_coefficient(f64::MIN_POSITIVE),
+            Err(SphereDragError::ArithmeticOverflow.into())
+        );
+    }
 
     // Diagnostic comparison, not an accuracy acceptance test. Nagata et al.,
     // JFM 904 A36 (2020), table 3, https://doi.org/10.1017/jfm.2020.629.

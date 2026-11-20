@@ -507,6 +507,16 @@ Reference: [Prandtl–Glauert transformation](https://en.wikipedia.org/wiki/Pran
 
 It is not a transonic model: the singularity at Mach 1 is a breakdown of the approximation, not a physical infinite load. Clamping the denominator or interpolating around Mach 1 creates an engineering approximation that must be documented and validated separately. It does not reproduce FAR's area-distribution-based wave-drag model.
 
+### Incompressible drag on an isolated sphere
+
+`sphere_drag::incompressible_drag_coefficient(Re)` implements [Brown and
+Lawler (2003), equation (19)](https://doi.org/10.1061/%28ASCE%290733-9372%282003%29129%3A3%28222%29).
+It uses diameter-based `0 < Re < 200,000` and returns a coefficient referenced
+to frontal area. The caller establishes incompressible continuum conditions.
+The correlation tends to `24/Re` in creeping flow and excludes the drag crisis.
+It is a scalar coefficient evaluator. The compressible sphere evaluator remains
+a separate model with its own domain and no automatic transition between them.
+
 ## Skin friction
 
 For a laminar flat plate, the local Blasius relation is `c_f(x) = 0.664 / sqrt(Re_x)`. Integrating from the leading edge to plate length `L` gives the streamwise average `C_f = 1.328 / sqrt(Re_L)`. The distinction between local and averaged coefficients matters when summing sections.
