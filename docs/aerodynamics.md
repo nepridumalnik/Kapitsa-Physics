@@ -229,6 +229,22 @@ with axial Mach, a total Mach limit of 0.95, and caller-supplied inclusive Re
 bounds within 1–100 million. These are implementation limits. The model
 does not infer transition, pressure gradients or surface roughness.
 
+`SkinFriction::rough_turbulent(dynamic_viscosity, sand_grain_roughness,
+min_reynolds, max_reynolds)` is a fully rough Prandtl–Schlichting mean
+flat-plate model. With `L` the section development length and `ks` the
+equivalent sand-grain roughness in metres,
+`Cf = [1.89 + 1.62 log10(L/ks)]^-2.5`, following White, *Fluid Mechanics*,
+7th ed., equation (7.48b). The accepted domain is `100 <= L/ks <= 1e6` and
+total Mach ≤ 0.3; outside the roughness ratio it returns
+`UnsupportedRoughness`. Reynolds number is checked against the caller's
+inclusive bounds but does not enter the fully rough coefficient. `ks` is a
+hydraulic equivalent sand-grain scale determined from roughness data, not a
+geometric height. The model applies only to a fully turbulent, hydraulically
+fully rough boundary layer: it does not blend the smooth or transitionally
+rough regimes, infer transition, predict pressure gradients, shock-boundary-
+layer interaction or real-gas properties, and is not experimentally validated
+here.
+
 `SkinFriction::high_speed_laminar` is a separate Eckert reference-temperature
 model for attached laminar flat-plate flow from low subsonic through hypersonic
 Mach numbers. It assumes air with `gamma = 1.4`, `R = 287.05 J/(kg K)`, a
@@ -970,6 +986,7 @@ engine does not blend models to hide a domain limit.
 | Incompressible friction | Mach ≤ 0.3 | compressibility, transition above 0.3 |
 | Transitioned flat plate | 500,000 < Re < 100,000,000, Mach ≤ 0.3 | prescribed transition only |
 | Compressible turbulent friction | Mach ≤ 0.95, 1M ≤ Re ≤ 100M | shock interaction, roughness |
+| Fully rough turbulent friction | 100 ≤ L/ks ≤ 1e6, Mach ≤ 0.3, caller Re bounds | transitionally rough regime, pressure gradients, shock interaction, validation |
 | High-speed laminar friction | Mach ≤ 10, 10k ≤ Re ≤ 100M | transition, real gas, roughness |
 | High-speed turbulent friction | Mach ≤ 5, 1M ≤ Re ≤ 100M | strong cooling, shock interaction |
 | Incompressible sphere | Mach ≤ 0.2, Re < 200,000 | drag crisis |
@@ -986,8 +1003,8 @@ control surfaces for Mesh/Colliders, unsteady added-mass and rotating-wake
 effects, validated geometry/CFD stall onset and measured `CL_max`,
 vortex-lift dynamic stall and validated hysteresis,
 wake/shielding physics beyond geometric occlusion, unsteady or validated
-base-flow interaction, surface roughness, high-speed transition, real-gas
-properties, a validated
+base-flow interaction, transitionally rough and validated roughness
+behavior, high-speed transition, real-gas properties, a validated
 body-of-revolution transonic solver and a validated general supersonic
 lifting-surface solution with thickness, sweep, tip relief and shock
 detachment remain outside the implemented models. The predictive hull
