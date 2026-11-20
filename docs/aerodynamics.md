@@ -537,8 +537,10 @@ tolerance. Direction and edge-reference checks use the exact sign without
 conversion. Edge coefficients share a scaling factor independent of the
 reference determinant. The exact projection expands the determinant using
 the original vertices and direction so rounded differences do not enter
-the fallback. Overflowing intermediate differences also select this path.
-The fast projection continues to use floating-point edge vectors.
+the fallback. Overflowing intermediate differences and differences that
+equal one operand despite the other being nonzero also select this path.
+The fast projection continues to use floating-point edge vectors for other
+differences. Direction rescaling uses a power of two.
 An overflowing axial depth separation selects the general depth predicate.
 
 Windward and partition triangle areas use the same exact accumulator when

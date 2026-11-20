@@ -95,6 +95,17 @@ fn scale(mut value: f64, mut shift: i32) -> Result<f64, crate::Error> {
     Ok(value)
 }
 
+// A rounded difference can erase a nonzero operand completely. In that
+// case the original endpoint is needed to distinguish a very thin projection.
+fn retains_endpoints(a: Vec3, b: Vec3, difference: Vec3) -> bool {
+    difference.is_finite()
+        && components(a)
+            .into_iter()
+            .zip(components(b))
+            .zip(components(difference))
+            .all(|((a, b), d)| (b == 0.0 || d != a) && (a == 0.0 || d != -b))
+}
+
 fn frame_or_exact(points: &[Vec3]) -> Result<Option<PredicateFrame>, crate::Error> {
     match PredicateFrame::new(points) {
         Ok(frame) => Ok(Some(frame)),
@@ -244,14 +255,19 @@ impl Shadow {
             return Err(crate::Error::from(GeometryError::InvalidGeometry));
         }
         // Direction may be positively rescaled without changing a shadow plane.
-        let direction = upstream * size;
+        // An exact power of two preserves the direction's component ratios.
+        let size_exponent = size.to_bits() & (0x7ff_u64 << 52);
+        let direction = upstream * f64::from_bits(size_exponent);
         let scaled_direction = size.is_finite()
             && direction.is_finite()
             && components(upstream)
                 .into_iter()
                 .zip(components(direction))
                 .all(|(a, b)| a == 0.0 || b.is_normal());
-        let direction_frame = if scaled_direction {
+        let direction_frame = if scaled_direction
+            && retains_endpoints(b, a, edge)
+            && retains_endpoints(c, a, other)
+        {
             frame_or_exact(&[Vec3::ZERO, edge, other, direction])?
         } else {
             None
@@ -338,9 +354,12 @@ impl Shadow {
             let offsets = source_vertices.map(|p| p - start);
             let opposite_offset = opposite - start;
             let frame = if scaled_direction
-                && edge.is_finite()
-                && opposite_offset.is_finite()
-                && offsets.iter().all(|offset| offset.is_finite())
+                && retains_endpoints(end, start, edge)
+                && retains_endpoints(opposite, start, opposite_offset)
+                && source_vertices
+                    .into_iter()
+                    .zip(offsets)
+                    .all(|(point, offset)| retains_endpoints(point, start, offset))
             {
                 frame_or_exact(&[
                     Vec3::ZERO,
@@ -882,6 +901,28 @@ mod tests {
             .ok_or(GeometryError::PrecisionLoss)?;
         assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
         assert!(Shadow::new(&source, &blocker, 0, 1, -Vec3::X, |_| Ok(()))?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn rounded_edge_difference_does_not_make_blocker_tangent() -> Result<(), crate::Error> {
+        let start = Vec3::X * 2.0_f64.powi(-500);
+        let end = Vec3::X + Vec3::Y;
+        let blocker = SurfaceTriangle {
+            vertices: [start, end, end * 2.0],
+            normal: -Vec3::Z,
+            area: start.x * 0.5,
+            owner: GeometryOwner::Body,
+        };
+        let [a, b, c] = blocker.vertices;
+        assert_eq!((b - a).cross(c - a), Vec3::ZERO);
+        let source = SurfaceTriangle {
+            vertices: blocker.vertices.map(|point| point - Vec3::Z),
+            ..blocker
+        };
+        let shadow = Shadow::new(&source, &blocker, 0, 1, Vec3::Z, |_| Ok(()))?
+            .ok_or(GeometryError::PrecisionLoss)?;
+        assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
         Ok(())
     }
 
