@@ -102,7 +102,14 @@ fn finite(value: f64) -> Result<f64, crate::Error> {
 // underflow detection is independent of endpoint order. A ratio can still
 // round to one; rejecting that requires separate geometric analysis.
 pub(super) fn crossing_fraction(a: f64, b: f64) -> Result<f64, crate::Error> {
-    let denominator = finite(a - b)?;
+    let difference = a - b;
+    let (a, b, denominator) = if difference.is_infinite() && a.is_finite() && b.is_finite() {
+        // Halving both distances preserves their ratio when their difference
+        // would exceed the finite range.
+        (a * 0.5, b * 0.5, a * 0.5 - b * 0.5)
+    } else {
+        (a, b, finite(difference)?)
+    };
     if (a.abs().min(b.abs()) / denominator.abs()) == 0.0 {
         return Err(crate::Error::from(GeometryError::PrecisionLoss));
     }
@@ -117,7 +124,19 @@ pub(super) fn crossing_point(a: Vec3, b: Vec3, da: f64, db: f64) -> Result<Vec3,
         (b, a, db, da)
     };
     let fraction = crossing_fraction(d_near, d_far)?;
-    let point = near + (far - near) * fraction;
+    let interpolate = |near: f64, far: f64| {
+        let difference = far - near;
+        if difference.is_finite() {
+            near + difference * fraction
+        } else {
+            near * (1.0 - fraction) + far * fraction
+        }
+    };
+    let point = Vec3::new(
+        interpolate(near.x, far.x),
+        interpolate(near.y, far.y),
+        interpolate(near.z, far.z),
+    );
     if !point.is_finite() {
         return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
     }
@@ -398,6 +417,24 @@ mod tests {
             sum.value(),
             triangle_fraction([Vec3::ZERO, Vec3::X, Vec3::Y]).unwrap()
         );
+    }
+
+    #[test]
+    fn crossing_keeps_representable_intersection_with_overflowing_differences()
+    -> Result<(), crate::Error> {
+        let largest = f64::MAX;
+        assert_eq!(crossing_fraction(largest, -largest)?, 0.5);
+        let a = Vec3::new(-largest, 2.0, -2.0);
+        let b = Vec3::new(largest, 6.0, 2.0);
+        assert_eq!(
+            crossing_point(a, b, -largest, largest)?,
+            Vec3::new(0.0, 4.0, 0.0)
+        );
+        assert_eq!(
+            crossing_point(b, a, largest, -largest)?,
+            Vec3::new(0.0, 4.0, 0.0)
+        );
+        Ok(())
     }
 
     #[test]
