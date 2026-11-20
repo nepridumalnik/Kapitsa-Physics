@@ -593,6 +593,19 @@ control-surface stall or roughness. It does not add a pitching-moment model.
 The flat-plate limit is not a validated substitute for a measured post-stall
 polar; use `WingPolar` when such data are available.
 
+`FiniteWing::with_predicted_stall_onset(cl_max, blend_angle)` replaces the
+caller-selected attached limit with the intersection of the finite-wing
+attached lift curve and a caller-supplied `CL_max`. The estimate is
+`alpha_zero + CL_max / (dCL/dalpha)`, where the slope includes aspect ratio,
+span efficiency, zero-lift/camber angle and the configured compressibility
+model. `FiniteWing::predicted_stall_angle(cl_max, mach)` exposes the same
+calculation. The predicted angle must be finite, inside `(-pi/2, pi/2)`, and
+`|angle| + blend_angle <= pi/2`; otherwise construction or evaluation returns
+`InvalidParameters`/`UnsupportedFlow`. `CL_max` must be positive and finite and
+is supplied by the caller from measured or justified data. This is a
+lift-curve-intersection engineering estimate, not a CFD stall-onset prediction,
+a camber-dependent maximum-lift model or an experimental validation.
+
 `FiniteWing::with_oye_dynamic_stall(chord, time_constant_scale)` adds a
 rate-dependent separation-lag model following the Øye/Bergami formulation
 described in the [QBlade dynamic-stall documentation](https://docs.qblade.org/src/theory/aerodynamics/dynamic_stall/OYE_stall.html).
@@ -911,7 +924,8 @@ engine does not blend models to hide a domain limit.
 | Slender-body normal load | Mach ≤ 0.3, small incidence, steady aligned flow | separation, wave drag, rotational derivatives |
 | Slender wave drag | Mach > 1, axis aligned, caller area slopes | predictive transonic closure |
 | `FiniteWing` default | Mach ≤ 0.3, attached flow | stall, separation |
-| Flat-plate post-stall | caller stall angle + blend, through ±π/2 | predictive onset, wake geometry |
+| Flat-plate post-stall | caller stall angle + blend, through ±π/2 | wake geometry, validated post-stall polar |
+| Predicted stall onset | caller `CL_max`, AR/efficiency/camber/compressibility slope | CFD-derived `CL_max`, experimental validation |
 | Øye dynamic stall | caller chord/V/dt/state, post-stall polar, rate-dependent separation | vortex lift, pitch moment, wake memory, validation |
 | Prandtl–Glauert wing | caller maximum below Mach 1 | shock onset, wave drag |
 | NDARC wing lift/drag rise | caller maximum; ratio ≤ 1.1 or explicit plateau | general high-supersonic wing model |
@@ -939,8 +953,8 @@ engine does not blend models to hide a domain limit.
 
 Finite-thickness and multi-surface Kutta wake flow with wake roll-up and
 control surfaces for Mesh/Colliders, unsteady added-mass and rotating-wake
-effects, geometry-predicted stall onset, vortex-lift dynamic stall and
-validated hysteresis,
+effects, validated geometry/CFD stall onset and measured `CL_max`,
+vortex-lift dynamic stall and validated hysteresis,
 wake/shielding physics beyond geometric occlusion, base-flow interaction,
 surface roughness, high-speed transition, real-gas properties, a validated
 body-of-revolution transonic solver and a validated general supersonic

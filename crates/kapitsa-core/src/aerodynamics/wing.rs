@@ -7,7 +7,8 @@
 //! supersonic model uses `AR/(AR+2)` as an engineering finite-span factor and
 //! does not model thickness, sweep, tip relief or shock detachment. An optional
 //! flat-plate post-stall blend extends the attached limit through `±pi/2`; it
-//! uses a caller-selected stall onset. An optional stateful Øye/Bergami
+//! uses a caller-selected stall onset; an optional `CL_max`/geometry
+//! lift-curve intersection can replace it. An optional stateful Øye/Bergami
 //! separation lag adds rate-dependent hysteresis but not a leading-edge vortex
 //! or pitching-moment state.
 //! `WingSurface` optionally replaces that closure with caller-supplied TOTAL
@@ -224,6 +225,7 @@ pub struct FiniteWing {
     drag_rise: Option<DragRise>,
     post_stall: Option<PostStall>,
     dynamic_stall: Option<DynamicStall>,
+    predicted_stall_cl_max: Option<f64>,
 }
 
 /// Caller chord and separation-lag scale for the Øye dynamic-stall model.
@@ -700,6 +702,7 @@ impl FiniteWing {
             drag_rise: None,
             post_stall: None,
             dynamic_stall: None,
+            predicted_stall_cl_max: None,
         })
     }
 
@@ -723,8 +726,62 @@ impl FiniteWing {
         {
             return Err(crate::Error::from(WingError::InvalidParameters));
         }
+        self.predicted_stall_cl_max = None;
         self.post_stall = Some(PostStall { blend_angle });
         Ok(self)
+    }
+
+    /// Replaces the caller-selected stall onset with a `CL_max` intersection
+    /// of the finite-wing attached lift curve.
+    ///
+    /// `cl_max` is the caller's measured or otherwise justified maximum lift
+    /// coefficient. The predicted angle is
+    /// `alpha_zero + cl_max / (dCL/dalpha)`, where the slope includes aspect
+    /// ratio, efficiency, zero-lift angle and the configured compressibility
+    /// model. The result must be finite, inside `[-pi/2, pi/2]`, and fit with
+    /// the flat-plate blend before `pi/2`. This is an engineering
+    /// lift-curve-intersection estimate, not a CFD or aerodynamic stall-onset
+    /// prediction; the caller owns `CL_max` and its validity.
+    pub fn with_predicted_stall_onset(
+        mut self,
+        cl_max: f64,
+        blend_angle: f64,
+    ) -> Result<Self, crate::Error> {
+        if !cl_max.is_finite() || cl_max <= 0.0 {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        self = self.with_flat_plate_post_stall(blend_angle)?;
+        self.predicted_stall_cl_max = Some(cl_max);
+        let angle = self.predicted_stall_angle(cl_max, 0.0)?;
+        if angle.abs() + blend_angle > PI / 2.0 {
+            self.predicted_stall_cl_max = None;
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        Ok(self)
+    }
+
+    /// Predicts the stall angle from a caller-supplied `CL_max` and current
+    /// Mach. See [`Self::with_predicted_stall_onset`] for assumptions.
+    pub fn predicted_stall_angle(&self, cl_max: f64, mach: f64) -> Result<f64, crate::Error> {
+        if !cl_max.is_finite() || cl_max <= 0.0 || !mach.is_finite() || mach < 0.0 {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        let slope = self.attached_lift(1.0, mach)?;
+        if !slope.is_finite() || slope <= 0.0 {
+            return Err(crate::Error::from(WingError::ArithmeticOverflow));
+        }
+        let angle = self.zero_lift_angle + cl_max / slope;
+        if !angle.is_finite() || angle <= -PI / 2.0 || angle >= PI / 2.0 {
+            return Err(crate::Error::from(WingError::UnsupportedFlow));
+        }
+        Ok(angle)
+    }
+
+    fn stall_angle(&self, mach: f64) -> Result<f64, crate::Error> {
+        match self.predicted_stall_cl_max {
+            Some(cl_max) => self.predicted_stall_angle(cl_max, mach),
+            None => Ok(self.max_attached_angle),
+        }
     }
 
     /// Enables the Øye/Bergami rate-dependent separation model.
@@ -943,7 +1000,14 @@ impl FiniteWing {
         if mach < min_mach || mach > max_mach || alpha.abs() > post_stall_limit {
             return Err(crate::Error::from(WingError::UnsupportedFlow));
         }
-        let alpha_attached = alpha.clamp(-self.max_attached_angle, self.max_attached_angle);
+        let stall_angle = self.stall_angle(mach)?;
+        if self
+            .post_stall
+            .is_some_and(|post| stall_angle.abs() + post.blend_angle > PI / 2.0)
+        {
+            return Err(crate::Error::from(WingError::UnsupportedFlow));
+        }
+        let alpha_attached = alpha.clamp(-stall_angle, stall_angle);
         let effective_aspect = self.efficiency * self.aspect_ratio;
         let beta = match self.compressibility {
             Compressibility::Subsonic { .. } => (1.0 - mach * mach).sqrt(),
@@ -1014,10 +1078,9 @@ impl FiniteWing {
             }
         };
         if let Some(post_stall) = self.post_stall
-            && alpha.abs() > self.max_attached_angle
+            && alpha.abs() > stall_angle
         {
-            let blend =
-                ((alpha.abs() - self.max_attached_angle) / post_stall.blend_angle).clamp(0.0, 1.0);
+            let blend = ((alpha.abs() - stall_angle) / post_stall.blend_angle).clamp(0.0, 1.0);
             let blend = blend * blend * (3.0 - 2.0 * blend);
             let finite_span = self.aspect_ratio / (self.aspect_ratio + 2.0);
             let flat_lift = 2.0 * alpha.sin() * alpha.cos() * finite_span;
@@ -1610,6 +1673,53 @@ mod tests {
                 "accepted blend={blend}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn predicted_stall_onset_uses_cl_max_and_geometry() -> Result<(), crate::Error> {
+        let model =
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?.with_predicted_stall_onset(1.2, 0.2)?;
+        let slope = 2.0 * PI / (1.0 + 2.0 / (0.8 * 8.0));
+        let expected = 1.2 / slope;
+        let predicted = model.predicted_stall_angle(1.2, 0.0)?;
+        assert!((predicted - expected).abs() < 1e-12);
+        assert!((model.predicted_stall_angle(1.2, 0.0)? - predicted).abs() < 1e-12);
+        assert!(model.coefficients(predicted - 0.01, 0.1)?.lift > 0.0);
+        let higher_ar =
+            FiniteWing::new(12.0, 0.8, 0.02, 0.0, 0.3)?.with_predicted_stall_onset(1.2, 0.2)?;
+        assert!(higher_ar.predicted_stall_angle(1.2, 0.0)? < predicted);
+        let higher_cl =
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?.with_predicted_stall_onset(1.5, 0.2)?;
+        assert!(higher_cl.predicted_stall_angle(1.5, 0.0)? > predicted);
+        let dynamic = model.with_oye_dynamic_stall(1.0, 8.0)?;
+        let mut state = DynamicStallState::default();
+        let static_post = dynamic.coefficients(predicted + 0.1, 0.1)?;
+        let dynamic_post =
+            dynamic.coefficients_dynamic(predicted + 0.1, 0.1, 20.0, 0.01, &mut state)?;
+        assert!(dynamic_post.lift > static_post.lift);
+        assert!(state.separation() < 1.0);
+        for cl_max in [0.0, -1.0, f64::NAN] {
+            assert!(
+                FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?
+                    .with_predicted_stall_onset(cl_max, 0.2)
+                    .is_err()
+            );
+        }
+        assert!(
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?
+                .with_predicted_stall_onset(1.2, 0.0)
+                .is_err()
+        );
+        assert!(
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?
+                .with_predicted_stall_onset(1e6, 0.2)
+                .is_err()
+        );
+        assert_eq!(
+            model.predicted_stall_angle(1.2, f64::NAN),
+            Err(crate::Error::from(WingError::InvalidParameters))
+        );
         Ok(())
     }
 
