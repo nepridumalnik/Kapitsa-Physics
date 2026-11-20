@@ -236,36 +236,55 @@ fn normalize(values: [f64; 3]) -> Result<[f64; 3], crate::Error> {
     Ok(scaled)
 }
 
-pub(super) fn distance(values: [f64; 3], point: Vec3) -> Result<f64, crate::Error> {
-    // Evaluate the barycentric form with compensated products and sums.
-    // This reduces cancellation but does not establish an exact sign bound.
+pub(super) fn distance(
+    values: [f64; 3],
+    point: Vec3,
+    mut charge: impl FnMut(usize) -> Result<(), crate::Error>,
+) -> Result<f64, crate::Error> {
+    if !values.iter().all(|value| value.is_finite()) || !point.is_finite() {
+        return Err(GeometryError::ArithmeticOverflow.into());
+    }
     let x = values[1] - values[0];
     let y = values[2] - values[0];
     let x_virtual = x - values[1];
     let y_virtual = y - values[2];
     let x_error = (values[1] - (x - x_virtual)) - (values[0] + x_virtual);
     let y_error = (values[2] - (y - y_virtual)) - (values[0] + y_virtual);
-    let checked_product = |a: f64, b: f64| {
-        let product = a * b;
-        if a != 0.0 && b != 0.0 && product == 0.0 {
-            Err(crate::Error::from(GeometryError::PrecisionLoss))
-        } else {
-            Ok(product)
-        }
-    };
-    let xp = checked_product(x, point.x)?;
-    let yp = checked_product(y, point.y)?;
-    let xc = checked_product(x_error, point.x)?;
-    let yc = checked_product(y_error, point.y)?;
+    let xp = x * point.x;
+    let yp = y * point.y;
+    let xc = x_error * point.x;
+    let yc = y_error * point.y;
     let xr = x.mul_add(point.x, -xp);
     let yr = y.mul_add(point.y, -yp);
     let sum = values[0] + xp;
     let v = sum - values[0];
-    let residual = (values[0] - (sum - v)) + (xp - v);
+    let x_sum_error = (values[0] - (sum - v)) + (xp - v);
     let result = sum + yp;
     let v = result - sum;
-    let residual = residual + ((sum - (result - v)) + (yp - v));
-    finite(result + (residual + xr + yr + xc + yc))
+    let y_sum_error = (sum - (result - v)) + (yp - v);
+    let corrections = [x_sum_error, y_sum_error, xr, yr, xc, yc];
+    let value = result + corrections.iter().sum::<f64>();
+    let correction_size: f64 = corrections.iter().map(|value| value.abs()).sum();
+
+    // Below this product magnitude a binary64 product's exact low bits may
+    // extend below the subnormal range, so its FMA residual may round.
+    const MIN_PRODUCT: f64 = f64::MIN_POSITIVE / (f64::EPSILON * f64::EPSILON);
+    let small_product = [
+        (x, point.x, xp),
+        (y, point.y, yp),
+        (x_error, point.x, xc),
+        (y_error, point.y, yc),
+    ]
+    .into_iter()
+    .any(|(a, b, product)| a != 0.0 && b != 0.0 && product.abs() < MIN_PRODUCT);
+    if !small_product
+        && value.is_finite()
+        && (correction_size == 0.0 || value.abs() > 16.0 * f64::EPSILON * correction_size)
+    {
+        return Ok(value);
+    }
+    charge(exact_orientation::AFFINE_WORK)?;
+    exact_orientation::affine(values, point)
 }
 
 impl Shadow {
@@ -471,13 +490,17 @@ impl Shadow {
         Ok(Some(Self { planes, coplanar }))
     }
 
-    pub fn covers(&self, point: Vec3) -> Result<bool, crate::Error> {
+    pub fn covers(
+        &self,
+        point: Vec3,
+        mut charge: impl FnMut(usize) -> Result<(), crate::Error>,
+    ) -> Result<bool, crate::Error> {
         for plane in &self.planes[..3] {
-            if distance(*plane, point)? < 0.0 {
+            if distance(*plane, point, &mut charge)? < 0.0 {
                 return Ok(false);
             }
         }
-        Ok(self.coplanar || distance(self.planes[3], point)? > 0.0)
+        Ok(self.coplanar || distance(self.planes[3], point, charge)? > 0.0)
     }
 }
 
@@ -581,6 +604,16 @@ pub(super) fn triangle_fraction(
 mod tests {
     use super::*;
     use crate::aerodynamics::geometry::GeometryOwner;
+
+    fn distance(values: [f64; 3], point: Vec3) -> Result<f64, crate::Error> {
+        super::distance(values, point, |_| Ok(()))
+    }
+
+    impl Shadow {
+        fn covers_without_budget(&self, point: Vec3) -> Result<bool, crate::Error> {
+            self.covers(point, |_| Ok(()))
+        }
+    }
 
     fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, crate::Error> {
         super::triangle_fraction(points, |_| Ok(()))
@@ -716,26 +749,47 @@ mod tests {
     }
 
     #[test]
-    fn affine_distance_rejects_coefficient_correction_underflow() {
+    fn affine_distance_recovers_after_coefficient_correction_underflow() {
         let smallest = f64::from_bits(1);
         // 1 - smallest rounds to 1; its exact residual is nonzero but its
         // product with one half cannot be represented in binary64.
-        assert_eq!(
-            distance([smallest, 1.0, 0.0], Vec3::X * 0.5),
-            Err(crate::Error::from(GeometryError::PrecisionLoss))
-        );
+        assert_eq!(distance([smallest, 1.0, 0.0], Vec3::X * 0.5), Ok(0.5));
     }
 
     #[test]
-    fn shadow_coverage_rejects_nonfinite_distance() {
+    fn shadow_coverage_recovers_from_intermediate_overflow() {
         let shadow = Shadow {
             planes: [[f64::MAX, -f64::MAX, 0.0]; 4],
             coplanar: false,
         };
         assert_eq!(
-            shadow.covers(Vec3::X),
+            shadow.covers_without_budget(Vec3::X * 2.0),
             Err(crate::Error::from(GeometryError::ArithmeticOverflow))
         );
+        assert_eq!(shadow.covers_without_budget(Vec3::X), Ok(false));
+    }
+
+    #[test]
+    fn affine_distance_precharges_exact_recovery_of_subnormal_sum() -> Result<(), crate::Error> {
+        let smallest = f64::from_bits(1);
+        let values = [0.0, smallest, smallest];
+        let point = (Vec3::X + Vec3::Y) * 0.5;
+        let mut work = 0;
+        assert_eq!(
+            super::distance(values, point, |amount| {
+                work += amount;
+                Ok(())
+            })?,
+            smallest
+        );
+        assert_eq!(work, exact_orientation::AFFINE_WORK);
+        assert_eq!(
+            super::distance(values, point, |_| Err(
+                GeometryError::WorkBudgetExceeded.into()
+            )),
+            Err(GeometryError::WorkBudgetExceeded.into())
+        );
+        Ok(())
     }
 
     #[test]
@@ -891,7 +945,9 @@ mod tests {
                                 blocker.vertices,
                             )?;
                             assert_eq!(
-                                shadow.as_ref().is_some_and(|s| s.covers(point).unwrap()),
+                                shadow
+                                    .as_ref()
+                                    .is_some_and(|s| s.covers_without_budget(point).unwrap()),
                                 expected
                             );
                         }
@@ -924,7 +980,7 @@ mod tests {
         };
         let shadow = Shadow::new(&source, &blocker, 0, 1, Vec3::X, |_| Ok(()))?
             .ok_or(GeometryError::PrecisionLoss)?;
-        assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
+        assert!(shadow.covers_without_budget(Vec3::new(0.25, 0.25, 0.0))?);
         Ok(())
     }
 
@@ -948,7 +1004,7 @@ mod tests {
                 };
                 let shadow = Shadow::new(&source, &blocker, 0, 1, upstream, |_| Ok(()))?
                     .ok_or(GeometryError::PrecisionLoss)?;
-                assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
+                assert!(shadow.covers_without_budget(Vec3::new(0.25, 0.25, 0.0))?);
                 assert!(Shadow::new(&source, &blocker, 0, 1, -upstream, |_| Ok(()))?.is_none());
             }
         }
@@ -969,7 +1025,7 @@ mod tests {
         };
         let shadow = Shadow::new(&source, &blocker, 0, 1, Vec3::X, |_| Ok(()))?
             .ok_or(GeometryError::PrecisionLoss)?;
-        assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
+        assert!(shadow.covers_without_budget(Vec3::new(0.25, 0.25, 0.0))?);
         assert!(Shadow::new(&source, &blocker, 0, 1, -Vec3::X, |_| Ok(()))?.is_none());
         Ok(())
     }
@@ -1015,7 +1071,7 @@ mod tests {
         };
         let shadow = Shadow::new(&source, &blocker, 0, 1, Vec3::Z, |_| Ok(()))?
             .ok_or(GeometryError::PrecisionLoss)?;
-        assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
+        assert!(shadow.covers_without_budget(Vec3::new(0.25, 0.25, 0.0))?);
         Ok(())
     }
 
@@ -1037,7 +1093,7 @@ mod tests {
         };
         let shadow = Shadow::new(&source, &blocker, 0, 1, Vec3::Z, |_| Ok(()))?
             .ok_or(GeometryError::PrecisionLoss)?;
-        assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
+        assert!(shadow.covers_without_budget(Vec3::new(0.25, 0.25, 0.0))?);
         Ok(())
     }
 
@@ -1056,7 +1112,7 @@ mod tests {
         };
         let shadow = Shadow::new(&source, &blocker, 0, 1, Vec3::X, |_| Ok(()))?
             .ok_or(GeometryError::PrecisionLoss)?;
-        assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
+        assert!(shadow.covers_without_budget(Vec3::new(0.25, 0.25, 0.0))?);
         assert!(Shadow::new(&source, &blocker, 0, 1, -Vec3::X, |_| Ok(()))?.is_none());
         Ok(())
     }
@@ -1082,8 +1138,8 @@ mod tests {
             })?
             .ok_or(GeometryError::PrecisionLoss)?;
             assert!(work >= 4 * exact_orientation::PROJECTED_WORK);
-            assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
-            assert!(!shadow.covers(Vec3::new(0.75, 0.25, 0.0))?);
+            assert!(shadow.covers_without_budget(Vec3::new(0.25, 0.25, 0.0))?);
+            assert!(!shadow.covers_without_budget(Vec3::new(0.75, 0.25, 0.0))?);
         }
         Ok(())
     }
@@ -1112,7 +1168,7 @@ mod tests {
         })?
         .ok_or(GeometryError::PrecisionLoss)?;
         assert_eq!(work, 3 * exact_orientation::WORK);
-        assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
+        assert!(shadow.covers_without_budget(Vec3::new(0.25, 0.25, 0.0))?);
         Ok(())
     }
 }

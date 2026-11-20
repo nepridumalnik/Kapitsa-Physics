@@ -600,11 +600,14 @@ budget as at the hard cap and returns `WorkBudgetExceeded` one unit below.
 Separate regressions cover ordinary clipping, multiple shadows and the final
 frame conversion boundary.
 
-Affine shadow-plane distance evaluation uses compensated products and sums to
-reduce cancellation near a boundary. This corrects one previously demonstrated
-cases but does not guarantee the exact sign: residual calculations are rounded
-and extreme values may underflow. Adaptive orientation predicates alone do not
-guarantee correct clipping classification or intersection construction.
+Affine shadow-plane distance evaluation uses compensated products and sums.
+When cancellation is comparable to the rounding of those corrections, or an
+intermediate product can underflow in its low bits, preparation precharges
+912 units and evaluates the five signed terms exactly. Intermediate overflow
+also selects this path. The result rounds once at its original scale.
+A nonzero distance rounding to zero remains a precision error. This applies
+to the stored coefficients and vertices. Constructed intersection coordinates
+still round to binary64.
 
 Even an exact equality of the total partition area and the original area is
 only a necessary consistency check: overlap and missing coverage can cancel.

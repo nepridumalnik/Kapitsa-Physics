@@ -13,6 +13,7 @@ const LIMBS: usize = 99;
 // carry writes per payload are possible amortized across a determinant.
 pub(super) const WORK: usize = 24 * 6 * 4 + 8 * LIMBS;
 pub(super) const PROJECTED_WORK: usize = 18 * 6 * 4 + 8 * LIMBS;
+pub(super) const AFFINE_WORK: usize = 5 * 6 * 4 + 8 * LIMBS;
 
 #[derive(Clone, Copy)]
 struct Factor {
@@ -110,7 +111,10 @@ impl Determinant {
                 add_product(&mut sums, [x, b[k], c[j]], !negative);
             }
         }
-        let [positive, negative] = sums;
+        Self::difference(sums)
+    }
+
+    fn difference([positive, negative]: [Limbs; 2]) -> Self {
         let sign = positive.iter().rev().cmp(negative.iter().rev()).is_lt();
         let (mut magnitude, smaller) = if sign {
             (negative, positive)
@@ -166,6 +170,29 @@ impl Determinant {
 
 fn factors(point: Vec3) -> [Factor; 3] {
     components(point).map(Factor::new)
+}
+
+pub(super) fn affine(values: [f64; 3], point: Vec3) -> Result<f64, crate::Error> {
+    let [a, b, c] = values.map(Factor::new);
+    let x = Factor::new(point.x);
+    let y = Factor::new(point.y);
+    let one = Factor::new(1.0);
+    let mut sums = [[0; LIMBS]; 2];
+    for (product, negative) in [
+        ([a, one, one], false),
+        ([b, x, one], false),
+        ([a, x, one], true),
+        ([c, y, one], false),
+        ([a, y, one], true),
+    ] {
+        add_product(&mut sums, product, negative);
+    }
+    let determinant = Determinant::difference(sums);
+    if let Some(leading) = determinant.leading_bit() {
+        determinant.scaled(leading, -MIN_EXPONENT)
+    } else {
+        Ok(0.0)
+    }
 }
 
 pub(super) fn area_fraction(points: [Vec3; 3]) -> Result<f64, crate::Error> {
