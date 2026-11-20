@@ -393,7 +393,7 @@ mod tests {
     // uses a fixed viscosity exponent and omits rarefaction and wall heating.
     // The two grids do not provide a complete DNS uncertainty estimate.
     #[test]
-    fn compare_nagata_dns_grid_resolutions() {
+    fn compare_nagata_dns_grid_resolutions() -> Result<(), crate::Error> {
         for (re, mach, base, fine) in [
             (300.0, 0.3, 0.6587, 0.6644),
             (300.0, 2.0, 1.452, 1.458),
@@ -402,13 +402,22 @@ mod tests {
             (750.0, 0.3, 0.5078, 0.5085),
             (750.0, 2.0, 1.251, 1.254),
         ] {
-            let predicted = continuum_drag_coefficient(mach, re).unwrap();
+            let predicted = continuum_drag_coefficient(mach, re)?;
             let relative_error = 100.0 * (predicted - fine) / fine;
             println!(
                 "Re={re:.0} M={mach:.1} DNS={base:.4}/{fine:.4} model={predicted:.6} error={relative_error:+.2}%"
             );
+            if mach == MIN_MACH {
+                let cd = incompressible_drag_coefficient(re)?;
+                let error = 100.0 * (cd - fine) / fine;
+                let model_delta = 100.0 * (predicted / cd - 1.0);
+                println!(
+                    "  incompressible={cd:.6} error={error:+.2}% model delta={model_delta:+.2}%"
+                );
+            }
             assert!(predicted.is_finite());
         }
+        Ok(())
     }
 
     #[test]

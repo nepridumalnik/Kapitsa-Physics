@@ -530,6 +530,23 @@ the frontal-area coefficient for Mach 0.3–2, Re 300–10,000 and Kn < 0.01.
 same sampling and geometry assumptions as `IncompressibleSphere`. The two
 variants are selected explicitly and keep their separate Mach domains.
 
+At Mach 0.3 the finer-grid results of [Nagata et al. (2020), table 3](https://doi.org/10.1017/jfm.2020.629)
+give the following comparison for an isolated adiabatic sphere. The
+incompressible values here are diagnostic evaluations outside the world
+model's Mach limit, and the two DNS grids do not establish a full uncertainty.
+
+| Diameter Re | DNS drag coefficient | Incompressible drag coefficient | Compressible drag coefficient |
+| ---: | ---: | ---: | ---: |
+| 300 | 0.6644 | 0.677132 | 0.678455 |
+| 500 | 0.5679 | 0.565924 | 0.576417 |
+| 750 | 0.5085 | 0.499938 | 0.516344 |
+
+The compressible coefficient exceeds the incompressible coefficient by
+0.20–3.28% across these points. At Mach 2 the compressible model underpredicts
+the same study's finer-grid drag by 8.26–9.36% at these Reynolds numbers.
+Table 3 starts at Mach 0.3 and does not establish a transition law between
+the two world models.
+
 ## Skin friction
 
 For a laminar flat plate, the local Blasius relation is `c_f(x) = 0.664 / sqrt(Re_x)`. Integrating from the leading edge to plate length `L` gives the streamwise average `C_f = 1.328 / sqrt(Re_L)`. The distinction between local and averaged coefficients matters when summing sections.
