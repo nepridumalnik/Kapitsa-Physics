@@ -1617,6 +1617,29 @@ mod tests {
     }
 
     #[test]
+    fn compare_compressible_friction_with_flat_plate_local_measurements() -> Result<(), crate::Error>
+    {
+        // NACA TN 3486, table I. Differentiate x * Cf_mean at fixed Mach
+        // to compare local shear with local shear. Re_x is measured from
+        // the trip, so this is a diagnostic, not an acceptance tolerance.
+        let friction = SkinFriction::compressible_turbulent(1.8e-5, 1e6, 1e8)?;
+        for (mach, reynolds, measured) in [
+            (0.65, 1.00e6, 0.00330),
+            (0.75, 1.03e6, 0.00301),
+            (0.85, 1.12e6, 0.00301),
+        ] {
+            let mean = friction.mean_coefficient(reynolds, mach)?;
+            let local = mean * (1.0 - 2.58 / reynolds.ln());
+            let error = 100.0 * (local / measured - 1.0);
+            println!(
+                "Mach={mach:.2} Re_x={reynolds:.0} local={local:.6} measured={measured:.6} error={error:+.2}%"
+            );
+            assert!(local > 0.0 && local < mean);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn compressible_turbulent_friction_applies_high_subsonic_loads() -> Result<(), crate::Error> {
         let mut s = section(Vec3::ZERO);
         s.axial_cd = 0.0;

@@ -201,7 +201,18 @@ turbulent boundary layer, opt into `SkinFriction::compressible_turbulent`.
 It uses [the corrected Schlichting correlation, equation (51)](https://ntrs.nasa.gov/api/citations/20000069005/downloads/20000069005.pdf)
 with axial Mach, a total Mach limit of 0.95, and caller-supplied inclusive Re
 bounds within 1–100 million. These are implementation limits. The model
-does not infer transition, pressure gradients or surface roughness. Vacuum and fully disabled loads
+does not infer transition, pressure gradients or surface roughness.
+
+For a diagnostic comparison with the local shear measurements in
+[NACA TN 3486, table I](https://ntrs.nasa.gov/api/citations/19930084308/downloads/19930084308.pdf),
+differentiate `x Cf_mean` at fixed Mach and constant freestream properties.
+The resulting local coefficient overpredicts the three measured points at
+Mach 0.65, 0.75 and 0.85 by 6.03%, 14.25% and 11.11%, respectively. The table
+uses Reynolds number based on distance from the trip. Its Mach 0.97 point
+has a supersonic region near the leading edge, outside the model assumptions.
+These data do not establish an extension of the mean-friction model across Mach 1.
+
+Vacuum and fully disabled loads
 still skip these domain checks.
 
 Finite kinematics and positive finite sound speed are validated even in vacuum
