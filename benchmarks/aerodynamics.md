@@ -281,3 +281,8 @@ The wide projected-edge fixture measured 6.38 us (6.35 to 6.56 us).
 Selective coefficient refinement on `3144d7c` measured medians of
 20.88 us and 1.319 ms on the small and moderate fixtures. The wide
 projected-edge fixture measured 6.17 us (6.11 to 6.19 us).
+
+The affine distance fallback revision `8607c83` measured medians of
+21.07 us and 1.307 ms on the small and moderate fixtures. The wide
+projected-edge fixture measured 6.03 us (5.98 to 6.20 us). These runs
+do not isolate the exact affine fallback.

@@ -11,7 +11,8 @@ exact inclined depth fallback, `aec8f8d` for absolute-scale triangle-area
 fallback, `d5624ae` for exact projection from original vertex coordinates, and
 `b449468` for early exact projection when subtraction erases a nonzero operand,
 `e3cb8b5` for selective exact rechecks of zero projected determinants, and
-`3144d7c` for selective exact affine coefficients and amortized carry charges.
+`3144d7c` for selective exact affine coefficients and amortized carry charges,
+and `8607c83` for precharged exact evaluation of uncertain affine distances.
 
 ## Scope
 
@@ -86,7 +87,24 @@ This change covers:
   initialization;
 - recording synthetic cancellation, subnormal rounding and precharge budget
   rejection scenarios, without claiming execution or physical validation;
-- excluding exact integer depth work from the area consistency tolerance;
+- retaining compensated affine distance evaluation when accepted; cancellation
+  comparable to correction rounding, possible product low-bit underflow or
+  intermediate overflow selects exact evaluation in clipping and coverage;
+- precharging `5*6*4 + 8*99 = 912` regular surface-work units before accumulating
+  `a + b*x - a*x + c*y - a*y` exactly from stored binary64 coefficients
+  `[a,b,c]` and point `(x,y)` in fixed, allocation-free 99-word accumulators;
+  rounding once, ties to even, at the original scale; preserving representable
+  subnormals, returning `PrecisionLoss` for a nonzero result rounding to zero
+  and `ArithmeticOverflow` for non-finite inputs or unrepresentable overflow;
+- recording `8607c83` synthetic regressions for coefficient-correction
+  underflow recovery, intermediate-overflow recovery and rejection, smallest
+  subnormal sum recovery with exactly 912 charged units, and rejected precharge,
+  without claiming test execution or independent physical validation;
+- limiting exact affine evaluation to stored coefficients and points, not
+  unrounded geometry; constructed intersection coordinates still round to
+  binary64 and accepted fast paths have no global numeric error bound;
+- excluding all charged exact evaluation work from the area consistency
+  tolerance, including affine distance work;
 - preserving representable shadow intersections when finite floating-point
   distance or coordinate differences would overflow during intersection
   arithmetic;

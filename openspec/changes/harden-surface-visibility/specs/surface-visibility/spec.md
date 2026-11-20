@@ -216,12 +216,64 @@ global numeric error bound.
 - **AND** this is a synthetic assertion, not execution evidence or independent
   physical validation
 
+### Requirement: Recover uncertain affine distances exactly
+
+Cancellation near correction rounding, possible product low-bit underflow or
+intermediate overflow SHALL select precharged exact affine evaluation from stored
+coefficients and points. Results SHALL round once, ties to even, at original scale;
+nonzero-to-zero SHALL return `PrecisionLoss`, overflow `ArithmeticOverflow`.
+Intersection coordinates remain binary64-rounded.
+
+#### Scenario: Uncertain clipping or coverage distance selects exact evaluation
+
+- **WHEN** compensated affine distance evaluation encounters cancellation
+  comparable to correction rounding, possible product low-bit underflow or
+  intermediate overflow during clipping or shadow coverage
+- **THEN** preparation charges 912 regular surface-work units before evaluating
+  `a + b*x - a*x + c*y - a*y` exactly from stored binary64 coefficients
+  `[a,b,c]` and point `(x,y)`
+- **AND** rejected precharge returns `WorkBudgetExceeded` before exact work;
+  accepted compensated evaluations retain the fast path
+- **AND** exactness concerns the stored inputs, not unrounded geometry or exact
+  intersection coordinates; accepted fast paths have no global numeric error bound
+
+#### Scenario: Synthetic coefficient-correction underflow recovers
+
+- **WHEN** `affine_distance_recovers_after_coefficient_correction_underflow`
+  evaluates `[m,1,0]` at `X*0.5`, where `m` is the smallest positive binary64
+  subnormal
+- **THEN** the unrepresentable half-subnormal correction no longer causes
+  rejection; the exact affine result rounds to `0.5`
+- **AND** this is a synthetic assertion, not execution evidence or independent
+  physical validation
+
+#### Scenario: Synthetic intermediate overflow recovers or remains an error
+
+- **WHEN** `shadow_coverage_recovers_from_intermediate_overflow` uses four planes
+  `[f64::MAX,-f64::MAX,0]` with noncoplanar coverage
+- **THEN** point `X` returns uncovered after exact recovery despite overflowing
+  coefficient subtraction, while `2*X` returns `ArithmeticOverflow`
+- **AND** non-finite stored coefficients or points remain `ArithmeticOverflow`
+- **AND** this is a synthetic assertion, not execution evidence or independent
+  physical validation
+
+#### Scenario: Synthetic subnormal sum precharges exact recovery
+
+- **WHEN** `affine_distance_precharges_exact_recovery_of_subnormal_sum` evaluates
+  `[0,m,m]` at `(X+Y)*0.5`, with smallest positive binary64 subnormal `m`
+- **THEN** the two half-subnormal terms sum exactly to `m`, which is preserved,
+  and the recorded exact charge is 912 units
+- **AND** rejected precharge returns `WorkBudgetExceeded`; a nonzero exact
+  distance rounding to zero remains `PrecisionLoss`, not a boundary zero
+- **AND** these are synthetic assertions, not execution evidence or independent
+  physical validation
+
 ### Requirement: Precharge exact work with amortized carry bounds
 
 Exact projected determinants SHALL precharge `18*6*4 + 8*99 = 1,224` units;
-other exact determinants SHALL precharge `24*6*4 + 8*99 = 1,368` units.
-These charges SHALL include initialization, fixed scans and amortized carry
-propagation, not an exact instruction or elapsed-time bound.
+other determinants `24*6*4 + 8*99 = 1,368`; affine distances
+`5*6*4 + 8*99 = 912`. Charges SHALL include initialization, fixed scans and
+amortized carries, not an exact instruction or elapsed-time bound.
 
 #### Scenario: Intermediate carries consume all-ones limbs
 
@@ -232,6 +284,8 @@ propagation, not an exact instruction or elapsed-time bound.
   two per payload amortized across a determinant, giving four writes per payload
 - **AND** projected determinants have at most 18 terms and other determinants
   at most 24; both include `8*99` units for scans and initialization
+- **AND** exact affine distances have five signed terms in the same fixed
+  99-word accumulators, giving `5*6*4 + 8*99 = 912` units
 
 ### Requirement: Recover absolute-scale triangle areas
 
@@ -278,13 +332,15 @@ and precision loss SHALL remain errors, not missed intersections.
 Reconstructed pieces SHALL conserve source-local barycentric area. The check
 SHALL use a documented heuristic tolerance, not a proven error bound, based
 on current partition work including the initial triangle, not prior sources
-or global preprocessing.
+or global preprocessing. Charged exact evaluation work SHALL be excluded.
 
 #### Scenario: A source triangle is split into clipping pieces
 
 - **WHEN** the reconstructed piece fractions are summed
 - **THEN** the sum is compared with that source's initial visible fraction
   using the source-local heuristic allowance
+- **AND** charged exact work, including affine distance evaluation in clipping
+  and coverage, is excluded from the roundoff allowance
 
 #### Scenario: The reconstructed area is inconsistent
 

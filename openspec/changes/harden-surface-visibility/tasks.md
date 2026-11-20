@@ -112,3 +112,20 @@
   physical validation; record budget rejection at 15,069 units.
 - [x] Retain rounded fast-path limitations without claiming a global numeric
   error bound.
+- [x] Record `8607c83`: cancellation comparable to correction rounding, possible
+  product low-bit underflow or intermediate overflow selects exact affine
+  distance evaluation from stored coefficients and points in clipping and
+  coverage; retain the accepted compensated fast path.
+- [x] Record precharge of `5*6*4 + 8*99 = 912` regular surface-work units before
+  exact accumulation of `a + b*x - a*x + c*y - a*y`; rejected precharge returns
+  `WorkBudgetExceeded` before exact work. Exclude exact affine work from the
+  source-partition roundoff allowance.
+- [x] Record one ties-to-even rounding at the original scale, representable
+  subnormal preservation, nonzero-to-zero `PrecisionLoss` and non-finite input
+  or unrepresentable-overflow `ArithmeticOverflow`; do not claim exact
+  intersection coordinates or unrounded geometry.
+- [x] Document `affine_distance_recovers_after_coefficient_correction_underflow`,
+  `shadow_coverage_recovers_from_intermediate_overflow` and
+  `affine_distance_precharges_exact_recovery_of_subnormal_sum`, including the
+  912-unit charge and rejected precharge, as synthetic assertions only, without
+  claiming test execution or independent physical validation.
