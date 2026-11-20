@@ -112,7 +112,10 @@ mod aerodynamics {
                     world.part_aerodynamic_geometry.as_ref(),
                     &world.colliders,
                     &mut assembly_cache,
-                    atmosphere,
+                    super::assembly_aerodynamics::AssemblyEnvironment {
+                        atmosphere,
+                        oriented_cavities: world.preserve_assembly_mesh_cavities,
+                    },
                 )?;
                 let mut body = entry.body.motion();
                 let mut wave_cache = crate::aerodynamics::cache::PreparedGeometryCache::default();
@@ -851,6 +854,7 @@ pub struct PhysicsWorld {
     /// The default is 340 m/s; callers should set this for their atmosphere.
     mesh_sound_speed: f64,
     preserve_body_mesh_cavities: bool,
+    preserve_assembly_mesh_cavities: bool,
     aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
     part_hull_published: Vec<PartHullWrench>,
     part_hull_pending: Vec<PartHullWrench>,
@@ -1581,6 +1585,7 @@ impl PhysicsWorld {
             atmosphere: Atmosphere::Vacuum,
             mesh_sound_speed: 340.0,
             preserve_body_mesh_cavities: false,
+            preserve_assembly_mesh_cavities: false,
             aerodynamics_body_updates: Vec::new(),
             part_hull_published: Vec::new(),
             part_hull_pending: Vec::new(),
@@ -1657,6 +1662,16 @@ impl PhysicsWorld {
     /// uses the new rule, with the existing voxel and work budgets.
     pub fn set_body_mesh_oriented_cavities(&mut self, enabled: bool) {
         self.preserve_body_mesh_cavities = enabled;
+    }
+
+    /// Selects oriented cavity handling for assembly geometry. The default is
+    /// solid fill. Changing the rule discards derived occupancy, wing shielding
+    /// and wave data so the next preparation uses consistent geometry.
+    pub fn set_assembly_mesh_oriented_cavities(&mut self, enabled: bool) {
+        if self.preserve_assembly_mesh_cavities != enabled {
+            self.preserve_assembly_mesh_cavities = enabled;
+            self.assembly_aerodynamics = None;
+        }
     }
 
     /// Returns the uniform Mesh/Colliders sound speed in m/s.
@@ -4152,7 +4167,10 @@ impl PhysicsWorld {
                 self.part_aerodynamic_geometry.as_ref(),
                 &self.colliders,
                 &mut self.assembly_aerodynamics,
-                atmosphere,
+                assembly_aerodynamics::AssemblyEnvironment {
+                    atmosphere,
+                    oriented_cavities: self.preserve_assembly_mesh_cavities,
+                },
             )?;
             let (mut mesh_patches, assembly_wave, wing_visibility) = match assembly_prepared {
                 Some(prepared) => (
@@ -5956,7 +5974,10 @@ impl PhysicsWorld {
                                     self.part_aerodynamic_geometry.as_ref(),
                                     &self.colliders,
                                     &mut temporary_assembly,
-                                    atmosphere,
+                                    assembly_aerodynamics::AssemblyEnvironment {
+                                        atmosphere,
+                                        oriented_cavities: self.preserve_assembly_mesh_cavities,
+                                    },
                                 )
                             } else {
                                 Ok(None)

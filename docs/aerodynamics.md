@@ -50,6 +50,9 @@ The existing `prepare` entry point and automatic world preparation default to
 solid fill. `PhysicsWorld::set_body_mesh_oriented_cavities(true)` enables the
 alternative for primary `Mesh` and `Colliders` geometry on non-cluster bodies.
 Changing the rule rebuilds prepared occupancy on the next step that uses it.
+`PhysicsWorld::set_assembly_mesh_oriented_cavities(true)` enables the same rule
+for assembly geometry used by pressure, wave drag and wing shielding. The rule
+is applied to each source instance before composing the assembly's union.
 
 References for geometric concepts: [Voxel](https://en.wikipedia.org/wiki/Voxel), [Hyperplane separation theorem — separating axis theorem](https://en.wikipedia.org/wiki/Hyperplane_separation_theorem), [Flood fill](https://en.wikipedia.org/wiki/Flood_fill). No FAR implementation code is used.
 

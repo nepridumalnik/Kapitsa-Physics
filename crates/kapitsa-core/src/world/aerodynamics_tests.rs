@@ -13,9 +13,7 @@ fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepEr
     result.as_ref().err().and_then(|error| error.downcast_ref())
 }
 
-#[test]
-fn world_rebuilds_body_mesh_occupancy_after_cavity_policy_switch()
--> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn hollow_box_mesh() -> Result<TriangleMesh, crate::Error> {
     use crate::{
         aerodynamics::colliders::{ColliderTessellation, collider_mesh},
         collider::Collider,
@@ -52,6 +50,12 @@ fn world_rebuilds_body_mesh_occupancy_after_cavity_policy_switch()
             faces.push(indices);
         }
     }
+    TriangleMesh::new(vertices, faces)
+}
+
+#[test]
+fn world_rebuilds_body_mesh_occupancy_after_cavity_policy_switch()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut world = PhysicsWorld::new();
     world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
         1.0,
@@ -59,7 +63,7 @@ fn world_rebuilds_body_mesh_occupancy_after_cavity_policy_switch()
     )?));
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
     let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
-    body.set_aerodynamics(Aerodynamics::Mesh(TriangleMesh::new(vertices, faces)?));
+    body.set_aerodynamics(Aerodynamics::Mesh(hollow_box_mesh()?));
     let id = world.add_body(body)?;
     for enabled in [false, true, false] {
         world.set_body_mesh_oriented_cavities(enabled);
