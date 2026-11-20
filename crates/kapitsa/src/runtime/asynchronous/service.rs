@@ -168,6 +168,7 @@ impl OwnedRuntime {
 pub struct SimulationBuilder {
     atmosphere: Atmosphere,
     mesh_sound_speed: Option<f64>,
+    oriented_aerodynamic_cavities: bool,
     config: SimulationConfig,
     invalid_worker_count: bool,
     time_horizon: Option<Duration>,
@@ -238,6 +239,14 @@ impl SimulationBuilder {
         self
     }
 
+    /// Preserves resolved cavities bounded by oppositely oriented walls in
+    /// body and assembly aerodynamic meshes. Defaults to `false` (solid fill).
+    /// Example: `Simulation::builder().oriented_aerodynamic_cavities(true)`.
+    pub fn oriented_aerodynamic_cavities(mut self, enabled: bool) -> Self {
+        self.oriented_aerodynamic_cavities = enabled;
+        self
+    }
+
     /// Sets the base physics frequency in hertz.
     /// Sets the base simulation frequency in Hz.
     #[must_use]
@@ -269,6 +278,8 @@ impl SimulationBuilder {
         let mut world = PhysicsWorld::new();
         world.set_atmosphere(self.atmosphere);
         world.set_central_gravity(self.central_gravity);
+        world.set_body_mesh_oriented_cavities(self.oriented_aerodynamic_cavities);
+        world.set_assembly_mesh_oriented_cavities(self.oriented_aerodynamic_cavities);
         if let Some(sound_speed) = self.mesh_sound_speed {
             world
                 .set_mesh_sound_speed(sound_speed)
@@ -292,6 +303,8 @@ impl SimulationBuilder {
         let mut world = PhysicsWorld::new();
         world.set_atmosphere(self.atmosphere);
         world.set_central_gravity(self.central_gravity);
+        world.set_body_mesh_oriented_cavities(self.oriented_aerodynamic_cavities);
+        world.set_assembly_mesh_oriented_cavities(self.oriented_aerodynamic_cavities);
         if let Some(sound_speed) = self.mesh_sound_speed {
             world
                 .set_mesh_sound_speed(sound_speed)
@@ -1363,7 +1376,8 @@ mod tests {
                 .atmosphere(atmosphere)
                 .frequency(100)
                 .time_horizon(Duration::ZERO)
-                .mesh_sound_speed(295.0);
+                .mesh_sound_speed(295.0)
+                .oriented_aerodynamic_cavities(true);
             let mut simulation = if rayon {
                 builder.spawn_on_rayon(std::sync::Arc::new(
                     rayon::ThreadPoolBuilder::new().num_threads(1).build()?,

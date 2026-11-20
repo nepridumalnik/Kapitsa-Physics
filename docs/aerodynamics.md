@@ -53,6 +53,8 @@ Changing the rule rebuilds prepared occupancy on the next step that uses it.
 `PhysicsWorld::set_assembly_mesh_oriented_cavities(true)` enables the same rule
 for assembly geometry used by pressure, wave drag and wing shielding. The rule
 is applied to each source instance before composing the assembly's union.
+`Simulation::builder().oriented_aerodynamic_cavities(true)` enables both
+settings at startup on Tokio and Rayon.
 
 References for geometric concepts: [Voxel](https://en.wikipedia.org/wiki/Voxel), [Hyperplane separation theorem — separating axis theorem](https://en.wikipedia.org/wiki/Hyperplane_separation_theorem), [Flood fill](https://en.wikipedia.org/wiki/Flood_fill). No FAR implementation code is used.
 
