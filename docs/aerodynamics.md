@@ -526,7 +526,9 @@ The separate `sphere_drag::continuum_drag_force` uses the continuum component
 of [Singh et al.](https://arxiv.org/abs/2012.04813v1), equations 5–13 and 23–26.
 It derives Mach and diameter Reynolds number from local flow inputs and applies
 the frontal-area coefficient for Mach 0.3–2, Re 300–10,000 and Kn < 0.01.
-It is available as a force evaluator with no automatic transition between models.
+`Aerodynamics::ContinuumSphere` applies this force during stepping with the
+same sampling and geometry assumptions as `IncompressibleSphere`. The two
+variants are selected explicitly and keep their separate Mach domains.
 
 ## Skin friction
 

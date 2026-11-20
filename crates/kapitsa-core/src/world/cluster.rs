@@ -563,7 +563,7 @@ impl PhysicsWorld {
             || body_entry.body.potential_sphere.is_some()
             || matches!(
                 body_entry.body.aerodynamics(),
-                Aerodynamics::IncompressibleSphere(_)
+                Aerodynamics::IncompressibleSphere(_) | Aerodynamics::ContinuumSphere(_)
             )
         {
             return Err(crate::Error::from(ClusterError::UnsupportedGeometry));
@@ -2275,6 +2275,7 @@ impl PhysicsWorld {
             Aerodynamics::Mesh(_)
             | Aerodynamics::VoxelWave(_)
             | Aerodynamics::IncompressibleSphere(_)
+            | Aerodynamics::ContinuumSphere(_)
             | Aerodynamics::Colliders
             | Aerodynamics::Wing(_)
             | Aerodynamics::Wings(_)

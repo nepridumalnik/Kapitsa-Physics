@@ -14,6 +14,47 @@ fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepEr
 }
 
 #[test]
+fn continuum_sphere_uses_relative_mach_and_sonic_drag() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::sphere_drag::{SphereDrag, SphereDragError, continuum_drag_force};
+
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::X * 10.0,
+    )?));
+    world.set_mesh_sound_speed(100.0)?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut sphere = RigidBody::new_dynamic(Transform::identity(), mass)?;
+    sphere.set_linear_velocity(Vec3::X * 110.0)?;
+    let body = world.add_body(sphere)?;
+    world.set_aerodynamics(
+        body,
+        Aerodynamics::ContinuumSphere(SphereDrag::new(0.01, 0.001)?),
+    )?;
+    let expected_force = continuum_drag_force(0.01, 1.0, 0.001, 100.0, Vec3::X * 100.0)?;
+    let dt = 0.001;
+    world.step(dt)?;
+    let velocity = world
+        .body(body)
+        .ok_or("sphere body")?
+        .state()
+        .linear_velocity();
+    assert!((velocity - (Vec3::X * 110.0 + expected_force * dt)).length() < 1e-12);
+
+    world
+        .body_mut(body)
+        .ok_or("sphere body")?
+        .set_linear_velocity(Vec3::X * 220.0)?;
+    let before = world.body(body).ok_or("sphere body")?.motion();
+    assert!(
+        matches!(step_cause(&world.step(dt)), Some(crate::world::StepError::Aerodynamics { cause, .. })
+        if cause.downcast_ref::<SphereDragError>() == Some(&SphereDragError::UnsupportedDomain))
+    );
+    assert_eq!(world.body(body).ok_or("sphere body")?.motion(), before);
+    Ok(())
+}
+
+#[test]
 fn incompressible_sphere_uses_relative_wind_and_rejects_out_of_domain_flow()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::aerodynamics::sphere_drag::{IncompressibleSphereDrag, SphereDragError};

@@ -27,8 +27,12 @@ pub enum Aerodynamics {
     #[default]
     None,
     Simple(AerodynamicProperties),
-    /// Incompressible drag on an isolated, non-cluster sphere.
+    /// Drag on an isolated nonrotating sphere outside a cluster, Mach ≤ 0.2
+    /// and diameter Reynolds number below 200,000 in continuum flow.
     IncompressibleSphere(sphere_drag::IncompressibleSphereDrag),
+    /// Restricted compressible air drag on an isolated nonrotating sphere
+    /// outside a cluster. See [`sphere_drag::continuum_drag_coefficient`].
+    ContinuumSphere(sphere_drag::SphereDrag),
     Wing(wing::WingSurface),
     Wings(Vec<wing::WingSurface>),
     Hull(Vec<hull::HullSection>),
@@ -44,6 +48,10 @@ impl fmt::Debug for Aerodynamics {
             Self::Simple(properties) => formatter.debug_tuple("Simple").field(properties).finish(),
             Self::IncompressibleSphere(model) => formatter
                 .debug_tuple("IncompressibleSphere")
+                .field(model)
+                .finish(),
+            Self::ContinuumSphere(model) => formatter
+                .debug_tuple("ContinuumSphere")
                 .field(model)
                 .finish(),
             Self::Wing(surface) => formatter.debug_tuple("Wing").field(surface).finish(),

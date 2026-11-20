@@ -1725,6 +1725,7 @@ impl PhysicsWorld {
                 crate::aerodynamics::Aerodynamics::Mesh(_)
                     | crate::aerodynamics::Aerodynamics::VoxelWave(_)
                     | crate::aerodynamics::Aerodynamics::IncompressibleSphere(_)
+                    | crate::aerodynamics::Aerodynamics::ContinuumSphere(_)
                     | crate::aerodynamics::Aerodynamics::Colliders
             )
         {
@@ -3338,7 +3339,8 @@ impl PhysicsWorld {
             .world_center_of_mass()
             .map_err(|_| error())?
             .ok_or_else(error)?;
-        if let crate::aerodynamics::Aerodynamics::IncompressibleSphere(model) = primary {
+        use crate::aerodynamics::Aerodynamics::{ContinuumSphere, IncompressibleSphere};
+        if let IncompressibleSphere(model) | ContinuumSphere(model) = primary {
             if cluster.is_some() {
                 return Err(StepError::Aerodynamics {
                     body_id,
@@ -3355,13 +3357,15 @@ impl PhysicsWorld {
                     state.sound_speed().unwrap_or(mesh_sound_speed),
                     body.state().linear_velocity(),
                     body.state().angular_velocity(),
+                    matches!(primary, ContinuumSphere(_)),
                 )
                 .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             body.apply_force(force).map_err(|_| error())?;
         }
         let primary_surface = match primary {
             crate::aerodynamics::Aerodynamics::None
-            | crate::aerodynamics::Aerodynamics::IncompressibleSphere(_)
+            | IncompressibleSphere(_)
+            | ContinuumSphere(_)
             | crate::aerodynamics::Aerodynamics::Wing(_)
             | crate::aerodynamics::Aerodynamics::Wings(_)
             | crate::aerodynamics::Aerodynamics::Hull(_)

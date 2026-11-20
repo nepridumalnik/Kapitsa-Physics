@@ -44,16 +44,19 @@ impl std::error::Error for SphereDragError {}
 
 /// Drag model for a nonrotating sphere centered at the body's center of mass.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct IncompressibleSphereDrag {
+pub struct SphereDrag {
     diameter: f64,
     dynamic_viscosity: f64,
 }
 
-impl IncompressibleSphereDrag {
+/// Parameters for [`super::Aerodynamics::IncompressibleSphere`].
+pub type IncompressibleSphereDrag = SphereDrag;
+
+impl SphereDrag {
     /// Sets diameter in metres and constant dynamic viscosity in Pa·s. Both
-    /// must be finite and positive. The model accepts Mach ≤ 0.2 and diameter
-    /// Reynolds number < 200,000. The caller establishes continuum conditions
-    /// and supplies a sphere whose geometry remains unchanged during the run.
+    /// must be finite and positive. The selected aerodynamic model determines
+    /// the Mach and Reynolds limits. The caller supplies a sphere whose
+    /// geometry remains unchanged during the run.
     pub fn new(diameter: f64, dynamic_viscosity: f64) -> Result<Self, crate::Error> {
         if !diameter.is_finite()
             || diameter <= 0.0
@@ -74,6 +77,7 @@ impl IncompressibleSphereDrag {
         sound_speed: f64,
         linear_velocity: Vec3,
         angular_velocity: Vec3,
+        compressible: bool,
     ) -> Result<Vec3, crate::Error> {
         if atmosphere.density() == 0.0 {
             return Ok(Vec3::ZERO);
@@ -81,10 +85,22 @@ impl IncompressibleSphereDrag {
         let relative_velocity = linear_velocity
             .checked_sub(atmosphere.wind_velocity())
             .ok_or(SphereDragError::ArithmeticOverflow)?;
+        if angular_velocity != Vec3::ZERO {
+            return Err(SphereDragError::UnsupportedDomain.into());
+        }
+        if compressible {
+            return continuum_drag_force(
+                self.diameter,
+                atmosphere.density(),
+                self.dynamic_viscosity,
+                sound_speed,
+                relative_velocity,
+            );
+        }
         let speed = relative_velocity
             .checked_length()
             .ok_or(SphereDragError::ArithmeticOverflow)?;
-        if angular_velocity != Vec3::ZERO || speed / sound_speed > INCOMPRESSIBLE_MAX_MACH {
+        if speed / sound_speed > INCOMPRESSIBLE_MAX_MACH {
             return Err(SphereDragError::UnsupportedDomain.into());
         }
         incompressible_drag_force(
