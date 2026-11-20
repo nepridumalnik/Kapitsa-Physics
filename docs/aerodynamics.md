@@ -643,7 +643,8 @@ It blends the slip and Reynolds-corrected molecular terms using [Palmer and
 Sahai, equations 13–18](https://ntrs.nasa.gov/api/citations/20220018430/downloads/AIAA_2023_Palmer_Drag_Model_Paper_v2.pdf).
 The molecular term uses the original Loth et al. equation (13). The empirical
 Mach branches are discontinuous at Mach 1. The lower-Mach branch supplies the
-value at the breakpoint. The coefficient is available independently of stepping.
+value at the breakpoint. `Aerodynamics::TransitionalParticle` applies this
+coefficient during stepping with the local atmospheric state and viscosity.
 
 ## Skin friction
 

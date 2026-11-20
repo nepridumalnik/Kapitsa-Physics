@@ -45,6 +45,9 @@ pub enum Aerodynamics {
     /// Free-molecular drag on an isolated spherical particle at diameter Kn ≥ 10.
     /// Assumes diffuse reflection and equal air and particle temperatures.
     FreeMolecularParticle(sphere_drag::SphereDrag),
+    /// Rarefaction-dominated transitional drag on an isolated spherical particle.
+    /// See [`sphere_drag::transitional_particle_drag_coefficient`].
+    TransitionalParticle(sphere_drag::SphereDrag),
     Wing(wing::WingSurface),
     Wings(Vec<wing::WingSurface>),
     Hull(Vec<hull::HullSection>),
@@ -57,6 +60,10 @@ impl fmt::Debug for Aerodynamics {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => formatter.write_str("None"),
+            Self::TransitionalParticle(model) => formatter
+                .debug_tuple("TransitionalParticle")
+                .field(model)
+                .finish(),
             Self::FreeMolecularParticle(model) => formatter
                 .debug_tuple("FreeMolecularParticle")
                 .field(model)

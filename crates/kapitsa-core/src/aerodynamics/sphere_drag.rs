@@ -64,6 +64,7 @@ pub(crate) enum SphereDragRegime {
     SlipCorrectedParticle,
     CreepingParticle,
     FreeMolecularParticle,
+    TransitionalParticle,
 }
 
 impl SphereDrag {
@@ -182,6 +183,9 @@ impl SphereDrag {
             SphereDragRegime::Continuum => Some(continuum_drag_coefficient as fn(f64, f64) -> _),
             SphereDragRegime::CompressionDominatedParticle => {
                 Some(compression_dominated_particle_drag_coefficient as fn(f64, f64) -> _)
+            }
+            SphereDragRegime::TransitionalParticle => {
+                Some(transitional_particle_drag_coefficient as fn(f64, f64) -> _)
             }
         };
         if let Some(coefficient) = coefficient {

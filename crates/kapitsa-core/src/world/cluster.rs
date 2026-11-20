@@ -569,6 +569,7 @@ impl PhysicsWorld {
                     | Aerodynamics::SlipCorrectedParticle(_)
                     | Aerodynamics::CreepingParticle(_)
                     | Aerodynamics::FreeMolecularParticle(_)
+                    | Aerodynamics::TransitionalParticle(_)
             )
         {
             return Err(crate::Error::from(ClusterError::UnsupportedGeometry));
@@ -2285,6 +2286,7 @@ impl PhysicsWorld {
             | Aerodynamics::SlipCorrectedParticle(_)
             | Aerodynamics::CreepingParticle(_)
             | Aerodynamics::FreeMolecularParticle(_)
+            | Aerodynamics::TransitionalParticle(_)
             | Aerodynamics::Colliders
             | Aerodynamics::Wing(_)
             | Aerodynamics::Wings(_)
