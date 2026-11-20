@@ -514,7 +514,10 @@ Lawler (2003), equation (19)](https://doi.org/10.1061/%28ASCE%290733-9372%282003
 It uses diameter-based `0 < Re < 200,000` and returns a coefficient referenced
 to frontal area. The caller establishes incompressible continuum conditions.
 The correlation tends to `24/Re` in creeping flow and excludes the drag crisis.
-It is a scalar coefficient evaluator. The compressible sphere evaluator remains
+`sphere_drag::incompressible_drag_force` evaluates the corresponding force at
+the sphere center from diameter, density, dynamic viscosity and body-minus-fluid
+velocity. It factors out the Stokes force to avoid squaring very small speeds.
+The compressible sphere evaluator remains
 a separate model with its own domain and no automatic transition between them.
 
 ## Skin friction

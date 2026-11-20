@@ -5,6 +5,8 @@
 //! rarefaction-corrected correlation, nor a general hull or rocket model.
 //! The empirical constants are fitted, not independent validation data.
 
+use kapitsa_math::Vec3;
+
 const GAMMA: f64 = 1.4;
 const VISCOSITY_EXPONENT: f64 = 0.74;
 const BOUNDARY_LAYER_SCALE: f64 = 9.4;
@@ -49,16 +51,67 @@ pub fn incompressible_drag_coefficient(reynolds: f64) -> Result<f64, crate::Erro
     if !reynolds.is_finite() || reynolds <= 0.0 {
         return Err(crate::Error::from(SphereDragError::InvalidInput));
     }
-    if reynolds >= BROWN_LAWLER_MAX_REYNOLDS {
-        return Err(crate::Error::from(SphereDragError::UnsupportedDomain));
-    }
-    let cd = (STOKES_FACTOR / reynolds)
-        * (1.0 + BROWN_LAWLER_VISCOUS_SCALE * reynolds.powf(BROWN_LAWLER_VISCOUS_EXPONENT))
-        + BROWN_LAWLER_INERTIAL_SCALE * (reynolds / (reynolds + BROWN_LAWLER_TRANSITION_REYNOLDS));
+    let cd = (STOKES_FACTOR / reynolds) * stokes_multiplier(reynolds)?;
     if !cd.is_finite() {
         return Err(crate::Error::from(SphereDragError::ArithmeticOverflow));
     }
     Ok(cd)
+}
+
+/// Drag force in newtons for an isolated sphere in incompressible continuum
+/// flow, using Brown and Lawler (2003), equation (19). Reynolds number based
+/// on `diameter` must be below 200,000. The force is applied at the center of
+/// the sphere and acts opposite `relative_velocity` (body minus fluid, m/s).
+/// Diameter is in metres, density in kg/m³ and dynamic viscosity in Pa·s.
+/// Diameter and viscosity must be positive. Zero density or zero relative
+/// velocity produces zero force. The caller establishes the flow regime.
+pub fn incompressible_drag_force(
+    diameter: f64,
+    density: f64,
+    dynamic_viscosity: f64,
+    relative_velocity: Vec3,
+) -> Result<Vec3, crate::Error> {
+    if !diameter.is_finite()
+        || diameter <= 0.0
+        || !density.is_finite()
+        || density < 0.0
+        || !dynamic_viscosity.is_finite()
+        || dynamic_viscosity <= 0.0
+        || !relative_velocity.is_finite()
+    {
+        return Err(SphereDragError::InvalidInput.into());
+    }
+    if density == 0.0 || relative_velocity == Vec3::ZERO {
+        return Ok(Vec3::ZERO);
+    }
+    let speed = relative_velocity
+        .checked_length()
+        .ok_or(SphereDragError::ArithmeticOverflow)?;
+    let reynolds = (density * speed) * diameter / dynamic_viscosity;
+    if !reynolds.is_finite() || reynolds == 0.0 {
+        return Err(SphereDragError::ArithmeticOverflow.into());
+    }
+    // Factor out Stokes drag so slow flow needs neither 1/Re nor speed².
+    let correction = stokes_multiplier(reynolds)?;
+    let scale = (dynamic_viscosity * diameter) * (3.0 * std::f64::consts::PI * correction);
+    let force = relative_velocity
+        .checked_mul_scalar(-scale)
+        .ok_or(SphereDragError::ArithmeticOverflow)?;
+    if force == Vec3::ZERO {
+        return Err(SphereDragError::ArithmeticOverflow.into());
+    }
+    Ok(force)
+}
+
+fn stokes_multiplier(reynolds: f64) -> Result<f64, SphereDragError> {
+    if reynolds >= BROWN_LAWLER_MAX_REYNOLDS {
+        return Err(SphereDragError::UnsupportedDomain);
+    }
+    Ok(1.0
+        + BROWN_LAWLER_VISCOUS_SCALE * reynolds.powf(BROWN_LAWLER_VISCOUS_EXPONENT)
+        + (BROWN_LAWLER_INERTIAL_SCALE / STOKES_FACTOR)
+            * reynolds
+            * (reynolds / (reynolds + BROWN_LAWLER_TRANSITION_REYNOLDS)))
 }
 
 /// Continuum drag coefficient, referenced to the sphere's frontal area.
@@ -114,6 +167,41 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incompressible_force_matches_dynamic_pressure_and_stokes_limit() -> Result<(), crate::Error>
+    {
+        let velocity = Vec3::new(3.0, -4.0, 0.0);
+        let diameter = 0.1;
+        let viscosity = 0.001;
+        let density = 2.0;
+        let cd = incompressible_drag_coefficient(1000.0)?;
+        let area = std::f64::consts::PI * diameter * diameter / 4.0;
+        let expected = -velocity * (0.5 * density * 5.0 * area * cd);
+        let force = incompressible_drag_force(diameter, density, viscosity, velocity)?;
+        assert!((force - expected).length() < 1e-15);
+
+        let speed = 1e-200;
+        let creeping = incompressible_drag_force(1.0, 1.0, 1.0, Vec3::X * speed)?;
+        assert!((creeping.x / speed + 3.0 * std::f64::consts::PI).abs() < 1e-14);
+        assert_eq!(
+            incompressible_drag_force(1.0, 0.0, 1.0, velocity)?,
+            Vec3::ZERO
+        );
+        assert_eq!(
+            incompressible_drag_force(1.0, 1.0, 1.0, Vec3::ZERO)?,
+            Vec3::ZERO
+        );
+        assert_eq!(
+            incompressible_drag_force(1.0, 1.0, 0.0, velocity),
+            Err(SphereDragError::InvalidInput.into())
+        );
+        assert_eq!(
+            incompressible_drag_force(1.0, 1.0, 1.0, Vec3::X * 200_000.0),
+            Err(SphereDragError::UnsupportedDomain.into())
+        );
+        Ok(())
+    }
 
     #[test]
     fn incompressible_fit_reaches_stokes_limit_and_precrisis_domain() -> Result<(), crate::Error> {
