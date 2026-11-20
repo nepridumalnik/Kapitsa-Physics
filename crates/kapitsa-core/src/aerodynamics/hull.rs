@@ -36,10 +36,11 @@
 //! These correlations reject total Mach above 0.3, including pure crossflow.
 //! A separate compressible turbulent flat-plate correlation covers high
 //! subsonic flow under its own Mach and Reynolds limits. Reference-temperature
-//! options extend laminar and turbulent flat-plate friction through supersonic
-//! and hypersonic flow; they assume air properties, an adiabatic wall by default,
-//! and caller-selected Reynolds bounds. No model predicts roughness, pressure
-//! gradients, shock-boundary-layer interaction or transition above Mach 0.3.
+//! and van Driest II options extend laminar and turbulent flat-plate friction
+//! through supersonic and hypersonic flow; they assume air properties, an
+//! adiabatic wall by default, and caller-selected Reynolds bounds. No model
+//! predicts roughness, pressure gradients, shock-boundary-layer interaction or
+//! transition above Mach 0.3.
 //! Finite kinematics and positive sound speed are validated even in vacuum or
 //! with disabled areas; those cases then skip Mach and Reynolds domain checks.
 //! Mach is based on the full local relative speed, including omega cross r.
@@ -346,6 +347,7 @@ enum SkinFrictionLaw {
     CompressibleTurbulent,
     TransitionedFlatPlate,
     HighSpeedLaminar { wall_to_adiabatic_temperature: f64 },
+    HighSpeedTurbulent { wall_to_adiabatic_temperature: f64 },
 }
 
 impl SkinFriction {
@@ -455,11 +457,54 @@ impl SkinFriction {
         Ok(friction)
     }
 
+    /// Mean van Driest II friction for a smooth turbulent flat plate at zero
+    /// pressure gradient, from subsonic through moderate hypersonic Mach numbers.
+    ///
+    /// The air assumptions are `gamma = 1.4`, `R = 287.05 J/(kg K)`, turbulent
+    /// recovery `r = 0.88`, Sutherland viscosity with `S = 110.4 K`, and the
+    /// Kármán–Schoenherr incompressible mean coefficient. The edge temperature
+    /// follows from the local sound speed. `wall_to_adiabatic_temperature` is
+    /// `Tw / Taw`, finite and in `(0, 10]`; one selects the adiabatic wall.
+    /// Fallback viscosity is in Pa·s and is used when the atmosphere supplies
+    /// none. Total Mach must be ≤ 5 and the caller-selected inclusive Reynolds
+    /// bounds must lie within `1e6` to `1e8`. See NASA TN D-6945, equations
+    /// 1–15. The correlation is not validated for strongly cooled walls,
+    /// pressure gradients, roughness, shock-boundary-layer interaction or
+    /// real-gas properties. The caller must establish attached turbulent flow.
+    pub fn high_speed_turbulent(
+        dynamic_viscosity: f64,
+        min_reynolds: f64,
+        max_reynolds: f64,
+        wall_to_adiabatic_temperature: f64,
+    ) -> Result<Self, crate::Error> {
+        const MIN_REYNOLDS: f64 = 1e6;
+        const MAX_REYNOLDS: f64 = 1e8;
+        if min_reynolds < MIN_REYNOLDS
+            || max_reynolds > MAX_REYNOLDS
+            || !wall_to_adiabatic_temperature.is_finite()
+            || wall_to_adiabatic_temperature <= 0.0
+            || wall_to_adiabatic_temperature > 10.0
+        {
+            return Err(HullError::InvalidParameters.into());
+        }
+        let mut friction = Self::new(
+            dynamic_viscosity,
+            BoundaryLayer::Turbulent,
+            min_reynolds,
+            max_reynolds,
+        )?;
+        friction.law = SkinFrictionLaw::HighSpeedTurbulent {
+            wall_to_adiabatic_temperature,
+        };
+        Ok(friction)
+    }
+
     fn max_mach(self) -> f64 {
         const MAX_COMPRESSIBLE_MACH: f64 = 0.95;
         match self.law {
             SkinFrictionLaw::CompressibleTurbulent => MAX_COMPRESSIBLE_MACH,
             SkinFrictionLaw::HighSpeedLaminar { .. } => 10.0,
+            SkinFrictionLaw::HighSpeedTurbulent { .. } => 5.0,
             SkinFrictionLaw::Incompressible(_) | SkinFrictionLaw::TransitionedFlatPlate => 0.3,
         }
     }
@@ -504,6 +549,14 @@ impl SkinFriction {
                 )?;
                 1.328 * factor / reynolds.sqrt()
             }
+            SkinFrictionLaw::HighSpeedTurbulent {
+                wall_to_adiabatic_temperature,
+            } => van_driest_ii_mean_coefficient(
+                axial_mach,
+                sound_speed,
+                wall_to_adiabatic_temperature,
+                reynolds,
+            )?,
         };
         coefficient
             .is_finite()
@@ -551,6 +604,85 @@ fn reference_temperature_factor(
         return Err(crate::Error::from(HullError::ArithmeticOverflow));
     }
     Ok(factor)
+}
+
+/// Van Driest II transformation and Kármán–Schoenherr mean turbulent friction.
+///
+/// Equations 1–15 of NASA TN D-6945 with Keyes viscosity replaced by the
+/// equivalent Sutherland ratio, as in the reference-temperature laminar model.
+/// The transformed length Reynolds number follows the report's
+/// `Fx = Ftheta * Fc` approximation. Fifty bisection steps bound the
+/// allocation-free scalar solve.
+fn van_driest_ii_mean_coefficient(
+    mach: f64,
+    sound_speed: f64,
+    wall_to_adiabatic_temperature: f64,
+    reynolds: f64,
+) -> Result<f64, crate::Error> {
+    const AIR_GAMMA: f64 = 1.4;
+    const AIR_GAS_CONSTANT: f64 = 287.05;
+    const SUTHERLAND_CONSTANT: f64 = 110.4;
+    const TURBULENT_RECOVERY: f64 = 0.88;
+    const KARMAN_SCHOENHERR_SCALE: f64 = 0.242;
+    const SOLVE_ITERATIONS: usize = 80;
+    if !mach.is_finite()
+        || mach < 0.0
+        || !sound_speed.is_finite()
+        || sound_speed <= 0.0
+        || !reynolds.is_finite()
+        || reynolds <= 0.0
+    {
+        return Err(crate::Error::from(HullError::InvalidFlow));
+    }
+    let edge_temperature = sound_speed * sound_speed / (AIR_GAMMA * AIR_GAS_CONSTANT);
+    let mach_squared = mach * mach;
+    let recovery_enthalpy = TURBULENT_RECOVERY * 0.5 * (AIR_GAMMA - 1.0) * mach_squared;
+    let wall_over_edge = wall_to_adiabatic_temperature * (1.0 + recovery_enthalpy);
+    let transformation = if mach <= 0.1 {
+        // The report's low-Mach limit avoids the 0/0 form of the general factor.
+        ((1.0 + wall_over_edge) * 0.5).powi(2)
+    } else {
+        let a = (recovery_enthalpy / wall_over_edge).sqrt();
+        let b = (1.0 + recovery_enthalpy - wall_over_edge) / wall_over_edge;
+        let denominator = (4.0 * a * a + b * b).sqrt();
+        // Both ratios are analytically in [-1, 1]; clamp only roundoff.
+        let alpha = ((2.0 * a * a - b) / denominator).clamp(-1.0, 1.0);
+        let beta = (b / denominator).clamp(-1.0, 1.0);
+        let angle_sum = alpha.asin() + beta.asin();
+        recovery_enthalpy / (angle_sum * angle_sum)
+    };
+    let wall_temperature = wall_over_edge * edge_temperature;
+    let viscosity_ratio = (edge_temperature / wall_temperature).powf(1.5)
+        * (wall_temperature + SUTHERLAND_CONSTANT)
+        / (edge_temperature + SUTHERLAND_CONSTANT);
+    let transformed_reynolds = reynolds * viscosity_ratio * transformation;
+    if !transformation.is_finite()
+        || transformation <= 0.0
+        || !viscosity_ratio.is_finite()
+        || viscosity_ratio <= 0.0
+        || !transformed_reynolds.is_finite()
+        || transformed_reynolds <= 0.0
+    {
+        return Err(crate::Error::from(HullError::ArithmeticOverflow));
+    }
+    // Solve 0.242 / sqrt(CF) = log10(Re * CF) for the mean incompressible
+    // coefficient. The residual is monotonically decreasing in CF.
+    let (mut lower, mut upper) = (1e-8_f64, 0.1_f64);
+    for _ in 0..SOLVE_ITERATIONS {
+        let middle = 0.5 * (lower + upper);
+        let residual =
+            KARMAN_SCHOENHERR_SCALE / middle.sqrt() - (transformed_reynolds * middle).log10();
+        if residual > 0.0 {
+            lower = middle;
+        } else {
+            upper = middle;
+        }
+    }
+    let coefficient = 0.5 * (lower + upper) / transformation;
+    coefficient
+        .is_finite()
+        .then_some(coefficient)
+        .ok_or_else(|| crate::Error::from(HullError::ArithmeticOverflow))
 }
 
 /// Geometry and empirical coefficients for one load point, not inferred from mesh.
@@ -1872,6 +2004,67 @@ mod tests {
         ] {
             assert!(
                 SkinFriction::high_speed_laminar(viscosity, min, max, wall).is_err(),
+                "accepted min={min} max={max} wall={wall}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn high_speed_turbulent_friction_matches_van_driest_ii() -> Result<(), crate::Error> {
+        let mut s = section(Vec3::ZERO);
+        s.axial_cd = 0.0;
+        s.crossflow_cd = 0.0;
+        let speed = 680.0;
+        let viscosity = 1.2 * speed * s.length / 1e7;
+        let friction = SkinFriction::high_speed_turbulent(viscosity, 1e6, 1e8, 1.0)?;
+        s.skin_friction = Some(friction);
+
+        // NASA TN D-6945, equations 1-15, at Mach 2, Re_L = 1e7, Te = 287.65 K
+        // and an adiabatic wall. Evaluated independently from the report.
+        let expected_cf = 0.002_038_012_723_884_142;
+        let force = s.evaluate(flow(Vec3::X * speed))?.force;
+        let expected = -0.5 * 1.2 * speed * speed * s.wetted_area * expected_cf;
+        assert!(
+            (force.x / expected - 1.0).abs() < 1e-10,
+            "force={} expected={expected}",
+            force.x
+        );
+        assert_eq!((force.y, force.z), (0.0, 0.0));
+        let reversed = s.evaluate(flow(-Vec3::X * speed))?.force;
+        assert!((reversed.x / -expected - 1.0).abs() < 1e-10);
+
+        // The low-Mach branch recovers the Karman-Schoenherr mean coefficient.
+        let incompressible = friction.mean_coefficient(1e7, 0.001, 340.0)?;
+        assert!((incompressible / 0.002_934_278_073_751_393 - 1.0).abs() < 1e-9);
+        assert!(friction.mean_coefficient(1e7, 2.0, 340.0)? < incompressible);
+        assert!(
+            friction.mean_coefficient(1e7, 5.0, 340.0)?
+                < friction.mean_coefficient(1e7, 2.0, 340.0)?
+        );
+
+        // Wall cooling raises the turbulent coefficient at the same edge Mach.
+        let cold = SkinFriction::high_speed_turbulent(viscosity, 1e6, 1e8, 0.2)?;
+        assert!(cold.mean_coefficient(1e7, 2.0, 340.0)? > expected_cf * 1.05);
+
+        assert_eq!(s.evaluate(flow(Vec3::Y * speed))?.force, Vec3::ZERO);
+        assert_eq!(
+            s.evaluate(flow(Vec3::X * 1701.0)),
+            Err(HullError::UnsupportedSkinFrictionMach.into())
+        );
+        assert_eq!(
+            friction.mean_coefficient(1e5, 2.0, 340.0),
+            Err(HullError::UnsupportedReynolds.into())
+        );
+        for (min, max, wall) in [
+            (1e5, 1e8, 1.0),
+            (1e6, 1e9, 1.0),
+            (1e6, 1e8, 0.0),
+            (1e6, 1e8, 10.1),
+            (1e6, 1e8, f64::NAN),
+        ] {
+            assert!(
+                SkinFriction::high_speed_turbulent(viscosity, min, max, wall).is_err(),
                 "accepted min={min} max={max} wall={wall}"
             );
         }

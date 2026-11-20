@@ -245,6 +245,20 @@ interaction, wall heat transfer or real-gas properties. Passing through Mach 1
 is a property of the correlation, not validation against transonic shock data.
 The caller must establish attached laminar flow.
 
+`SkinFriction::high_speed_turbulent` is the corresponding van Driest II
+transformation with the Kármán–Schoenherr incompressible mean coefficient,
+following [NASA TN D-6945, equations 1–15](https://ntrs.nasa.gov/api/citations/19730001588/downloads/19730001588.pdf).
+It uses the same air properties, `r = 0.88`, Sutherland viscosity and
+`Tw / Taw` input as the laminar model. The transformed Reynolds number follows
+the report's `Fx = Ftheta Fc` length-Reynolds approximation, and
+`Cf = CF_bar / Fc`; the scalar Kármán–Schoenherr solve uses bounded bisection.
+It accepts total Mach ≤ 5 and caller-selected inclusive Re bounds within
+1–100 million. The same excluded effects apply, and strongly cooled walls,
+separation and shock-boundary-layer interaction are outside its validated
+range. The five-Mach limit is an engineering bound for this implementation,
+not a claim that the correlation stops being defined above it. Neither
+high-speed model supplies transition, roughness or real-gas closure.
+
 For a diagnostic comparison with the local shear measurements in
 [NACA TN 3486, table I](https://ntrs.nasa.gov/api/citations/19930084308/downloads/19930084308.pdf),
 differentiate `x Cf_mean` at fixed Mach and constant freestream properties.
