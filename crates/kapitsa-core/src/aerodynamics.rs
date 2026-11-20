@@ -42,6 +42,9 @@ pub enum Aerodynamics {
     /// Creeping drag on an isolated spherical particle with diffuse molecular
     /// reflection. Requires Mach ≤ 0.05 and diameter Reynolds number ≤ 0.1.
     CreepingParticle(sphere_drag::SphereDrag),
+    /// Free-molecular drag on an isolated spherical particle at diameter Kn ≥ 10.
+    /// Assumes diffuse reflection and equal air and particle temperatures.
+    FreeMolecularParticle(sphere_drag::SphereDrag),
     Wing(wing::WingSurface),
     Wings(Vec<wing::WingSurface>),
     Hull(Vec<hull::HullSection>),
@@ -54,6 +57,10 @@ impl fmt::Debug for Aerodynamics {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => formatter.write_str("None"),
+            Self::FreeMolecularParticle(model) => formatter
+                .debug_tuple("FreeMolecularParticle")
+                .field(model)
+                .finish(),
             Self::CreepingParticle(model) => formatter
                 .debug_tuple("CreepingParticle")
                 .field(model)

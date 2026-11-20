@@ -26,6 +26,8 @@ const BROWN_LAWLER_VISCOUS_EXPONENT: f64 = 0.681;
 const BROWN_LAWLER_INERTIAL_SCALE: f64 = 0.407;
 const BROWN_LAWLER_TRANSITION_REYNOLDS: f64 = 8_710.0;
 const INCOMPRESSIBLE_MAX_MACH: f64 = 0.2;
+const MIN_FREE_MOLECULAR_KNUDSEN: f64 = 10.0;
+const SERIES_MAX_SPEED_RATIO: f64 = 0.05;
 
 /// Invalid or outside the deliberately restricted approximation domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +61,7 @@ pub(crate) enum SphereDragRegime {
     CompressionDominatedParticle,
     SlipCorrectedParticle,
     CreepingParticle,
+    FreeMolecularParticle,
 }
 
 impl SphereDrag {
@@ -100,6 +103,44 @@ impl SphereDrag {
         let viscosity = atmosphere
             .dynamic_viscosity()
             .unwrap_or(self.dynamic_viscosity);
+        if matches!(regime, SphereDragRegime::FreeMolecularParticle) {
+            if relative_velocity == Vec3::ZERO {
+                return Ok(Vec3::ZERO);
+            }
+            let speed = relative_velocity
+                .checked_length()
+                .ok_or(SphereDragError::ArithmeticOverflow)?;
+            let molecular_speed = sound_speed / (GAMMA / 2.0).sqrt();
+            let speed_ratio = speed / molecular_speed;
+            let kn =
+                air_diameter_knudsen(atmosphere.density(), viscosity, sound_speed, self.diameter)?;
+            if kn < MIN_FREE_MOLECULAR_KNUDSEN {
+                return Err(SphereDragError::UnsupportedDomain.into());
+            }
+            let gain = if speed_ratio < SERIES_MAX_SPEED_RATIO {
+                molecular_speed * free_molecular_slow_gain(speed_ratio)
+            } else {
+                speed * free_molecular_particle_drag_coefficient(speed_ratio, kn)?
+            };
+            if !gain.is_finite() || gain <= 0.0 {
+                return Err(SphereDragError::ArithmeticOverflow.into());
+            }
+            let scale = super::hull::scaled_product(
+                &[
+                    gain,
+                    atmosphere.density(),
+                    self.diameter,
+                    self.diameter,
+                    std::f64::consts::PI / 8.0,
+                ],
+                1.0,
+            )
+            .map_err(|_| SphereDragError::ArithmeticOverflow)?;
+            return relative_velocity
+                .checked_mul_scalar(-scale)
+                .filter(|force| *force != Vec3::ZERO)
+                .ok_or_else(|| SphereDragError::ArithmeticOverflow.into());
+        }
         if matches!(regime, SphereDragRegime::CreepingParticle) {
             const MAX_CREEPING_REYNOLDS: f64 = 0.1;
             const MAX_CREEPING_MACH: f64 = 0.05;
@@ -115,12 +156,13 @@ impl SphereDrag {
                     }
                     // Mach/Re cancels relative speed analytically. Form Kn
                     // directly so underflow in Mach cannot erase rarefaction.
-                    let denominator = (atmosphere.density() * sound_speed) * self.diameter;
-                    if !denominator.is_finite() || denominator <= 0.0 {
-                        return Err(SphereDragError::ArithmeticOverflow.into());
-                    }
-                    let radius_knudsen =
-                        viscosity / denominator * (2.0 * air_mean_free_path_factor());
+                    let radius_knudsen = 2.0
+                        * air_diameter_knudsen(
+                            atmosphere.density(),
+                            viscosity,
+                            sound_speed,
+                            self.diameter,
+                        )?;
                     if !radius_knudsen.is_finite() {
                         return Err(SphereDragError::ArithmeticOverflow.into());
                     }
@@ -129,7 +171,9 @@ impl SphereDrag {
             );
         }
         let coefficient = match regime {
-            SphereDragRegime::Incompressible | SphereDragRegime::CreepingParticle => None,
+            SphereDragRegime::Incompressible
+            | SphereDragRegime::CreepingParticle
+            | SphereDragRegime::FreeMolecularParticle => None,
             SphereDragRegime::SlipCorrectedParticle => {
                 Some(slip_corrected_particle_drag_coefficient as fn(f64, f64) -> _)
             }
@@ -354,8 +398,6 @@ pub fn free_molecular_particle_drag_coefficient(
     speed_ratio: f64,
     diameter_knudsen: f64,
 ) -> Result<f64, crate::Error> {
-    const MIN_FREE_MOLECULAR_KNUDSEN: f64 = 10.0;
-    const SERIES_MAX_SPEED_RATIO: f64 = 0.05;
     if !speed_ratio.is_finite()
         || speed_ratio <= 0.0
         || !diameter_knudsen.is_finite()
@@ -370,11 +412,7 @@ pub fn free_molecular_particle_drag_coefficient(
     let square = speed_ratio * speed_ratio;
     let thermal_reemission = 2.0 * sqrt_pi / 3.0;
     let cd = if speed_ratio < SERIES_MAX_SPEED_RATIO {
-        // Taylor expansion of s * Cd through s^6. The constant term is
-        // the diffuse Epstein limit.
-        let incident =
-            16.0 / 3.0 + square * (16.0 / 15.0 + square * (-8.0 / 105.0 + square * 8.0 / 945.0));
-        (incident / sqrt_pi + thermal_reemission) / speed_ratio
+        free_molecular_slow_gain(speed_ratio) / speed_ratio
     } else {
         let inverse = speed_ratio.recip();
         let inverse_square = inverse * inverse;
@@ -390,6 +428,29 @@ pub fn free_molecular_particle_drag_coefficient(
 
 fn air_mean_free_path_factor() -> f64 {
     (GAMMA * std::f64::consts::PI / 2.0).sqrt()
+}
+
+fn air_diameter_knudsen(
+    density: f64,
+    viscosity: f64,
+    sound_speed: f64,
+    diameter: f64,
+) -> Result<f64, SphereDragError> {
+    let denominator = (density * sound_speed) * diameter;
+    let kn = (viscosity / denominator) * air_mean_free_path_factor();
+    if !denominator.is_finite() || !kn.is_finite() {
+        return Err(SphereDragError::ArithmeticOverflow);
+    }
+    Ok(kn)
+}
+
+fn free_molecular_slow_gain(speed_ratio: f64) -> f64 {
+    // Taylor expansion of s * Cd through s^6; constant term is the diffuse Epstein limit.
+    let square = speed_ratio * speed_ratio;
+    let incident =
+        16.0 / 3.0 + square * (16.0 / 15.0 + square * (-8.0 / 105.0 + square * 8.0 / 945.0));
+    let sqrt_pi = std::f64::consts::PI.sqrt();
+    incident / sqrt_pi + 2.0 * sqrt_pi / 3.0
 }
 
 /// Ratio of drag to Stokes drag for a slowly translating isolated sphere with

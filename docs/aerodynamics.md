@@ -632,7 +632,10 @@ It assumes diffuse reflection, equal gas and particle temperatures, and
 diameter-based Kn ≥ 10. Its argument is relative speed divided by the gas's
 most probable molecular speed. A low-speed series avoids cancellation and
 recovers the Epstein limit. The coefficient tends to 2 at large speed ratio.
-This evaluator is separate from world stepping and the transitional model.
+`Aerodynamics::FreeMolecularParticle` applies this force during stepping for a
+nonrotating sphere centered on its center of mass. It derives the molecular
+speed from local sound speed assuming air with `gamma = 1.4`, and derives Kn
+from local density and configured or sampled dynamic viscosity.
 
 ## Skin friction
 

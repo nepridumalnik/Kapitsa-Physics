@@ -13,6 +13,52 @@ fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepEr
     result.as_ref().err().and_then(|error| error.downcast_ref())
 }
 
+#[test]
+fn free_molecular_particle_applies_drag_and_rejects_dense_gas()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::sphere_drag::{
+        SphereDrag, SphereDragError, free_molecular_particle_drag_coefficient,
+    };
+
+    let mut world = PhysicsWorld::new();
+    let density = 1e-6;
+    let diameter = 0.001_f64;
+    let speed = 100.0;
+    let sound_speed = 100.0;
+    let viscosity = 0.001;
+    let mass_kg = 1e-6;
+    let dt = 0.1;
+    world.set_mesh_sound_speed(sound_speed)?;
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        density,
+        Vec3::ZERO,
+    )?));
+    let mass = MassProperties::new(mass_kg, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut particle = RigidBody::new_dynamic(Transform::identity(), mass)?;
+    particle.set_linear_velocity(Vec3::X * speed)?;
+    particle.set_aerodynamics(Aerodynamics::FreeMolecularParticle(SphereDrag::new(
+        diameter, viscosity,
+    )?));
+    let id = world.add_body(particle)?;
+    world.step(dt)?;
+    let before = world.body(id).ok_or("particle")?.motion();
+    let cd = free_molecular_particle_drag_coefficient(0.7_f64.sqrt(), 10.0)?;
+    let area = std::f64::consts::PI * diameter.powi(2) / 4.0;
+    let expected = speed - 0.5 * density * speed * speed * area * cd * dt / mass_kg;
+    assert!((before.state().linear_velocity() - Vec3::X * expected).length() < 1e-12);
+
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::ZERO,
+    )?));
+    assert!(
+        matches!(step_cause(&world.step(dt)), Some(crate::world::StepError::Aerodynamics { cause, .. })
+        if cause.downcast_ref::<SphereDragError>() == Some(&SphereDragError::UnsupportedDomain))
+    );
+    assert_eq!(world.body(id).ok_or("particle")?.motion(), before);
+    Ok(())
+}
+
 pub(super) fn hollow_box_mesh() -> Result<TriangleMesh, crate::Error> {
     use crate::{
         aerodynamics::colliders::{ColliderTessellation, collider_mesh},
