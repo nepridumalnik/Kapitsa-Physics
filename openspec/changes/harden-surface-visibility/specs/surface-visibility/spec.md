@@ -23,24 +23,38 @@ Barycentric area calculations SHALL undo both in-plane scales.
 - **THEN** shadow construction succeeds and covers the source-affine point
   `(0.25, 0.25, 0)` despite the different coordinate-axis scales
 
-#### Scenario: One coordinate axis exceeds the exponent span
+#### Scenario: A 3D predicate axis exceeds the exponent span
 
-- **WHEN** the nonzero coordinates on one axis span more than 254 binary exponents
+- **WHEN** the nonzero coordinates on one axis span more than 254 binary
+  exponents for a non-coordinate-aligned plane using the 3D predicate
 - **THEN** predicate preparation returns `PrecisionLoss`
+
+#### Scenario: An aligned plane bypasses the 3D span limit
+
+- **WHEN** a coordinate-aligned blocker plane has a wide within-axis span but
+  its signed separation along the aligned normal axis is finite
+- **THEN** axial depth evaluation does not reject it for the 3D predicate's
+  exponent-span limit
 
 ### Requirement: Omit axial depth only from projected edge tests
 
 For flow exactly along one coordinate axis, projected edge tests SHALL omit
-only that axial coordinate. Depth tests SHALL retain the original 3D
-coordinates and distinguish both depth signs.
+only that axial coordinate. Coordinate-aligned blocker depth SHALL use signed
+separation along the aligned axis; other planes SHALL retain the 3D predicate.
 
-#### Scenario: Axial shadow preserves both close depth signs
+#### Scenario: Axial shadow uses signed separation for blocker depth
 
-- **WHEN** `axial_shadow_preserves_small_representable_depth` tests a `1e-100`
-  blocker separation along both signs of each of the X, Y, and Z axes
-- **THEN** the blocker on the flow-facing side remains covered while the
-  opposite-depth blocker is rejected, without dropping the non-axial depth
-  sign
+- **WHEN** a coordinate-aligned blocker is separated from the source by
+  `1e-100` along the flow axis
+- **THEN** the flow-facing signed separation covers the source and the
+  opposite sign is rejected
+
+#### Scenario: Wide within-axis span remains a valid axial blocker
+
+- **WHEN** an axial-plane blocker has a source vertex offset by `1e-100` on a
+  non-axial coordinate and the blocker is one unit downstream
+- **THEN** the blocker covers the source-affine point `(0.25, 0.25, 0)` and
+  the opposite flow direction rejects it
 
 ### Requirement: Preserve representable numeric intersections
 

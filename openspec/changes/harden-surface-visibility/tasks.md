@@ -18,6 +18,9 @@
 - [x] Record `d4dbf07` projected-edge axial-coordinate omission for exactly
   axial flow and its `1e-100` depth-separation regression across both signs
   of all three axes.
+- [x] Record `9ac852c` signed axial separation for coordinate-aligned blocker
+  depth, the wide within-axis-span regression, and the retained 3D predicate
+  limit for other planes.
 - [x] Record that work accounting does not provide an exact byte budget or
   exact instruction/elapsed-time bound.
 - [x] Record `7d6e5a6` stable grid bucket construction from preflight entry

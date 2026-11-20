@@ -236,3 +236,8 @@ The split-buffer reservation change on `8cf7271` measured 25.65 us
 2.093 ms) for the moderate fixture. These ranges overlap the preceding
 measurements. The change bounds the requested split storage; the timing
 run provides no evidence of a speedup.
+
+The coordinate-aligned depth change on `9ac852c` measured 20.70 us
+(20.19 to 22.10 us) for the small fixture and 1.301 ms (1.288 to
+1.339 ms) for the moderate fixture. These fixtures use coordinate-aligned
+plates. The results give no timing estimate for inclined geometry.
