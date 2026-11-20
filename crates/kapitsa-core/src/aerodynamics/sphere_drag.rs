@@ -57,6 +57,7 @@ pub(crate) enum SphereDragRegime {
     Incompressible,
     Continuum,
     CompressionDominatedParticle,
+    SlipCorrectedParticle,
 }
 
 impl SphereDrag {
@@ -97,6 +98,9 @@ impl SphereDrag {
         }
         let coefficient = match regime {
             SphereDragRegime::Incompressible => None,
+            SphereDragRegime::SlipCorrectedParticle => {
+                Some(slip_corrected_particle_drag_coefficient as fn(f64, f64) -> _)
+            }
             SphereDragRegime::Continuum => Some(continuum_drag_coefficient as fn(f64, f64) -> _),
             SphereDragRegime::CompressionDominatedParticle => {
                 Some(compression_dominated_particle_drag_coefficient as fn(f64, f64) -> _)

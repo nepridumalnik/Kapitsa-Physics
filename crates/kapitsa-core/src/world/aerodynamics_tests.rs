@@ -14,6 +14,44 @@ fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepEr
 }
 
 #[test]
+fn gas_slip_reduces_spherical_particle_deceleration() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::sphere_drag::{SphereDrag, slip_corrected_particle_drag_coefficient};
+
+    let diameter = 0.001;
+    let speed = 5.0;
+    let dt = 0.01;
+    let model = SphereDrag::new(diameter, 0.005)?;
+    let advance = |aerodynamics| -> Result<Vec3, Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_sound_speed(100.0)?;
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut particle = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        particle.set_linear_velocity(Vec3::X * speed)?;
+        let body = world.add_body(particle)?;
+        world.set_aerodynamics(body, aerodynamics)?;
+        world.step(dt)?;
+        Ok(world
+            .body(body)
+            .ok_or("spherical particle")?
+            .state()
+            .linear_velocity())
+    };
+
+    let slip = advance(Aerodynamics::SlipCorrectedParticle(model))?;
+    let continuum = advance(Aerodynamics::IncompressibleSphere(model))?;
+    let cd = slip_corrected_particle_drag_coefficient(0.05, 1.0)?;
+    let area = std::f64::consts::PI * diameter * diameter / 4.0;
+    let expected_speed = speed - 0.5 * speed * speed * area * cd * dt;
+    assert!((slip - Vec3::X * expected_speed).length() < 1e-12);
+    assert!(continuum.x < slip.x && slip.x < speed);
+    Ok(())
+}
+
+#[test]
 fn spherical_particle_applies_compression_dominated_drag_at_mach_quarter()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::aerodynamics::sphere_drag::{

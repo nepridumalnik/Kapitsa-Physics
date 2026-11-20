@@ -566,7 +566,10 @@ Clift–Gauvin slip correction. It uses [Palmer and Sahai (2023), equations
 The implementation accepts `0 < Mach ≤ 0.2`, `0 < Re ≤ 45` and `Kn ≤ 0.1`,
 where Re and Kn use particle diameter. These limits restrict the approximation
 to low-speed continuum and slip flow. The slip factor tends to unity as Kn
-tends to zero. This is a coefficient evaluator with no world integration.
+tends to zero. `Aerodynamics::SlipCorrectedParticle` applies this drag at
+the center of mass during stepping. It uses the same atmospheric sampling,
+constant viscosity and nonrotating sphere assumptions as the other sphere
+variants. Selecting the variant is explicit.
 
 ## Skin friction
 

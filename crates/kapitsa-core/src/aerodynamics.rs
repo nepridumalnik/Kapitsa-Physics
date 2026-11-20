@@ -36,6 +36,9 @@ pub enum Aerodynamics {
     /// Precritical, compression-dominated drag on isolated spherical particles.
     /// See [`sphere_drag::compression_dominated_particle_drag_coefficient`].
     CompressionDominatedParticle(sphere_drag::SphereDrag),
+    /// Low-Mach drag with gas slip on an isolated spherical particle.
+    /// See [`sphere_drag::slip_corrected_particle_drag_coefficient`].
+    SlipCorrectedParticle(sphere_drag::SphereDrag),
     Wing(wing::WingSurface),
     Wings(Vec<wing::WingSurface>),
     Hull(Vec<hull::HullSection>),
@@ -48,6 +51,10 @@ impl fmt::Debug for Aerodynamics {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => formatter.write_str("None"),
+            Self::SlipCorrectedParticle(model) => formatter
+                .debug_tuple("SlipCorrectedParticle")
+                .field(model)
+                .finish(),
             Self::Simple(properties) => formatter.debug_tuple("Simple").field(properties).finish(),
             Self::IncompressibleSphere(model) => formatter
                 .debug_tuple("IncompressibleSphere")

@@ -1727,6 +1727,7 @@ impl PhysicsWorld {
                     | crate::aerodynamics::Aerodynamics::IncompressibleSphere(_)
                     | crate::aerodynamics::Aerodynamics::ContinuumSphere(_)
                     | crate::aerodynamics::Aerodynamics::CompressionDominatedParticle(_)
+                    | crate::aerodynamics::Aerodynamics::SlipCorrectedParticle(_)
                     | crate::aerodynamics::Aerodynamics::Colliders
             )
         {
@@ -3341,12 +3342,16 @@ impl PhysicsWorld {
             .map_err(|_| error())?
             .ok_or_else(error)?;
         use crate::aerodynamics::{
-            Aerodynamics::{CompressionDominatedParticle, ContinuumSphere, IncompressibleSphere},
+            Aerodynamics::{
+                CompressionDominatedParticle, ContinuumSphere, IncompressibleSphere,
+                SlipCorrectedParticle,
+            },
             sphere_drag::SphereDragRegime,
         };
         let sphere = match primary {
             IncompressibleSphere(model) => Some((model, SphereDragRegime::Incompressible)),
             ContinuumSphere(model) => Some((model, SphereDragRegime::Continuum)),
+            SlipCorrectedParticle(model) => Some((model, SphereDragRegime::SlipCorrectedParticle)),
             CompressionDominatedParticle(model) => {
                 Some((model, SphereDragRegime::CompressionDominatedParticle))
             }
@@ -3379,6 +3384,7 @@ impl PhysicsWorld {
             | IncompressibleSphere(_)
             | ContinuumSphere(_)
             | CompressionDominatedParticle(_)
+            | SlipCorrectedParticle(_)
             | crate::aerodynamics::Aerodynamics::Wing(_)
             | crate::aerodynamics::Aerodynamics::Wings(_)
             | crate::aerodynamics::Aerodynamics::Hull(_)

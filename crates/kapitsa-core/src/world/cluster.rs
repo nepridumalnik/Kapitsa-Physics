@@ -566,6 +566,7 @@ impl PhysicsWorld {
                 Aerodynamics::IncompressibleSphere(_)
                     | Aerodynamics::ContinuumSphere(_)
                     | Aerodynamics::CompressionDominatedParticle(_)
+                    | Aerodynamics::SlipCorrectedParticle(_)
             )
         {
             return Err(crate::Error::from(ClusterError::UnsupportedGeometry));
@@ -2279,6 +2280,7 @@ impl PhysicsWorld {
             | Aerodynamics::IncompressibleSphere(_)
             | Aerodynamics::ContinuumSphere(_)
             | Aerodynamics::CompressionDominatedParticle(_)
+            | Aerodynamics::SlipCorrectedParticle(_)
             | Aerodynamics::Colliders
             | Aerodynamics::Wing(_)
             | Aerodynamics::Wings(_)
