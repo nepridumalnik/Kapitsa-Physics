@@ -193,6 +193,10 @@ pub fn collider_mesh<'a>(
             Shape::Triangle(_) => 1,
             Shape::Convex(shape) => shape.faces().len(),
             Shape::TriangleMesh(shape) => shape.triangles().len(),
+            Shape::HeightField(shape) => (shape.rows() - 1)
+                .checked_mul(shape.columns() - 1)
+                .and_then(|cells| cells.checked_mul(2))
+                .ok_or(AerodynamicsError::TessellationBudgetExceeded)?,
             _ => return Err(crate::Error::from(AerodynamicsError::UnsupportedModel)),
         };
         if count > config.max_triangles - triangles.len() {
@@ -221,6 +225,17 @@ pub fn collider_mesh<'a>(
             Ok(())
         };
         match collider.shape() {
+            Shape::HeightField(shape) => {
+                for row in 0..shape.rows() - 1 {
+                    for column in 0..shape.columns() - 1 {
+                        for triangle in
+                            crate::collision::height_field::cell_triangles(shape, row, column)?
+                        {
+                            emit(triangle)?;
+                        }
+                    }
+                }
+            }
             Shape::Triangle(shape) => emit(shape.vertices())?,
             Shape::TriangleMesh(shape) => {
                 for face in shape.triangles() {
@@ -325,9 +340,38 @@ mod tests {
         aerodynamics::geometry::{
             GeometryConfig, GeometryInstance, GeometryOwner, OpenMeshPolicy, PreparedGeometry,
         },
-        shape::{Capsule, Cuboid, Cylinder, Plane, Sphere, TaperedCapsule, TaperedCylinder},
+        shape::{
+            Capsule, Cuboid, Cylinder, HeightField, Plane, Sphere, TaperedCapsule, TaperedCylinder,
+        },
         transform::Transform,
     };
+
+    #[test]
+    fn height_field_mesh_uses_collision_diagonal_and_budget() -> Result<(), crate::Error> {
+        let field = HeightField::from_vec(
+            2,
+            2,
+            kapitsa_math::Vec2::new(2.0, 3.0),
+            vec![0.0, 0.5, 0.25, 1.0],
+        )?;
+        let collider = Collider::new(Shape::HeightField(field), Transform::identity());
+        let mesh = collider_mesh([&collider], ColliderTessellation::new(3, 3, 2)?)?;
+        let a = Vec3::ZERO;
+        let b = Vec3::new(2.0, 0.0, 0.5);
+        let c = Vec3::new(2.0, 3.0, 1.0);
+        let d = Vec3::new(0.0, 3.0, 0.25);
+        assert!(
+            mesh.triangles()
+                .iter()
+                .map(|face| face.map(|i| mesh.vertices()[i]))
+                .eq([[a, b, c], [a, c, d]])
+        );
+        assert_eq!(
+            collider_mesh([&collider], ColliderTessellation::new(3, 3, 1)?).err(),
+            Some(AerodynamicsError::TessellationBudgetExceeded.into())
+        );
+        Ok(())
+    }
 
     #[test]
     fn conversion_winding_budget_and_unsupported_shapes() -> Result<(), Box<dyn std::error::Error>>
