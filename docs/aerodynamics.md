@@ -140,9 +140,10 @@ No borrowed world references or mutable shared configuration cross the queue.
 The setters do not change physical models, infer coefficients, exclude overlapping
 loads or alter topology ownership.
 
-The part-owned, data-driven Mach and runtime API extensions are **unverified**:
-source inspection and formatting only; their regression tests and workspace
-compilation were not run, at the user's request.
+The part-owned, data-driven Mach and runtime API extensions are covered by core
+and client regression tests, including ordered command replacement and
+stale/foreign part rejection. Those tests verify API behavior, not physical
+accuracy.
 
 For world axis `a`, split relative velocity into `u_axial = a (v · a)` and
 `u_cross = v - u_axial`. Each component contributes
@@ -689,6 +690,45 @@ and the compression-dominated branch above Re = 45. Both retain their Mach
 and Kn limits. For example, Mach 0.22 at Re = 100 remains unsupported. At
 Mach 4 the coefficient is approximately 1.67448 at Re = 45 and 1.65904 just
 above it. The switch preserves this empirical difference.
+
+## Implemented range coverage
+
+Coverage is per explicitly selected model, not an automatic regime selector.
+Crossing a boundary in the table returns an error or requires caller data; the
+engine does not blend models to hide a domain limit.
+
+| Model | Implemented domain | Not supplied |
+| --- | --- | --- |
+| Hull constant Cd | total Mach ≤ 0.3 | predictive transonic/supersonic coefficients |
+| Hull `MachCurve` / `NormalForceCurve` | caller inclusive Mach/incidence table | data and their uncertainty |
+| Slender-body normal load | Mach ≤ 0.3, small incidence, steady aligned flow | separation, wave drag, rotational derivatives |
+| Slender wave drag | Mach > 1, axis aligned, caller area slopes | predictive transonic closure |
+| `FiniteWing` default | Mach ≤ 0.3, attached flow | stall, separation |
+| Prandtl–Glauert wing | caller maximum below Mach 1 | shock onset, wave drag |
+| NDARC wing lift/drag rise | caller maximum; ratio ≤ 1.1 or explicit plateau | general high-supersonic wing model |
+| `WingPolar` | caller Mach/AoA grid only | interpolation outside the table |
+| Mesh/Colliders pressure | Mach ≥ 5 | subsonic/transonic surface pressure |
+| Base pressure | caller Cp and inclusive Mach range | wake interaction |
+| Incompressible friction | Mach ≤ 0.3 | compressibility, transition above 0.3 |
+| Transitioned flat plate | 500,000 < Re < 100,000,000, Mach ≤ 0.3 | prescribed transition only |
+| Compressible turbulent friction | Mach ≤ 0.95, 1M ≤ Re ≤ 100M | shock interaction, roughness |
+| High-speed laminar friction | Mach ≤ 10, 10k ≤ Re ≤ 100M | transition, real gas, roughness |
+| High-speed turbulent friction | Mach ≤ 5, 1M ≤ Re ≤ 100M | strong cooling, shock interaction |
+| Incompressible sphere | Mach ≤ 0.2, Re < 200,000 | drag crisis |
+| Continuum sphere | Mach 0.3–2, Re 300–10,000, Kn < 0.01 | rarefied flow |
+| Compression-dominated particle | Mach 0.25–10, 45 < Re < 200,000 | rarefaction branch |
+| Slip-corrected particle | Mach ≤ 0.2, Re ≤ 45, Kn ≤ 0.1 | higher Kn or Re |
+| Creeping particle | Mach ≤ 0.05, Re ≤ 0.1 | higher Mach or Re |
+| Free-molecular particle | diameter Kn ≥ 10 | transitional Kn |
+| Transitional particle | 0.1 ≤ Kn ≤ 10, Re ≤ 45, Mach ≤ 10 | other Kn/Re |
+| `LothParticle` selector | transitional Re ≤ 45, compression Re > 45 | gaps such as Mach 0.22, Re 100 |
+
+Predictive transonic hull drag rise, subsonic/transonic Mesh/Colliders pressure
+below Mach 5, automatic stall or separation, wake/shielding physics beyond
+geometric occlusion, base-flow interaction, surface roughness, high-speed
+transition, real-gas properties and a general supersonic wing lifting model
+remain outside the implemented models. Callers must not treat the table as
+evidence of accuracy outside each cited correlation's tested conditions.
 
 ## Skin friction
 

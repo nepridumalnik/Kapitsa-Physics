@@ -3,6 +3,9 @@
 This is a starting map against the supplied production plan, not an acceptance
 report. A checked build or an analytic-model test is not independent physical
 validation. FAR is a behavioral reference only; no GPL source is incorporated.
+The per-model domains in `docs/aerodynamics.md` are authoritative and have
+advanced since this map was written, notably for high-speed skin friction and
+rarefied particle drag; the acceptance gaps below are unchanged.
 
 | Plan | Available evidence | Remaining acceptance work |
 | --- | --- | --- |
