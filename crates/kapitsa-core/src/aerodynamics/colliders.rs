@@ -91,6 +91,65 @@ fn emit_capped_cylinder(
     Ok(())
 }
 
+fn emit_capsule(
+    start: Vec3,
+    end: Vec3,
+    start_radius: f64,
+    end_radius: f64,
+    config: ColliderTessellation,
+    emit: &mut impl FnMut([Vec3; 3]) -> Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+    let segment = end - start;
+    let length = segment.length();
+    let axis = segment
+        .try_normalize()
+        .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+    let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let u = axis
+        .cross(helper)
+        .try_normalize()
+        .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+    let v = axis.cross(u);
+    // A common supporting plane touches both endpoint spheres when its
+    // normal n satisfies n·(end − start) = start_radius − end_radius.
+    let seam_cos = (start_radius - end_radius) / length;
+    if !seam_cos.is_finite() || seam_cos.abs() >= 1.0 {
+        return Err(AerodynamicsError::ArithmeticOverflow.into());
+    }
+    let seam_sin = ((1.0 - seam_cos) * (1.0 + seam_cos)).sqrt();
+    let seam_angle = seam_sin.atan2(seam_cos);
+    let cap_steps = config.sphere_rings / 2;
+    let last = 2 * cap_steps + 1;
+    let point = |ring: usize, i: usize| {
+        if ring == 0 {
+            return end + axis * end_radius;
+        }
+        if ring == last {
+            return start - axis * start_radius;
+        }
+        let phi = std::f64::consts::TAU * (i % config.radial_segments) as f64
+            / config.radial_segments as f64;
+        let radial = u * phi.cos() + v * phi.sin();
+        let (center, radius, angle) = if ring <= cap_steps {
+            (end, end_radius, seam_angle * ring as f64 / cap_steps as f64)
+        } else {
+            let fraction = (ring - cap_steps - 1) as f64 / cap_steps as f64;
+            (
+                start,
+                start_radius,
+                seam_angle + (std::f64::consts::PI - seam_angle) * fraction,
+            )
+        };
+        let (sin, cos) = if ring == cap_steps || ring == cap_steps + 1 {
+            (seam_sin, seam_cos)
+        } else {
+            angle.sin_cos()
+        };
+        center + (radial * sin + axis * cos) * radius
+    };
+    emit_latitude_mesh(last + 1, config.radial_segments, point, emit)
+}
+
 fn emit_latitude_mesh(
     rings: usize,
     segments: usize,
@@ -128,7 +187,9 @@ pub fn collider_mesh<'a>(
             Shape::Cuboid(_) => 12,
             Shape::Sphere(_) => 2 * config.radial_segments * (config.sphere_rings - 2),
             Shape::Cylinder(_) | Shape::TaperedCylinder(_) => 4 * config.radial_segments,
-            Shape::Capsule(_) => 4 * config.radial_segments * (config.sphere_rings / 2),
+            Shape::Capsule(_) | Shape::TaperedCapsule(_) => {
+                4 * config.radial_segments * (config.sphere_rings / 2)
+            }
             Shape::Triangle(_) => 1,
             Shape::Convex(shape) => shape.faces().len(),
             Shape::TriangleMesh(shape) => shape.triangles().len(),
@@ -215,40 +276,22 @@ pub fn collider_mesh<'a>(
                     &mut emit,
                 )?;
             }
-            Shape::Capsule(shape) => {
-                let axis = (shape.end() - shape.start())
-                    .try_normalize()
-                    .ok_or(AerodynamicsError::ArithmeticOverflow)?;
-                let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
-                let u = axis
-                    .cross(helper)
-                    .try_normalize()
-                    .ok_or(AerodynamicsError::ArithmeticOverflow)?;
-                let v = axis.cross(u);
-                let cap_steps = config.sphere_rings / 2;
-                let last = 2 * cap_steps + 1;
-                let point = |ring: usize, segment: usize| {
-                    let radius = shape.radius();
-                    if ring == 0 {
-                        return shape.end() + axis * radius;
-                    }
-                    if ring == last {
-                        return shape.start() - axis * radius;
-                    }
-                    let phi = std::f64::consts::TAU * (segment % config.radial_segments) as f64
-                        / config.radial_segments as f64;
-                    let radial = u * phi.cos() + v * phi.sin();
-                    let (center, direction, distance_from_equator) = if ring <= cap_steps {
-                        (shape.end(), axis, cap_steps - ring)
-                    } else {
-                        (shape.start(), -axis, ring - cap_steps - 1)
-                    };
-                    let latitude = std::f64::consts::FRAC_PI_2 * distance_from_equator as f64
-                        / cap_steps as f64;
-                    center + (radial * latitude.cos() + direction * latitude.sin()) * radius
-                };
-                emit_latitude_mesh(last + 1, config.radial_segments, point, &mut emit)?;
-            }
+            Shape::Capsule(shape) => emit_capsule(
+                shape.start(),
+                shape.end(),
+                shape.radius(),
+                shape.radius(),
+                config,
+                &mut emit,
+            )?,
+            Shape::TaperedCapsule(shape) => emit_capsule(
+                shape.start(),
+                shape.end(),
+                shape.start_radius(),
+                shape.end_radius(),
+                config,
+                &mut emit,
+            )?,
             Shape::Cylinder(shape) => emit_capped_cylinder(
                 shape.start(),
                 shape.end(),
@@ -282,7 +325,7 @@ mod tests {
         aerodynamics::geometry::{
             GeometryConfig, GeometryInstance, GeometryOwner, OpenMeshPolicy, PreparedGeometry,
         },
-        shape::{Capsule, Cuboid, Cylinder, Plane, Sphere, TaperedCylinder},
+        shape::{Capsule, Cuboid, Cylinder, Plane, Sphere, TaperedCapsule, TaperedCylinder},
         transform::Transform,
     };
 
@@ -299,6 +342,7 @@ mod tests {
             Shape::Cylinder(Cylinder::new(-Vec3::Z, Vec3::Z, 1.0)?),
             Shape::TaperedCylinder(TaperedCylinder::new(-Vec3::Z, Vec3::Z, 1.0, 0.5)?),
             Shape::Capsule(Capsule::new(-Vec3::Z, Vec3::Z, 1.0)?),
+            Shape::TaperedCapsule(TaperedCapsule::new(-Vec3::Z, Vec3::Z, 1.0, 0.5)?),
         ] {
             let collider = Collider::new(shape, Transform::identity());
             let mesh = collider_mesh([&collider], config)?;
@@ -320,6 +364,38 @@ mod tests {
         assert_eq!(
             collider_mesh([&plane], config).err(),
             Some(crate::Error::from(AerodynamicsError::UnsupportedModel))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tapered_capsule_mesh_joins_caps_on_common_tangent() -> Result<(), crate::Error> {
+        let start = -Vec3::Z;
+        let end = Vec3::Z;
+        let collider = Collider::new(
+            Shape::TaperedCapsule(TaperedCapsule::new(start, end, 1.0, 0.5)?),
+            Transform::identity(),
+        );
+        let mesh = collider_mesh([&collider], ColliderTessellation::new(12, 8, 192)?)?;
+        assert_eq!(mesh.triangles().len(), 192);
+        let normal = Vec3::new(0.0, (15.0_f64 / 16.0).sqrt(), 0.25);
+        for expected in [
+            start + normal,
+            end + normal * 0.5,
+            start - Vec3::Z,
+            end + Vec3::Z * 0.5,
+        ] {
+            assert!(
+                mesh.vertices()
+                    .iter()
+                    .any(|point| (*point - expected).length() < 1e-14)
+            );
+        }
+        let support = start.dot(normal) + 1.0;
+        assert!(
+            mesh.vertices()
+                .iter()
+                .all(|point| point.dot(normal) <= support + 1e-14)
         );
         Ok(())
     }
