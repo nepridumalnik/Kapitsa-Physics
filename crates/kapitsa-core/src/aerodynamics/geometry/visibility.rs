@@ -106,6 +106,28 @@ fn retains_endpoints(a: Vec3, b: Vec3, difference: Vec3) -> bool {
             .all(|((a, b), d)| (b == 0.0 || d != a) && (a == 0.0 || d != -b))
 }
 
+fn projected_zero_may_be_rounded(a: Vec3, b: Vec3, c: Vec3, direction: Vec3) -> bool {
+    let [a, b, c, direction] = [a, b, c, direction].map(components);
+    let exact_difference = |a: f64, b: f64| {
+        let difference = a - b;
+        let b_virtual = a - difference;
+        let a_virtual = difference + b_virtual;
+        (a - a_virtual) + (b_virtual - b) == 0.0
+    };
+    direction.into_iter().enumerate().any(|(k, direction)| {
+        if direction == 0.0 {
+            return false;
+        }
+        let i = (k + 1) % 3;
+        let j = (k + 2) % 3;
+        [(i, j), (j, i)].into_iter().any(|(i, j)| {
+            b[i] != a[i]
+                && c[j] != a[j]
+                && (!exact_difference(b[i], a[i]) || !exact_difference(c[j], a[j]))
+        })
+    })
+}
+
 fn frame_or_exact(points: &[Vec3]) -> Result<Option<PredicateFrame>, crate::Error> {
     match PredicateFrame::new(points) {
         Ok(frame) => Ok(Some(frame)),
@@ -273,7 +295,17 @@ impl Shadow {
             None
         };
         let denominator = if let Some(frame) = direction_frame {
-            -frame.orientation(Vec3::ZERO, edge, other, direction)?
+            let value = -frame.orientation(Vec3::ZERO, edge, other, direction)?;
+            if value == 0.0 && projected_zero_may_be_rounded(a, b, c, upstream) {
+                None
+            } else {
+                Some(value)
+            }
+        } else {
+            None
+        };
+        let denominator = if let Some(value) = denominator {
+            value
         } else {
             charge(exact_orientation::WORK)?;
             exact_orientation::projected_sign(a, b, c, upstream)?
@@ -373,8 +405,18 @@ impl Shadow {
             } else {
                 None
             };
-            let reference = if let Some(frame) = &frame {
-                frame.orientation(Vec3::ZERO, edge, direction, opposite_offset)?
+            let fast_reference = if let Some(frame) = &frame {
+                let value = frame.orientation(Vec3::ZERO, edge, direction, opposite_offset)?;
+                if value == 0.0 && projected_zero_may_be_rounded(start, end, opposite, upstream) {
+                    None
+                } else {
+                    Some(value)
+                }
+            } else {
+                None
+            };
+            let reference = if let Some(value) = fast_reference {
+                value
             } else {
                 charge(exact_orientation::WORK)?;
                 exact_orientation::projected_sign(start, end, opposite, upstream)?
@@ -382,7 +424,7 @@ impl Shadow {
             if reference == 0.0 {
                 return Err(crate::Error::from(GeometryError::PrecisionLoss));
             }
-            let values = if let Some(frame) = &frame {
+            let values = if let (Some(frame), Some(_)) = (&frame, fast_reference) {
                 [
                     frame.orientation(Vec3::ZERO, edge, direction, offsets[0])?,
                     frame.orientation(Vec3::ZERO, edge, direction, offsets[1])?,
@@ -901,6 +943,31 @@ mod tests {
             .ok_or(GeometryError::PrecisionLoss)?;
         assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
         assert!(Shadow::new(&source, &blocker, 0, 1, -Vec3::X, |_| Ok(()))?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn partially_rounded_projection_does_not_hide_thin_blocker() -> Result<(), crate::Error> {
+        let x = 0.1_f64;
+        let a = Vec3::new(x, x.next_up(), 0.0);
+        let b = Vec3::X + Vec3::Y;
+        let c = b * 2.0;
+        assert!(retains_endpoints(b, a, b - a));
+        assert!(retains_endpoints(c, a, c - a));
+        assert_eq!((b - a).cross(c - a), Vec3::ZERO);
+        let blocker = SurfaceTriangle {
+            vertices: [a, b, c],
+            normal: Vec3::Z,
+            area: (x.next_up() - x) * 0.5,
+            owner: GeometryOwner::Body,
+        };
+        let source = SurfaceTriangle {
+            vertices: blocker.vertices.map(|point| point - Vec3::Z),
+            ..blocker
+        };
+        let shadow = Shadow::new(&source, &blocker, 0, 1, Vec3::Z, |_| Ok(()))?
+            .ok_or(GeometryError::PrecisionLoss)?;
+        assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
         Ok(())
     }
 
