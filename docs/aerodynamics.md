@@ -522,8 +522,11 @@ nonrotating, non-cluster body with the sphere centered on its center of mass.
 It samples density, wind and sound speed at the center of mass and uses the
 world sound-speed fallback when the atmosphere supplies none. Diameter and
 constant viscosity are set explicitly. The model rejects Mach above 0.2.
-The compressible sphere evaluator remains
-a separate model with its own domain and no automatic transition between them.
+The separate `sphere_drag::continuum_drag_force` uses the continuum component
+of [Singh et al.](https://arxiv.org/abs/2012.04813v1), equations 5–13 and 23–26.
+It derives Mach and diameter Reynolds number from local flow inputs and applies
+the frontal-area coefficient for Mach 0.3–2, Re 300–10,000 and Kn < 0.01.
+It is available as a force evaluator with no automatic transition between models.
 
 ## Skin friction
 

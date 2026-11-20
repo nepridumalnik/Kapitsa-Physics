@@ -128,6 +128,52 @@ pub fn incompressible_drag_force(
     dynamic_viscosity: f64,
     relative_velocity: Vec3,
 ) -> Result<Vec3, crate::Error> {
+    sphere_drag_force(
+        diameter,
+        density,
+        dynamic_viscosity,
+        relative_velocity,
+        |_, reynolds| Ok(stokes_multiplier(reynolds)?),
+    )
+}
+
+/// Force in newtons from the restricted compressible continuum sphere model.
+/// Uses the domain of [`continuum_drag_coefficient`] and acts at the center of
+/// the nonrotating sphere, opposite `relative_velocity` (body minus air, m/s).
+/// Diameter is in metres, density in kg/m³, dynamic viscosity in Pa·s and
+/// sound speed in m/s. Zero density or zero relative speed produces zero force.
+pub fn continuum_drag_force(
+    diameter: f64,
+    density: f64,
+    dynamic_viscosity: f64,
+    sound_speed: f64,
+    relative_velocity: Vec3,
+) -> Result<Vec3, crate::Error> {
+    if !sound_speed.is_finite() || sound_speed <= 0.0 {
+        return Err(SphereDragError::InvalidInput.into());
+    }
+    sphere_drag_force(
+        diameter,
+        density,
+        dynamic_viscosity,
+        relative_velocity,
+        |speed, reynolds| {
+            let mach = speed / sound_speed;
+            if !mach.is_finite() || mach == 0.0 {
+                return Err(SphereDragError::ArithmeticOverflow.into());
+            }
+            Ok(continuum_drag_coefficient(mach, reynolds)? * reynolds / STOKES_FACTOR)
+        },
+    )
+}
+
+fn sphere_drag_force(
+    diameter: f64,
+    density: f64,
+    dynamic_viscosity: f64,
+    relative_velocity: Vec3,
+    drag_relative_to_stokes: impl FnOnce(f64, f64) -> Result<f64, crate::Error>,
+) -> Result<Vec3, crate::Error> {
     if !diameter.is_finite()
         || diameter <= 0.0
         || !density.is_finite()
@@ -149,7 +195,7 @@ pub fn incompressible_drag_force(
         return Err(SphereDragError::ArithmeticOverflow.into());
     }
     // Factor out Stokes drag so slow flow needs neither 1/Re nor speed².
-    let correction = stokes_multiplier(reynolds)?;
+    let correction = drag_relative_to_stokes(speed, reynolds)?;
     let scale = (dynamic_viscosity * diameter) * (3.0 * std::f64::consts::PI * correction);
     let force = relative_velocity
         .checked_mul_scalar(-scale)
@@ -224,6 +270,43 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuum_force_matches_frontal_area_drag_through_mach_one() -> Result<(), crate::Error> {
+        let diameter = 0.01;
+        let viscosity = 0.001;
+        let density = 1.0;
+        let sound_speed = 100.0;
+        for mach in [0.3, 0.99, 1.0, 1.01, 2.0] {
+            let speed = mach * sound_speed;
+            let cd = continuum_drag_coefficient(mach, speed * 10.0)?;
+            let expected = 0.5
+                * density
+                * speed
+                * speed
+                * std::f64::consts::PI
+                * (diameter / 2.0_f64).powi(2)
+                * cd;
+            let force =
+                continuum_drag_force(diameter, density, viscosity, sound_speed, Vec3::Y * speed)?;
+            assert!((force.y / expected + 1.0).abs() < 1e-14);
+            assert_eq!(force.x, 0.0);
+            assert_eq!(force.z, 0.0);
+        }
+        assert_eq!(
+            continuum_drag_force(diameter, 0.0, viscosity, sound_speed, Vec3::X),
+            Ok(Vec3::ZERO)
+        );
+        assert_eq!(
+            continuum_drag_force(diameter, density, viscosity, sound_speed, Vec3::ZERO),
+            Ok(Vec3::ZERO)
+        );
+        assert_eq!(
+            continuum_drag_force(diameter, density, viscosity, sound_speed, Vec3::X * 210.0),
+            Err(SphereDragError::UnsupportedDomain.into())
+        );
+        Ok(())
+    }
 
     #[test]
     fn incompressible_force_matches_dynamic_pressure_and_stokes_limit() -> Result<(), crate::Error>
