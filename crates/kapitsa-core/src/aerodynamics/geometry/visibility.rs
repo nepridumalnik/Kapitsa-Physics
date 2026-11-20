@@ -77,6 +77,33 @@ impl PredicateFrame {
             self.point(d)?,
         ))
     }
+
+    fn fast_projection(
+        &self,
+        [start, end, point]: [Vec3; 3],
+        edge: Vec3,
+        offset: Vec3,
+        direction: Vec3,
+    ) -> Result<Option<f64>, crate::Error> {
+        let e = self.point(edge)?;
+        let p = self.point(offset)?;
+        let d = self.point(direction)?;
+        let zero = Coord3D {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let value = finite(orient3d(zero, e, d, p))?;
+        let permanent = (e.x.abs() * p.y.abs() + e.y.abs() * p.x.abs()) * d.z.abs()
+            + (e.y.abs() * p.z.abs() + e.z.abs() * p.y.abs()) * d.x.abs()
+            + (e.z.abs() * p.x.abs() + e.x.abs() * p.z.abs()) * d.y.abs();
+        // A normal subtraction changes each product by at most a few ulps;
+        // differences in the subnormal range are exact. Use a conservative
+        // margin for both product perturbations and determinant evaluation.
+        let uncertain = value.abs() <= 32.0 * f64::EPSILON * permanent
+            && projected_products_use_rounded_differences(start, end, point, direction);
+        Ok((!uncertain).then_some(value))
+    }
 }
 
 fn scale(mut value: f64, mut shift: i32) -> Result<f64, crate::Error> {
@@ -106,7 +133,7 @@ fn retains_endpoints(a: Vec3, b: Vec3, difference: Vec3) -> bool {
             .all(|((a, b), d)| (b == 0.0 || d != a) && (a == 0.0 || d != -b))
 }
 
-fn projected_zero_may_be_rounded(a: Vec3, b: Vec3, c: Vec3, direction: Vec3) -> bool {
+fn projected_products_use_rounded_differences(a: Vec3, b: Vec3, c: Vec3, direction: Vec3) -> bool {
     let [a, b, c, direction] = [a, b, c, direction].map(components);
     let exact_difference = |a: f64, b: f64| {
         let difference = a - b;
@@ -295,12 +322,7 @@ impl Shadow {
             None
         };
         let denominator = if let Some(frame) = direction_frame {
-            let value = -frame.orientation(Vec3::ZERO, edge, other, direction)?;
-            if value == 0.0 && projected_zero_may_be_rounded(a, b, c, upstream) {
-                None
-            } else {
-                Some(value)
-            }
+            frame.fast_projection([a, b, c], edge, other, direction)?
         } else {
             None
         };
@@ -406,12 +428,7 @@ impl Shadow {
                 None
             };
             let fast_reference = if let Some(frame) = &frame {
-                let value = frame.orientation(Vec3::ZERO, edge, direction, opposite_offset)?;
-                if value == 0.0 && projected_zero_may_be_rounded(start, end, opposite, upstream) {
-                    None
-                } else {
-                    Some(value)
-                }
+                frame.fast_projection([start, end, opposite], edge, opposite_offset, direction)?
             } else {
                 None
             };
@@ -943,6 +960,26 @@ mod tests {
             .ok_or(GeometryError::PrecisionLoss)?;
         assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
         assert!(Shadow::new(&source, &blocker, 0, 1, -Vec3::X, |_| Ok(()))?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn projection_filter_detects_nonzero_sign_reversal() -> Result<(), crate::Error> {
+        let a = Vec3::new(0.339_047_440_731_973_7, 0.384_338_398_802_053_34, 0.0);
+        let b = Vec3::new(0.373_762_739_740_275_1, 0.886_031_065_600_735_5, 0.0);
+        let c = Vec3::new(0.460_610_943_905_456_1, 2.141_129_203_856_350_7, 0.0);
+        let edge = b - a;
+        let offset = c - a;
+        let frame = PredicateFrame::new(&[Vec3::ZERO, edge, offset, Vec3::Z])?;
+        let rounded = frame.orientation(Vec3::ZERO, edge, Vec3::Z, offset)?;
+        let exact = exact_orientation::projected_sign(a, b, c, Vec3::Z)?;
+        assert_eq!(rounded.signum(), -exact);
+        assert_ne!(exact, 0.0);
+        assert!(
+            frame
+                .fast_projection([a, b, c], edge, offset, Vec3::Z)?
+                .is_none()
+        );
         Ok(())
     }
 

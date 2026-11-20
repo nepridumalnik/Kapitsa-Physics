@@ -540,12 +540,13 @@ the original vertices and direction so rounded differences do not enter
 the fallback. Overflowing intermediate differences and differences that
 equal one operand despite the other being nonzero also select this path.
 The fast projection continues to use floating-point edge vectors for other
-differences. If the fast direction or edge-reference determinant is zero,
-an error-free subtraction residual checks the components that participate
-in a nonzero determinant product. A nonzero residual selects the exact
-projection before a blocker is classified as tangent or a reference is
-rejected as degenerate. This check does not bound the error of nonzero
-fast determinants. Direction rescaling uses a power of two.
+differences. For direction and edge-reference determinants, the adaptive path compares
+the magnitude against 32 machine epsilons times the sum of absolute triple
+products in the scaled frame. Inside that margin, a nonzero subtraction
+residual in a participating product selects exact projection. This guards
+classification near cancellation without routing every rounded subtraction
+through the integer accumulator. It is not a bound on the returned affine
+edge coefficients. Direction rescaling uses a power of two.
 An overflowing axial depth separation selects the general depth predicate.
 
 Windward and partition triangle areas use the same exact accumulator when
