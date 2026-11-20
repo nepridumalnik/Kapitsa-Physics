@@ -13,6 +13,47 @@ fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepEr
     result.as_ref().err().and_then(|error| error.downcast_ref())
 }
 
+#[test]
+fn incompressible_sphere_uses_relative_wind_and_rejects_out_of_domain_flow()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::sphere_drag::{IncompressibleSphereDrag, SphereDragError};
+
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::X * 2.0,
+    )?));
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+    world.set_aerodynamics(
+        body,
+        Aerodynamics::IncompressibleSphere(IncompressibleSphereDrag::new(0.1, 0.01)?),
+    )?;
+    assert!(world.enable_cluster(body).is_err());
+    world.step(0.001)?;
+    assert!(
+        world
+            .body(body)
+            .ok_or("sphere body")?
+            .state()
+            .linear_velocity()
+            .x
+            > 0.0
+    );
+
+    world
+        .body_mut(body)
+        .ok_or("sphere body")?
+        .set_linear_velocity(Vec3::X * 100.0)?;
+    let before = world.body(body).ok_or("sphere body")?.motion();
+    assert!(
+        matches!(step_cause(&world.step(0.001)), Some(crate::world::StepError::Aerodynamics { cause, .. })
+        if cause.downcast_ref::<SphereDragError>() == Some(&SphereDragError::UnsupportedDomain))
+    );
+    assert_eq!(world.body(body).ok_or("sphere body")?.motion(), before);
+    Ok(())
+}
+
 fn aero_cause(
     result: &Result<(), crate::Error>,
 ) -> Option<&crate::aerodynamics::AerodynamicsError> {

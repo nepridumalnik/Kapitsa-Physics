@@ -27,6 +27,8 @@ pub enum Aerodynamics {
     #[default]
     None,
     Simple(AerodynamicProperties),
+    /// Incompressible drag on an isolated, non-cluster sphere.
+    IncompressibleSphere(sphere_drag::IncompressibleSphereDrag),
     Wing(wing::WingSurface),
     Wings(Vec<wing::WingSurface>),
     Hull(Vec<hull::HullSection>),
@@ -40,6 +42,10 @@ impl fmt::Debug for Aerodynamics {
         match self {
             Self::None => formatter.write_str("None"),
             Self::Simple(properties) => formatter.debug_tuple("Simple").field(properties).finish(),
+            Self::IncompressibleSphere(model) => formatter
+                .debug_tuple("IncompressibleSphere")
+                .field(model)
+                .finish(),
             Self::Wing(surface) => formatter.debug_tuple("Wing").field(surface).finish(),
             Self::Wings(surfaces) => formatter.debug_tuple("Wings").field(surfaces).finish(),
             Self::Hull(sections) => formatter.debug_tuple("Hull").field(sections).finish(),

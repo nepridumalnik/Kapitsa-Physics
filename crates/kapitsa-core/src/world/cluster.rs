@@ -561,6 +561,10 @@ impl PhysicsWorld {
         // Reject before changing topology rather than strand or lose loads.
         if !body_entry.body.base_pressure_patches.is_empty()
             || body_entry.body.potential_sphere.is_some()
+            || matches!(
+                body_entry.body.aerodynamics(),
+                Aerodynamics::IncompressibleSphere(_)
+            )
         {
             return Err(crate::Error::from(ClusterError::UnsupportedGeometry));
         }
@@ -2270,6 +2274,7 @@ impl PhysicsWorld {
             Aerodynamics::Simple(properties) => Some(AerodynamicSurface::new(*properties)),
             Aerodynamics::Mesh(_)
             | Aerodynamics::VoxelWave(_)
+            | Aerodynamics::IncompressibleSphere(_)
             | Aerodynamics::Colliders
             | Aerodynamics::Wing(_)
             | Aerodynamics::Wings(_)

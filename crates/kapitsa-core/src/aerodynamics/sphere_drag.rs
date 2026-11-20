@@ -7,6 +7,8 @@
 
 use kapitsa_math::Vec3;
 
+use super::AtmosphericState;
+
 const GAMMA: f64 = 1.4;
 const VISCOSITY_EXPONENT: f64 = 0.74;
 const BOUNDARY_LAYER_SCALE: f64 = 9.4;
@@ -23,6 +25,7 @@ const BROWN_LAWLER_VISCOUS_SCALE: f64 = 0.150;
 const BROWN_LAWLER_VISCOUS_EXPONENT: f64 = 0.681;
 const BROWN_LAWLER_INERTIAL_SCALE: f64 = 0.407;
 const BROWN_LAWLER_TRANSITION_REYNOLDS: f64 = 8_710.0;
+const INCOMPRESSIBLE_MAX_MACH: f64 = 0.2;
 
 /// Invalid or outside the deliberately restricted approximation domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +41,60 @@ impl std::fmt::Display for SphereDragError {
     }
 }
 impl std::error::Error for SphereDragError {}
+
+/// Drag model for a nonrotating sphere centered at the body's center of mass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IncompressibleSphereDrag {
+    diameter: f64,
+    dynamic_viscosity: f64,
+}
+
+impl IncompressibleSphereDrag {
+    /// Sets diameter in metres and constant dynamic viscosity in Pa·s. Both
+    /// must be finite and positive. The model accepts Mach ≤ 0.2 and diameter
+    /// Reynolds number < 200,000. The caller establishes continuum conditions
+    /// and supplies a sphere whose geometry remains unchanged during the run.
+    pub fn new(diameter: f64, dynamic_viscosity: f64) -> Result<Self, crate::Error> {
+        if !diameter.is_finite()
+            || diameter <= 0.0
+            || !dynamic_viscosity.is_finite()
+            || dynamic_viscosity <= 0.0
+        {
+            return Err(SphereDragError::InvalidInput.into());
+        }
+        Ok(Self {
+            diameter,
+            dynamic_viscosity,
+        })
+    }
+
+    pub(crate) fn evaluate(
+        self,
+        atmosphere: AtmosphericState,
+        sound_speed: f64,
+        linear_velocity: Vec3,
+        angular_velocity: Vec3,
+    ) -> Result<Vec3, crate::Error> {
+        if atmosphere.density() == 0.0 {
+            return Ok(Vec3::ZERO);
+        }
+        let relative_velocity = linear_velocity
+            .checked_sub(atmosphere.wind_velocity())
+            .ok_or(SphereDragError::ArithmeticOverflow)?;
+        let speed = relative_velocity
+            .checked_length()
+            .ok_or(SphereDragError::ArithmeticOverflow)?;
+        if angular_velocity != Vec3::ZERO || speed / sound_speed > INCOMPRESSIBLE_MAX_MACH {
+            return Err(SphereDragError::UnsupportedDomain.into());
+        }
+        incompressible_drag_force(
+            self.diameter,
+            atmosphere.density(),
+            self.dynamic_viscosity,
+            relative_velocity,
+        )
+    }
+}
 
 /// Incompressible drag coefficient for a smooth isolated sphere, referenced
 /// to frontal area. Implements Brown and Lawler (2003), equation (19):

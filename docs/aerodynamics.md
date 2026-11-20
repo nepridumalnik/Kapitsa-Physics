@@ -517,6 +517,11 @@ The correlation tends to `24/Re` in creeping flow and excludes the drag crisis.
 `sphere_drag::incompressible_drag_force` evaluates the corresponding force at
 the sphere center from diameter, density, dynamic viscosity and body-minus-fluid
 velocity. It factors out the Stokes force to avoid squaring very small speeds.
+`Aerodynamics::IncompressibleSphere` uses that force during stepping for a
+nonrotating, non-cluster body with the sphere centered on its center of mass.
+It samples density, wind and sound speed at the center of mass and uses the
+world sound-speed fallback when the atmosphere supplies none. Diameter and
+constant viscosity are set explicitly. The model rejects Mach above 0.2.
 The compressible sphere evaluator remains
 a separate model with its own domain and no automatic transition between them.
 
