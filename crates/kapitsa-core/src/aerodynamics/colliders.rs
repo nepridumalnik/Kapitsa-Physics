@@ -55,6 +55,42 @@ impl ColliderTessellation {
     }
 }
 
+fn emit_capped_cylinder(
+    start: Vec3,
+    end: Vec3,
+    start_radius: f64,
+    end_radius: f64,
+    segments: usize,
+    emit: &mut impl FnMut([Vec3; 3]) -> Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+    let axis = (end - start)
+        .try_normalize()
+        .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+    let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let u = axis
+        .cross(helper)
+        .try_normalize()
+        .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+    let v = axis.cross(u);
+    let radial = |i: usize| {
+        let angle = std::f64::consts::TAU * (i % segments) as f64 / segments as f64;
+        u * angle.cos() + v * angle.sin()
+    };
+    for i in 0..segments {
+        let first = radial(i);
+        let second = radial(i + 1);
+        let a = start + first * start_radius;
+        let b = start + second * start_radius;
+        let c = end + second * end_radius;
+        let d = end + first * end_radius;
+        emit([a, b, c])?;
+        emit([a, c, d])?;
+        emit([start, b, a])?;
+        emit([end, d, c])?;
+    }
+    Ok(())
+}
+
 fn emit_latitude_mesh(
     rings: usize,
     segments: usize,
@@ -91,7 +127,7 @@ pub fn collider_mesh<'a>(
         let count = match collider.shape() {
             Shape::Cuboid(_) => 12,
             Shape::Sphere(_) => 2 * config.radial_segments * (config.sphere_rings - 2),
-            Shape::Cylinder(_) => 4 * config.radial_segments,
+            Shape::Cylinder(_) | Shape::TaperedCylinder(_) => 4 * config.radial_segments,
             Shape::Capsule(_) => 4 * config.radial_segments * (config.sphere_rings / 2),
             Shape::Triangle(_) => 1,
             Shape::Convex(shape) => shape.faces().len(),
@@ -213,32 +249,22 @@ pub fn collider_mesh<'a>(
                 };
                 emit_latitude_mesh(last + 1, config.radial_segments, point, &mut emit)?;
             }
-            Shape::Cylinder(shape) => {
-                let axis = (shape.end() - shape.start())
-                    .try_normalize()
-                    .ok_or(AerodynamicsError::ArithmeticOverflow)?;
-                let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
-                let u = axis
-                    .cross(helper)
-                    .try_normalize()
-                    .ok_or(AerodynamicsError::ArithmeticOverflow)?;
-                let v = axis.cross(u);
-                let radial = |i: usize| {
-                    let angle = std::f64::consts::TAU * (i % config.radial_segments) as f64
-                        / config.radial_segments as f64;
-                    (u * angle.cos() + v * angle.sin()) * shape.radius()
-                };
-                for i in 0..config.radial_segments {
-                    let a = shape.start() + radial(i);
-                    let b = shape.start() + radial(i + 1);
-                    let c = shape.end() + radial(i + 1);
-                    let d = shape.end() + radial(i);
-                    emit([a, b, c])?;
-                    emit([a, c, d])?;
-                    emit([shape.start(), b, a])?;
-                    emit([shape.end(), d, c])?;
-                }
-            }
+            Shape::Cylinder(shape) => emit_capped_cylinder(
+                shape.start(),
+                shape.end(),
+                shape.radius(),
+                shape.radius(),
+                config.radial_segments,
+                &mut emit,
+            )?,
+            Shape::TaperedCylinder(shape) => emit_capped_cylinder(
+                shape.start(),
+                shape.end(),
+                shape.start_radius(),
+                shape.end_radius(),
+                config.radial_segments,
+                &mut emit,
+            )?,
             _ => return Err(crate::Error::from(AerodynamicsError::UnsupportedModel)),
         }
     }
@@ -256,7 +282,7 @@ mod tests {
         aerodynamics::geometry::{
             GeometryConfig, GeometryInstance, GeometryOwner, OpenMeshPolicy, PreparedGeometry,
         },
-        shape::{Capsule, Cuboid, Cylinder, Plane, Sphere},
+        shape::{Capsule, Cuboid, Cylinder, Plane, Sphere, TaperedCylinder},
         transform::Transform,
     };
 
@@ -271,6 +297,7 @@ mod tests {
             Shape::Cuboid(Cuboid::new(2.0, 2.0, 2.0)?),
             Shape::Sphere(Sphere::new(1.0)?),
             Shape::Cylinder(Cylinder::new(-Vec3::Z, Vec3::Z, 1.0)?),
+            Shape::TaperedCylinder(TaperedCylinder::new(-Vec3::Z, Vec3::Z, 1.0, 0.5)?),
             Shape::Capsule(Capsule::new(-Vec3::Z, Vec3::Z, 1.0)?),
         ] {
             let collider = Collider::new(shape, Transform::identity());
@@ -294,6 +321,32 @@ mod tests {
             collider_mesh([&plane], config).err(),
             Some(crate::Error::from(AerodynamicsError::UnsupportedModel))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn tapered_cylinder_mesh_uses_distinct_radii_at_both_caps() -> Result<(), crate::Error> {
+        let collider = Collider::new(
+            Shape::TaperedCylinder(TaperedCylinder::new(-Vec3::Z, Vec3::Z, 1.0, 0.5)?),
+            Transform::identity(),
+        );
+        let segments = 12;
+        let mesh = collider_mesh(
+            [&collider],
+            ColliderTessellation::new(segments, 8, 4 * segments)?,
+        )?;
+        assert_eq!(mesh.triangles().len(), 4 * segments);
+        let mut rim_points = [0; 2];
+        for vertex in mesh.vertices() {
+            assert_eq!(vertex.z.abs(), 1.0);
+            let side = usize::from(vertex.z > 0.0);
+            let radial = vertex.x.hypot(vertex.y);
+            if radial != 0.0 {
+                assert!((radial - [1.0, 0.5][side]).abs() < 1e-14);
+                rim_points[side] += 1;
+            }
+        }
+        assert_eq!(rim_points, [5 * segments; 2]);
         Ok(())
     }
 
