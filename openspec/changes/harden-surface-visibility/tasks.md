@@ -5,9 +5,10 @@
 - [x] Record `07c7285` independent power-of-two scaling per coordinate axis,
   the shared positive determinant factor within each orientation frame, and
   reversal of the two in-plane scales for barycentric area.
-- [x] Record that direction and projected edge predicates retain within-axis
-  exponent limits; exact depth fallback has no span limit, but final
-  coefficient representation can return `PrecisionLoss`.
+- [x] Record exact fallback for direction, depth and projected-edge frame-span
+  rejection or direction-scale underflow; charge before exact work, use sign
+  only for direction and edge references, and scale three edge coefficients
+  separately while retaining rounded-input and zero-coefficient limits.
 - [x] Document the two new synthetic regressions,
   `triangle_fraction_preserves_area_across_axis_scales` and
   `shadow_covers_thin_source_across_axis_scales`, without claiming execution
@@ -42,8 +43,9 @@
   `n` distance slots, and no new vertex buffer for an unsplit polygon.
 - [x] Distinguish logical reservation requests from allocator capacity and
   bytes, without claiming test execution or closing the remaining work audit.
-- [x] Record `0337ef5`: exact signed binary64 products in fixed 99-word
-  accumulators, a shared power-of-two scale and ties-to-even conversion.
+- [x] Record `0337ef5` and `cdc3e66`: exact signed binary64 products in fixed
+  99-word accumulators, ties-to-even conversion, and separate edge-coefficient
+  scaling from sign-only references.
 - [x] Record the `3 * (24 * 6 + 8) * 99` precharge before any fallback
   determinant; exclude exact depth work from the area consistency tolerance.
 - [x] Document synthetic cancellation, smallest-subnormal preservation,

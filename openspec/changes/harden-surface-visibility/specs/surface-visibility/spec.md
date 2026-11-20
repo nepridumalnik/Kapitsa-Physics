@@ -58,12 +58,14 @@ before exact fallback.
 - **THEN** the blocker covers the source-affine point `(0.25, 0.25, 0)` and
   the opposite flow direction rejects it
 
-### Requirement: Fall back to exact inclined depth
+### Requirement: Fall back to exact orientation predicates
 
-If an inclined depth frame exceeds the exponent span, preparation SHALL
-charge the fallback before computing its determinants. The fallback SHALL
-accumulate exactly in fixed-size storage and round the results with a common
-power-of-two scale. Nonzero values rounded to zero SHALL return `PrecisionLoss`.
+If a direction, depth, or projected-edge frame exceeds its span, or direction
+scaling overflows or makes a nonzero component subnormal or zero, preparation
+SHALL charge exact work
+before evaluation. Direction and edge-reference predicates SHALL use sign only;
+the three edge coefficients SHALL use a separate scale. A nonzero coefficient
+that rounds to zero SHALL return `PrecisionLoss`.
 
 #### Scenario: Large determinant terms cancel
 
@@ -84,6 +86,20 @@ power-of-two scale. Nonzero values rounded to zero SHALL return `PrecisionLoss`.
   `[X, 2*X + Y, X + Z]`, and flow is `X`
 - **THEN** rejected precharge returns `WorkBudgetExceeded` before exact work;
   accepted precharge recovers coverage at affine point `(0.25, 0.25, 0)`
+
+#### Scenario: Direction and edge frames use exact fallback
+
+- **WHEN** direction rescaling produces a subnormal component, or a direction,
+  depth, or projected-edge frame exceeds its exponent span
+- **THEN** preparation charges the affected exact predicate before exact work;
+  direction and edge-reference orientation use only their sign, and the three
+  edge coefficients are scaled independently of that reference
+
+#### Scenario: Rounded orientation inputs retain precision limits
+
+- **WHEN** exact orientation receives rounded input vectors or a coefficient
+  rounds a nonzero value to zero
+- **THEN** the existing `PrecisionLoss` limits remain in force
 
 ### Requirement: Preserve representable numeric intersections
 

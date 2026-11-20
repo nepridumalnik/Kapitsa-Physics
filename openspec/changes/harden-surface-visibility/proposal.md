@@ -22,10 +22,12 @@ This change covers:
 - recording the two synthetic regressions in `07c7285`: barycentric area
   preservation across axis scales and shadow coverage of a thin source;
 - evaluating coordinate-aligned blocker depth by signed axial separation;
-  inclined depth falls back to exact determinants without an exponent-span
-  limit, while direction and projected edge predicates retain their limits;
-- precharging fixed, allocation-free 99-word depth accumulations; sharing a
-  power-of-two scale and rounding ties to even, with `PrecisionLoss` if a
+  direction, depth and projected-edge predicates fall back to exact
+  orientations when their frames exceed span or direction scaling underflows;
+  direction and edge references use sign-only orientation, with edge
+  coefficients scaled separately;
+- precharging fixed, allocation-free 99-word orientation accumulations;
+  scaling coefficients and rounding ties to even, with `PrecisionLoss` if a
   nonzero coefficient rounds to zero;
 - recording synthetic cancellation, subnormal rounding and precharge budget
   rejection scenarios, without claiming execution or physical validation;

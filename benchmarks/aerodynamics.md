@@ -246,3 +246,10 @@ The exact depth fallback on `0337ef5` measured 20.66 us (20.13 to
 22.22 us) on the small fixture and 1.284 ms (1.279 to 1.287 ms)
 on the moderate fixture. These fixtures exercise the common path.
 The fallback itself has no timing measurement in this run.
+
+The projected orientation fallback on `cdc3e66` adds a synthetic
+two-triangle fixture with separation `2^-500 m` and oblique flow. The
+benchmark checks that only the blocker remains visible with area 0.5 m².
+End-to-end visibility preparation for this fixture measured 6.37 us
+(6.29 to 6.47 us). The run included the active workspace test suite and
+does not isolate determinant evaluation from geometry preparation.
