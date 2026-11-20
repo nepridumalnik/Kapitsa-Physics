@@ -324,7 +324,8 @@ pub enum BoundaryLayer {
     Turbulent,
 }
 
-/// Explicit dynamic viscosity (Pa s), regime, and caller-selected validity bounds.
+/// Fallback dynamic viscosity (Pa·s), regime, and caller-selected validity bounds.
+/// A dynamic viscosity sampled from the atmosphere takes precedence.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SkinFriction {
     dynamic_viscosity: f64,
@@ -688,7 +689,9 @@ impl HullSection {
         {
             let reynolds = scaled_product(
                 &[density, axial_speed.abs(), self.length],
-                friction.dynamic_viscosity,
+                flow.atmosphere
+                    .dynamic_viscosity()
+                    .unwrap_or(friction.dynamic_viscosity),
             )?;
             let cf = friction.mean_coefficient(reynolds)?;
             axial_force = axial_force
@@ -1561,6 +1564,40 @@ mod tests {
         )
         .unwrap();
         close(reversed.evaluate(flow(v)).unwrap().force, w.force);
+    }
+
+    #[test]
+    fn mean_friction_uses_sampled_dynamic_viscosity() -> Result<(), crate::Error> {
+        use crate::aerodynamics::{DensityProfile, SphericalAtmosphereBuilder};
+
+        let mut s = section(Vec3::ZERO);
+        s.axial_cd = 0.0;
+        s.crossflow_cd = 0.0;
+        s.skin_friction = Some(SkinFriction::new(
+            0.0096,
+            BoundaryLayer::Laminar,
+            10_000.0,
+            10_000.0,
+        )?);
+        let mut input = flow(Vec3::X * 20.0);
+        assert_eq!(
+            s.evaluate(input),
+            Err(HullError::UnsupportedReynolds.into())
+        );
+        let atmosphere = SphericalAtmosphereBuilder::default()
+            .reference_radius(0.0)
+            .reference_density(1.2)
+            .height(1.0)
+            .profile(DensityProfile::Exponential { scale_height: 1.0 })
+            .dynamic_viscosity_profile(0.0048, 0.0048)
+            .build()?;
+        input.atmosphere = atmosphere.state_at(Vec3::ZERO)?;
+        let cf = 1.328 / 10000.0_f64.sqrt();
+        close(
+            s.evaluate(input)?.force,
+            Vec3::X * (-0.5 * 1.2 * 400.0 * 5.0 * cf),
+        );
+        Ok(())
     }
 
     #[test]

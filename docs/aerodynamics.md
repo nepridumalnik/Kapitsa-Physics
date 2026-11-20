@@ -185,8 +185,10 @@ data: [drag coefficient](https://en.wikipedia.org/wiki/Drag_coefficient),
 [transonic](https://en.wikipedia.org/wiki/Transonic).
 
 Optional `SkinFriction::new` requires explicit positive
-finite dynamic viscosity, `BoundaryLayer::Laminar` or `Turbulent`, and positive
-finite inclusive Reynolds bounds. It uses `Re_L = rho |v · a| L / mu` and the
+finite fallback dynamic viscosity, `BoundaryLayer::Laminar` or `Turbulent`, and
+positive finite inclusive Reynolds bounds. If configured, the atmosphere's
+dynamic viscosity at the section's sampling point overrides the fallback.
+The model uses `Re_L = rho |v · a| L / mu` and the
 mean flat-plate coefficients derived in [Skin friction](#skin-friction):
 `Cf = 1.328 / sqrt(Re_L)` or `0.072 / Re_L^0.2`. Friction opposes axial flow
 only; length is per-section development length, not accumulated automatically.
