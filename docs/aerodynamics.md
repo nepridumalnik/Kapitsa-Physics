@@ -514,8 +514,27 @@ It uses a piecewise correction through Mach 1 and replaces the optional
 Prandtl-Glauert lifting-line approximation. Both parameters must be selected
 for the intended configuration; the model does not infer shock onset or stall.
 Its Mach limit, the attached-flow limit and any drag-rise correlation's domain
-remain independent. The supersonic branch is an engineering approximation, not
-a validated general supersonic wing model.
+remain independent. The NDARC supersonic branch is an engineering approximation,
+not a validated general supersonic wing model.
+
+`FiniteWing::with_supersonic_linear_theory(min_mach, max_mach)` adds a separate
+linearized supersonic finite-wing approximation. It uses Ackeret's section
+slope `4 / sqrt(M² - 1)` and an explicit finite-span engineering factor
+`AR / (AR + 2)`, so the slope approaches the two-dimensional value as aspect
+ratio grows and is reduced at low aspect ratio. Lift is
+`CL = slope (alpha - alpha_zero)`; drag is
+`CD = profile_drag + |CL alpha|`, the attached flat-plate wave-drag term.
+Span efficiency is not used in this supersonic lift slope because it is a
+subsonic induced-drag parameter.
+
+The domain is `1.2 <= min_mach <= Mach <= max_mach <= 5`, with the configured
+attached-flow angle limit. This is an engineering lifting-surface approximation,
+not a general supersonic solver: it does not model thickness, camber, sweep,
+tip relief, shock detachment, shock-boundary-layer interaction, separation or
+real-gas effects. It is incompatible with the transonic drag-rise builders;
+combining them returns `InvalidParameters`. Use a caller-supplied `WingPolar`
+when measured or CFD coefficients are available. The finite-span factor is a
+bounded approximation, not an independent experimental validation.
 
 `FiniteWing::with_drag_rise(critical_mach, scale)` optionally adds the empirical
 compressibility drag increment described in [NASA TP-2015-218751, section 8-8](https://rotorcraft.arc.nasa.gov/Publications/files/Johnson_NASA%20TP-2015-218751-app3.pdf).
@@ -776,6 +795,7 @@ engine does not blend models to hide a domain limit.
 | `FiniteWing` default | Mach ≤ 0.3, attached flow | stall, separation |
 | Prandtl–Glauert wing | caller maximum below Mach 1 | shock onset, wave drag |
 | NDARC wing lift/drag rise | caller maximum; ratio ≤ 1.1 or explicit plateau | general high-supersonic wing model |
+| Supersonic wing linear theory | 1.2 ≤ Mach ≤ min(caller max, 5), attached small incidence | thickness, camber, sweep, tip relief, shock detachment |
 | `WingPolar` | caller Mach/AoA grid only | interpolation outside the table |
 | Mesh/Colliders unmodified Newtonian | Mach ≥ 5 | subsonic/transonic pressure; use modified model |
 | Mesh/Colliders modified Newtonian | Mach 0–5 | attached suction/lift, wake, base flow, friction |
@@ -797,9 +817,11 @@ engine does not blend models to hide a domain limit.
 Potential-flow attached suction or lift for Mesh/Colliders, wake/shielding
 physics beyond geometric occlusion, base-flow interaction, surface roughness,
 high-speed transition, real-gas properties, a validated body-of-revolution
-transonic solver and a general supersonic wing lifting model remain outside the
+transonic solver and a validated general supersonic lifting-surface solution
+with thickness, sweep, tip relief and shock detachment remain outside the
 implemented models. The predictive hull transonic row is an equivalent-section
-Korn/Lock estimate, not a validated transonic body solution. The modified Newtonian Mesh/Colliders closure supplies
+Korn/Lock estimate, not a validated transonic body solution; the supersonic
+wing row is a bounded Ackeret/finite-span estimate, not a general solver. The modified Newtonian Mesh/Colliders closure supplies
 compression pressure only; it does not constitute a subsonic panel solution. Callers must not treat the table as
 evidence of accuracy outside each cited correlation's tested conditions.
 

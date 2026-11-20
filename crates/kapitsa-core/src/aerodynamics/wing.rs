@@ -1,7 +1,11 @@
 //! Finite-wing loads with an analytic attached-flow primitive or explicit polar.
 //!
 //! `FiniteWing` uses lifting-line slope a = a0 / (1 + a0 / (pi e AR)) and
-//! CDi = CL² / (pi e AR), without stall or compressibility continuation.
+//! CDi = CL² / (pi e AR), without stall. Optional explicit closures include
+//! Prandtl-Glauert subsonic compressibility, NDARC transonic corrections and a
+//! bounded Ackeret `4/sqrt(M²−1)` supersonic finite-wing estimate. The
+//! supersonic model uses `AR/(AR+2)` as an engineering finite-span factor and
+//! does not model thickness, sweep, tip relief or shock detachment.
 //! `WingSurface` optionally replaces that closure with caller-supplied TOTAL
 //! CL/CD data and a quasi-steady control incidence shift. No wing interference.
 //! Coefficients refer to planform area; angles are in radians.
@@ -221,6 +225,7 @@ enum Compressibility {
     Incompressible,
     Subsonic { max_mach: f64 },
     Ndarc { divergence_mach: f64, max_mach: f64 },
+    Supersonic { min_mach: f64, max_mach: f64 },
 }
 
 /// Explicit parameters for an empirical wing compressibility drag increment.
@@ -694,6 +699,45 @@ impl FiniteWing {
         Ok(self)
     }
 
+    /// Enables a linearized supersonic finite-wing approximation for
+    /// `1.2 <= Mach <= max_mach <= 5`.
+    ///
+    /// The section lift slope is Ackeret's `4 / sqrt(M² - 1)`. A finite-span
+    /// engineering factor `AR / (AR + 2)` reduces that slope for low aspect
+    /// ratios; it approaches the two-dimensional value as `AR` grows and is not
+    /// a general supersonic lifting-surface solution. Lift is
+    /// `CL = slope (alpha - alpha_zero)` and drag is
+    /// `CD = profile_drag + |CL alpha|`; the latter is the attached flat-plate
+    /// wave-drag term, not separated flow or viscous drag. Span efficiency is
+    /// not used by this supersonic lift slope because it is a subsonic
+    /// induced-drag parameter.
+    ///
+    /// The caller must establish a thin, uncambered or consistently tabulated
+    /// section, attached small-incidence flow, supersonic leading and trailing
+    /// edges, and a moderate supersonic Mach in the linear-theory range. This
+    /// model does not predict thickness, camber, sweep, tip relief, shock
+    /// detachment, shock-boundary-layer interaction, separation or real-gas
+    /// effects. It is incompatible with the transonic drag-rise builders.
+    pub fn with_supersonic_linear_theory(
+        mut self,
+        min_mach: f64,
+        max_mach: f64,
+    ) -> Result<Self, crate::Error> {
+        const MIN_SUPERSONIC_MACH: f64 = 1.2;
+        const MAX_SUPERSONIC_MACH: f64 = 5.0;
+        if !min_mach.is_finite()
+            || !max_mach.is_finite()
+            || min_mach < MIN_SUPERSONIC_MACH
+            || max_mach < min_mach
+            || max_mach > MAX_SUPERSONIC_MACH
+            || self.drag_rise.is_some()
+        {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        self.compressibility = Compressibility::Supersonic { min_mach, max_mach };
+        Ok(self)
+    }
+
     /// Adds the empirical NDARC compressibility drag increment.
     ///
     /// `critical_mach` is dimensionless, finite, and in (0, 1); `scale` is a
@@ -710,6 +754,7 @@ impl FiniteWing {
             || critical_mach >= 1.0
             || !scale.is_finite()
             || scale < 0.0
+            || matches!(self.compressibility, Compressibility::Supersonic { .. })
         {
             return Err(crate::Error::from(WingError::InvalidParameters));
         }
@@ -784,26 +829,33 @@ impl FiniteWing {
             return Err(crate::Error::from(WingError::InvalidFlow));
         }
         let alpha = angle_of_attack - self.zero_lift_angle;
-        let max_mach = match self.compressibility {
-            Compressibility::Incompressible => 0.3,
+        let (min_mach, max_mach) = match self.compressibility {
+            Compressibility::Incompressible => (0.0, 0.3),
             Compressibility::Subsonic { max_mach } | Compressibility::Ndarc { max_mach, .. } => {
-                max_mach
+                (0.0, max_mach)
             }
+            Compressibility::Supersonic { min_mach, max_mach } => (min_mach, max_mach),
         };
-        if mach > max_mach || alpha.abs() > self.max_attached_angle {
+        if mach < min_mach || mach > max_mach || alpha.abs() > self.max_attached_angle {
             return Err(crate::Error::from(WingError::UnsupportedFlow));
         }
         let effective_aspect = self.efficiency * self.aspect_ratio;
         let beta = match self.compressibility {
             Compressibility::Subsonic { .. } => (1.0 - mach * mach).sqrt(),
+            Compressibility::Supersonic { .. } => (mach * mach - 1.0).sqrt(),
             _ => 1.0,
         };
         // Algebraically equivalent form without overflowing pi*e*AR, or
         // underflowing the slope by first dividing 2*pi by a tiny denominator.
-        let slope = if effective_aspect >= 2.0 {
-            2.0 * PI / (beta + 2.0 / effective_aspect)
-        } else {
-            PI * effective_aspect / (1.0 + beta * effective_aspect / 2.0)
+        // The supersonic branch uses Ackeret's section slope with an explicit
+        // finite-span engineering factor, not the subsonic lifting-line form.
+        let slope = match self.compressibility {
+            Compressibility::Supersonic { .. } => {
+                let finite_span = self.aspect_ratio / (self.aspect_ratio + 2.0);
+                4.0 / beta * finite_span
+            }
+            _ if effective_aspect >= 2.0 => 2.0 * PI / (beta + 2.0 / effective_aspect),
+            _ => PI * effective_aspect / (1.0 + beta * effective_aspect / 2.0),
         };
         let lift_factor = match self.compressibility {
             Compressibility::Ndarc {
@@ -826,31 +878,36 @@ impl FiniteWing {
         if effective_aspect == 0.0 || !lift.is_finite() {
             return Err(crate::Error::from(WingError::ArithmeticOverflow));
         }
-        let drag_rise = if let Some(model) = self.drag_rise {
-            let critical_mach = if model.lift_sensitivity != 0.0 {
-                if !(0.0..=1.0).contains(&lift) {
-                    return Err(crate::Error::from(WingError::UnsupportedFlow));
-                }
-                let correction = lift * (0.03 + lift * (0.19 + lift * 0.78));
-                model.critical_mach - model.lift_sensitivity * correction
-            } else {
-                model.critical_mach
-            };
-            if !critical_mach.is_finite() || critical_mach <= 0.0 {
-                return Err(crate::Error::from(WingError::ArithmeticOverflow));
+        let drag = match self.compressibility {
+            Compressibility::Supersonic { .. } => self.profile_drag + (lift * alpha).abs(),
+            _ => {
+                let drag_rise = if let Some(model) = self.drag_rise {
+                    let critical_mach = if model.lift_sensitivity != 0.0 {
+                        if !(0.0..=1.0).contains(&lift) {
+                            return Err(crate::Error::from(WingError::UnsupportedFlow));
+                        }
+                        let correction = lift * (0.03 + lift * (0.19 + lift * 0.78));
+                        model.critical_mach - model.lift_sensitivity * correction
+                    } else {
+                        model.critical_mach
+                    };
+                    if !critical_mach.is_finite() || critical_mach <= 0.0 {
+                        return Err(crate::Error::from(WingError::ArithmeticOverflow));
+                    }
+                    let ratio = mach / critical_mach;
+                    if ratio > 1.1 && !model.hold_above_limit {
+                        return Err(crate::Error::from(WingError::UnsupportedFlow));
+                    }
+                    let x = (ratio.min(1.1) - 0.7).max(0.0);
+                    let x2 = x * x;
+                    let x4 = x2 * x2;
+                    model.scale * (6.5 * x2 + 28.0 * x4 + 2870.0 * x4 * x4)
+                } else {
+                    0.0
+                };
+                self.profile_drag + (lift / effective_aspect) * (lift / PI) + drag_rise
             }
-            let ratio = mach / critical_mach;
-            if ratio > 1.1 && !model.hold_above_limit {
-                return Err(crate::Error::from(WingError::UnsupportedFlow));
-            }
-            let x = (ratio.min(1.1) - 0.7).max(0.0);
-            let x2 = x * x;
-            let x4 = x2 * x2;
-            model.scale * (6.5 * x2 + 28.0 * x4 + 2870.0 * x4 * x4)
-        } else {
-            0.0
         };
-        let drag = self.profile_drag + (lift / effective_aspect) * (lift / PI) + drag_rise;
         if effective_aspect == 0.0 || !lift.is_finite() || !drag.is_finite() {
             return Err(crate::Error::from(WingError::ArithmeticOverflow));
         }
@@ -1288,6 +1345,63 @@ mod tests {
             model.coefficients(0.0, 1.21),
             Err(crate::Error::from(WingError::UnsupportedFlow))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn supersonic_linear_wing_uses_ackeret_and_explicit_domain() -> Result<(), crate::Error> {
+        let model =
+            FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.4)?.with_supersonic_linear_theory(1.2, 3.0)?;
+        let alpha = 0.1;
+        let mach: f64 = 2.0;
+        let beta = (mach * mach - 1.0).sqrt();
+        let expected_lift = 4.0 / beta * (4.0 / 6.0) * alpha;
+        let coefficients = model.coefficients(alpha, mach)?;
+        assert!((coefficients.lift - expected_lift).abs() < 1e-12);
+        assert!((coefficients.drag - (0.02 + expected_lift * alpha)).abs() < 1e-12);
+        assert!(coefficients.drag > 0.0);
+        // Ackeret's two-dimensional limit is approached as AR grows.
+        let high_ar = FiniteWing::new(100.0, 1.0, 0.0, 0.0, 0.4)?
+            .with_supersonic_linear_theory(1.2, 3.0)?
+            .coefficients(alpha, mach)?;
+        let two_dimensional = 4.0 / beta * alpha;
+        assert!(high_ar.lift < two_dimensional);
+        assert!((high_ar.lift / two_dimensional - 100.0 / 102.0).abs() < 1e-12);
+        // Negative incidence produces negative lift and positive drag.
+        let negative = model.coefficients(-alpha, mach)?;
+        assert!(negative.lift < 0.0);
+        assert!((negative.drag - coefficients.drag).abs() < 1e-12);
+        // Explicit supersonic domain.
+        assert_eq!(
+            model.coefficients(alpha, 1.1),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
+        assert_eq!(
+            model.coefficients(alpha, 3.1),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
+        // Transonic drag-rise builders cannot be combined with this model.
+        assert!(model.with_drag_rise(0.8, 0.001).is_err());
+        assert!(
+            FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.4)?
+                .with_drag_rise(0.8, 0.001)?
+                .with_supersonic_linear_theory(1.2, 3.0)
+                .is_err()
+        );
+        for (min, max) in [
+            (1.1, 3.0),
+            (1.2, 0.0),
+            (1.2, 6.0),
+            (f64::NAN, 3.0),
+            (1.2, f64::NAN),
+        ] {
+            assert!(
+                FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.4)?
+                    .with_supersonic_linear_theory(min, max)
+                    .is_err(),
+                "accepted min={min} max={max}"
+            );
+        }
         Ok(())
     }
 

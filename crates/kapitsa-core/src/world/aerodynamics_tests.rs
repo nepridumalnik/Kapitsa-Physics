@@ -2304,6 +2304,58 @@ fn mesh_pressure_errors_preserve_cause_and_motion_in_all_world_paths() {
 }
 
 #[test]
+fn supersonic_linear_wing_loads_advance_body() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::wing::{FiniteWing, WingSurface};
+    let alpha = 0.05_f64;
+    let speed = 680.0;
+    let density = 1.2;
+    let area = 2.0;
+    let mass_kg = 100.0;
+    let dt = 0.001;
+    let direction = Vec3::new(alpha.cos(), 0.0, -alpha.sin());
+    let lift_direction = Vec3::new(-direction.z, 0.0, direction.x);
+    let model =
+        FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.4)?.with_supersonic_linear_theory(1.2, 3.0)?;
+    let coefficients = model.coefficients(alpha, speed / 340.0)?;
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            density,
+            Vec3::ZERO,
+        )?));
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(mass_kg, Vec3::ZERO, Mat3::IDENTITY)?,
+        )?;
+        body.set_linear_velocity(direction * speed)?;
+        body.set_aerodynamics(Aerodynamics::Wing(WingSurface::new(
+            model,
+            Transform::identity(),
+            area,
+        )?));
+        let id = world.add_body(body)?;
+        if sharded {
+            world.step_with_shards(
+                dt,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(dt)?;
+        }
+        let expected_delta = (lift_direction * coefficients.lift - direction * coefficients.drag)
+            * (0.5 * density * speed * speed * area * dt / mass_kg);
+        let velocity = world.body(id).ok_or("body")?.state().linear_velocity();
+        assert!(
+            (velocity - (direction * speed + expected_delta)).length() < 1e-9,
+            "sharded={sharded}: {velocity:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn wing_world_loads_and_failures_match_between_step_paths() {
     use crate::aerodynamics::wing::{FiniteWing, WingError, WingSurface};
     let mut reference = None;
