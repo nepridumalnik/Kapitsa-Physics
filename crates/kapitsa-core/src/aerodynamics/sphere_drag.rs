@@ -523,12 +523,30 @@ fn air_diameter_knudsen(
     sound_speed: f64,
     diameter: f64,
 ) -> Result<f64, SphereDragError> {
-    let denominator = (density * sound_speed) * diameter;
-    let kn = (viscosity / denominator) * air_mean_free_path_factor();
-    if !denominator.is_finite() || !kn.is_finite() {
-        return Err(SphereDragError::ArithmeticOverflow);
+    let density_speed = density * sound_speed;
+    let denominator = density_speed * diameter;
+    let ratio = viscosity / denominator;
+    if density_speed.is_normal() && denominator.is_normal() && ratio.is_normal() {
+        let kn = ratio * air_mean_free_path_factor();
+        return if kn.is_finite() {
+            Ok(kn)
+        } else {
+            Err(SphereDragError::ArithmeticOverflow)
+        };
     }
-    Ok(kn)
+
+    // Keep the denominator factors normalized individually before combining
+    // exponents. A small diameter can cancel an overflowing density–speed product.
+    use super::hull::{decompose_positive, scaled_product_with_exponent};
+    let (density, density_power) = decompose_positive(density);
+    let (sound_speed, sound_speed_power) = decompose_positive(sound_speed);
+    let (diameter, diameter_power) = decompose_positive(diameter);
+    scaled_product_with_exponent(
+        &[viscosity, air_mean_free_path_factor()],
+        density * sound_speed * diameter,
+        -(density_power + sound_speed_power + diameter_power),
+    )
+    .map_err(|_| SphereDragError::ArithmeticOverflow)
 }
 
 fn free_molecular_slow_gain(speed_ratio: f64) -> f64 {
@@ -669,6 +687,21 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knudsen_number_survives_overflowing_and_underflowing_denominator_products()
+    -> Result<(), SphereDragError> {
+        let cases = [
+            (1e308, 1.0, 10.0, 1e-308, 0.1),
+            (1e-250, 1.0, 1e-100, 1e308, 1e42),
+        ];
+        for (density, viscosity, sound_speed, diameter, ratio) in cases {
+            let expected = ratio * air_mean_free_path_factor();
+            let actual = air_diameter_knudsen(density, viscosity, sound_speed, diameter)?;
+            assert!((actual / expected - 1.0).abs() < 1e-14);
+        }
+        Ok(())
+    }
 
     #[test]
     fn sphere_force_preserves_representable_results_with_extreme_intermediates()
