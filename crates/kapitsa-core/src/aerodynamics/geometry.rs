@@ -1341,6 +1341,9 @@ impl PreparedGeometry {
                 .checked_add(query_work)
                 .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
             check_surface_work(Some(work), max_work)?;
+            let partition_start_work = work;
+            let mut next = Vec::new();
+            let mut distances = Vec::new();
             for j in candidates {
                 if i == j {
                     continue;
@@ -1362,24 +1365,20 @@ impl PreparedGeometry {
                     {
                         continue;
                     }
-                    let mut next = Vec::new();
-                    for polygon in pieces {
+                    for polygon in pieces.drain(..) {
                         let polygon_work = polygon
                             .len()
                             .checked_mul(CLIP_VERTEX_WORK)
                             .and_then(|n| n.checked_add(POLYGON_VISIT_WORK))
                             .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                         charge_surface_work(&mut work, polygon_work, max_work)?;
-                        let mut distances = Vec::new();
+                        distances.clear();
                         distances
                             .try_reserve_exact(polygon.len())
                             .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
                         for point in &polygon {
                             let distance = visibility::distance(coefficients, *point)?;
                             distances.push(distance);
-                        }
-                        if !distances.iter().all(|d| d.is_finite()) {
-                            return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
                         }
                         if !distances.iter().any(|d| *d > 0.0)
                             || !distances.iter().any(|d| *d < 0.0)
@@ -1408,7 +1407,7 @@ impl PreparedGeometry {
                         checked_push(&mut next, positive)?;
                         checked_push(&mut next, negative)?;
                     }
-                    pieces = next;
+                    std::mem::swap(&mut pieces, &mut next);
                 }
                 checked_push(&mut shadows, shadow)?;
             }
@@ -1472,10 +1471,9 @@ impl PreparedGeometry {
                 }
             }
             // Splitting must conserve the source's unit barycentric area.
-            // Heuristic consistency tolerance at the global charged-work scale.
-            // Unrelated preprocessing and previous sources contribute to work;
-            // this is not a proven numerical bound for the current partition.
-            let roundoff = work as f64 * f64::EPSILON;
+            // Heuristic consistency tolerance based on this source partition.
+            // The initial triangle contributes one unit even before clipping.
+            let roundoff = ((work - partition_start_work) as f64 + 1.0) * f64::EPSILON;
             let allowance = roundoff / (1.0 - roundoff);
             let partition_fraction = partition_fraction.value();
             if !partition_fraction.is_finite()
