@@ -1209,7 +1209,7 @@ fn wide_shadow_projection_obeys_end_to_end_budget() -> Result<(), crate::Error> 
     );
     // Three edge planes each charge a reference sign and three coefficients.
     const EXACT_DETERMINANTS: usize = 12;
-    const WORK_PER_DETERMINANT: usize = 15_048;
+    const WORK_PER_DETERMINANT: usize = 1_224;
     const ORDINARY_WORK: usize = 382;
     assert_eq!(
         upper,

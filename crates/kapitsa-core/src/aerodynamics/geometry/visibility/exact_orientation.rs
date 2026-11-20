@@ -6,9 +6,13 @@ use super::{GeometryError, Vec3, components, scale};
 const MIN_EXPONENT: i32 = -3222;
 const LIMBS: usize = 99;
 
-// Charges one fixed-size determinant accumulation, including limb scans
-// and carry propagation on both signs of the sum.
-pub(super) const WORK: usize = (24 * 6 + 8) * LIMBS;
+// Each term places at most six payload words. Per payload, there is one
+// initial limb write and at most one terminating carry write. Intermediate
+// carry writes turn an all-ones limb into zero. Since only the initial and
+// terminating writes can create all-ones limbs, at most two intermediate
+// carry writes per payload are possible amortized across a determinant.
+pub(super) const WORK: usize = 24 * 6 * 4 + 8 * LIMBS;
+pub(super) const PROJECTED_WORK: usize = 18 * 6 * 4 + 8 * LIMBS;
 
 #[derive(Clone, Copy)]
 struct Factor {
@@ -132,9 +136,11 @@ impl Determinant {
         Some(limb * 64 + 63 - self.magnitude[limb].leading_zeros() as usize)
     }
 
-    fn scaled(&self, leading: usize, common: usize) -> Result<f64, crate::Error> {
+    fn scaled(&self, leading: usize, common: i32) -> Result<f64, crate::Error> {
         // Round once to binary64's significand, or to its subnormal grid.
-        let shift = leading.saturating_sub(52).max(common.saturating_sub(1074));
+        let shift = leading
+            .saturating_sub(52)
+            .max((common - 1074).max(0) as usize);
         let limb = shift / 64;
         let offset = shift % 64;
         let mut top = self.magnitude[limb] >> offset;
@@ -153,7 +159,7 @@ impl Determinant {
         if top == 0 {
             return Err(GeometryError::PrecisionLoss.into());
         }
-        let magnitude = scale(top as f64, shift as i32 - common as i32)?;
+        let magnitude = scale(top as f64, shift as i32 - common)?;
         Ok(if self.negative { -magnitude } else { magnitude })
     }
 }
@@ -167,7 +173,7 @@ pub(super) fn area_fraction(points: [Vec3; 3]) -> Result<f64, crate::Error> {
     let determinant = Determinant::new([a, b, c, factors(Vec3::Z)]);
     if let Some(leading) = determinant.leading_bit() {
         // Each integer bit represents a power of two relative to MIN_EXPONENT.
-        Ok(determinant.scaled(leading, (-MIN_EXPONENT) as usize)?.abs())
+        Ok(determinant.scaled(leading, -MIN_EXPONENT)?.abs())
     } else {
         Ok(0.0)
     }
@@ -196,6 +202,26 @@ pub(super) fn projected_sign(
         (Some(_), true) => -1.0,
         (Some(_), false) => 1.0,
     })
+}
+
+pub(super) fn projected_coefficient(
+    [start, end, point]: [Vec3; 3],
+    direction: Vec3,
+    scale_exponent: i32,
+) -> Result<f64, crate::Error> {
+    if [start, end, point, direction]
+        .iter()
+        .any(|point| !point.is_finite())
+    {
+        return Err(GeometryError::ArithmeticOverflow.into());
+    }
+    let [start, end, point, direction] = [start, end, point, direction].map(factors);
+    let determinant = Determinant::projected(start, end, point, direction);
+    if let Some(leading) = determinant.leading_bit() {
+        determinant.scaled(leading, -MIN_EXPONENT - scale_exponent)
+    } else {
+        Ok(0.0)
+    }
 }
 
 pub(super) fn projected_coefficients(
@@ -231,7 +257,7 @@ fn scaled_values(determinants: [Determinant; 3]) -> Result<[f64; 3], crate::Erro
     let mut result = [0.0; 3];
     for ((result, determinant), leading) in result.iter_mut().zip(determinants).zip(leading) {
         if let Some(leading) = leading {
-            *result = determinant.scaled(leading, common)?;
+            *result = determinant.scaled(leading, common as i32)?;
         }
     }
     Ok(result)
@@ -240,6 +266,18 @@ fn scaled_values(determinants: [Determinant; 3]) -> Result<[f64; 3], crate::Erro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projected_coefficient_uses_the_requested_binary_scale() -> Result<(), crate::Error> {
+        let points = [Vec3::ZERO, Vec3::X, Vec3::Y * 0.25];
+        for exponent in [-1000, 0, 1000] {
+            assert_eq!(
+                projected_coefficient(points, Vec3::Z, exponent)?,
+                2.0_f64.powi(exponent - 2)
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn projected_determinants_preserve_displacement_lost_by_subtraction() -> Result<(), crate::Error>

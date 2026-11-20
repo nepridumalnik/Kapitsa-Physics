@@ -329,7 +329,7 @@ impl Shadow {
         let denominator = if let Some(value) = denominator {
             value
         } else {
-            charge(exact_orientation::WORK)?;
+            charge(exact_orientation::PROJECTED_WORK)?;
             exact_orientation::projected_sign(a, b, c, upstream)?
         };
         if denominator == 0.0 {
@@ -435,20 +435,31 @@ impl Shadow {
             let reference = if let Some(value) = fast_reference {
                 value
             } else {
-                charge(exact_orientation::WORK)?;
+                charge(exact_orientation::PROJECTED_WORK)?;
                 exact_orientation::projected_sign(start, end, opposite, upstream)?
             };
             if reference == 0.0 {
                 return Err(crate::Error::from(GeometryError::PrecisionLoss));
             }
             let values = if let (Some(frame), Some(_)) = (&frame, fast_reference) {
-                [
-                    frame.orientation(Vec3::ZERO, edge, direction, offsets[0])?,
-                    frame.orientation(Vec3::ZERO, edge, direction, offsets[1])?,
-                    frame.orientation(Vec3::ZERO, edge, direction, offsets[2])?,
-                ]
+                let mut values = [0.0; 3];
+                let scale_exponent =
+                    frame.shifts.iter().sum::<i32>() + (size_exponent >> 52) as i32 - 1023;
+                for ((value, point), offset) in values.iter_mut().zip(source_vertices).zip(offsets)
+                {
+                    let points = [start, end, point];
+                    *value = if let Some(value) =
+                        frame.fast_projection(points, edge, offset, direction)?
+                    {
+                        value
+                    } else {
+                        charge(exact_orientation::PROJECTED_WORK)?;
+                        exact_orientation::projected_coefficient(points, upstream, scale_exponent)?
+                    };
+                }
+                values
             } else {
-                charge(3 * exact_orientation::WORK)?;
+                charge(3 * exact_orientation::PROJECTED_WORK)?;
                 exact_orientation::projected_coefficients(start, end, source_vertices, upstream)?
             };
             *plane = values.map(|value| value * reference.signum());
@@ -1070,7 +1081,7 @@ mod tests {
                 Ok(())
             })?
             .ok_or(GeometryError::PrecisionLoss)?;
-            assert!(work >= 4 * exact_orientation::WORK);
+            assert!(work >= 4 * exact_orientation::PROJECTED_WORK);
             assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
             assert!(!shadow.covers(Vec3::new(0.75, 0.25, 0.0))?);
         }

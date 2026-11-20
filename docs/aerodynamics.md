@@ -543,10 +543,11 @@ The fast projection continues to use floating-point edge vectors for other
 differences. For direction and edge-reference determinants, the adaptive path compares
 the magnitude against 32 machine epsilons times the sum of absolute triple
 products in the scaled frame. Inside that margin, a nonzero subtraction
-residual in a participating product selects exact projection. This guards
-classification near cancellation without routing every rounded subtraction
-through the integer accumulator. It is not a bound on the returned affine
-edge coefficients. Direction rescaling uses a power of two.
+residual in a participating product selects exact projection. For an uncertain edge coefficient in an accepted frame, only
+that determinant is recomputed. Its rounded result uses the same binary
+scale as the other coefficients before normalization. An edge without an
+accepted reference or frame still computes all three coefficients
+together. Direction rescaling uses a power of two.
 An overflowing axial depth separation selects the general depth predicate.
 
 Windward and partition triangle areas use the same exact accumulator when
@@ -587,7 +588,13 @@ overhead and elapsed time are outside this per-preparation accounting.
 | Partition cuts | Each polygon visit charges `1 + 16*n` before evaluating distances or allocating a split. | At most `4*n` output vertex slots requested per cut and `n` distance slots. Across cuts, split vertex requests total at most `W/4`, excluding the initial polygons. |
 | Patch emission and output transform | Fan triangles, centroid shadow tests and full-patch replacement are charged before their respective work. Frame conversion is reserved for the full output before returning it. | At most `W/16 + W/48` logical patch entries, counting fan emissions and at most one replacement per source. |
 
-The wide projected-edge regression needs 180,958 units, including twelve
+The exact work charge bounds carry propagation with an amortized count.
+Intermediate carries clear all-ones limbs, which only payload or terminating
+carry writes can create. Projected determinants use at most 18 terms and
+charge 1,224 units. Other determinants use at most 24 terms and charge 1,368
+units. Both charges include fixed-size scans and initialization.
+
+The wide projected-edge regression needs 15,070 units, including twelve
 exact determinants. It returns the same complete output at the minimum
 budget as at the hard cap and returns `WorkBudgetExceeded` one unit below.
 Separate regressions cover ordinary clipping, multiple shadows and the final
