@@ -16,6 +16,7 @@ const CELL_TETRAHEDRA: [[usize; 4]; 6] = [
     [0, 4, 5, 7],
     [0, 5, 1, 7],
 ];
+const MAX_LEVEL_SET_CELLS: usize = 65_536;
 
 fn emit_level_set(
     field: &LevelSet,
@@ -25,12 +26,22 @@ fn emit_level_set(
     for z in 0..nz - 1 {
         for y in 0..ny - 1 {
             for x in 0..nx - 1 {
+                let corners = std::array::from_fn::<_, 8, _>(|i| {
+                    [x + (i & 1), y + ((i >> 1) & 1), z + (i >> 2)]
+                });
+                let values =
+                    corners.map(|[x, y, z]| field.signed_distances()[(z * ny + y) * nx + x]);
+                if values
+                    .iter()
+                    .all(|value| (*value < 0.0) == (values[0] < 0.0))
+                {
+                    continue;
+                }
                 let nodes = std::array::from_fn::<_, 8, _>(|i| {
-                    let [x, y, z] = [x + (i & 1), y + ((i >> 1) & 1), z + (i >> 2)];
-                    let value = field.signed_distances()[(z * ny + y) * nx + x];
+                    let [x, y, z] = corners[i];
                     let point = field.origin()
                         + field.grid_spacing() * Vec3::new(x as f64, y as f64, z as f64);
-                    (point, value)
+                    (point, values[i])
                 });
                 for tetrahedron in CELL_TETRAHEDRA {
                     emit_tetrahedron(tetrahedron.map(|index| nodes[index]), emit)?;
@@ -279,6 +290,7 @@ pub fn collider_mesh<'a>(
 ) -> Result<TriangleMesh, crate::Error> {
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
+    let mut remaining_level_set_cells = MAX_LEVEL_SET_CELLS;
     for collider in colliders {
         let count = match collider.shape() {
             Shape::Cuboid(_) => 12,
@@ -295,11 +307,26 @@ pub fn collider_mesh<'a>(
                 .checked_mul(shape.columns() - 1)
                 .and_then(|cells| cells.checked_mul(2))
                 .ok_or(AerodynamicsError::TessellationBudgetExceeded)?,
-            Shape::LevelSet(shape) => shape
-                .dimensions()
-                .into_iter()
-                .try_fold(12usize, |work, n| work.checked_mul(n - 1))
-                .ok_or(AerodynamicsError::TessellationBudgetExceeded)?,
+            Shape::LevelSet(shape) => {
+                let cells = shape
+                    .dimensions()
+                    .into_iter()
+                    .try_fold(1usize, |count, n| count.checked_mul(n - 1))
+                    .ok_or(AerodynamicsError::TessellationBudgetExceeded)?;
+                remaining_level_set_cells = remaining_level_set_cells
+                    .checked_sub(cells)
+                    .ok_or(AerodynamicsError::TessellationBudgetExceeded)?;
+                let remaining_triangles = config.max_triangles - triangles.len();
+                let mut count = 0;
+                emit_level_set(shape, &mut |_| {
+                    if count == remaining_triangles {
+                        return Err(AerodynamicsError::TessellationBudgetExceeded.into());
+                    }
+                    count += 1;
+                    Ok(())
+                })?;
+                count
+            }
             _ => return Err(crate::Error::from(AerodynamicsError::UnsupportedModel)),
         };
         if count > config.max_triangles - triangles.len() {
@@ -464,7 +491,11 @@ mod tests {
         }
         assert_eq!(area, 1.0);
         assert_eq!(
-            collider_mesh([&collider], ColliderTessellation::new(3, 3, 11)?).err(),
+            collider_mesh(
+                [&collider],
+                ColliderTessellation::new(3, 3, mesh.triangles().len() - 1)?
+            )
+            .err(),
             Some(AerodynamicsError::TessellationBudgetExceeded.into())
         );
         Ok(())
@@ -477,6 +508,9 @@ mod tests {
         let field = LevelSet::from_vec(-Vec3::splat(1.0), [3; 3], Vec3::splat(1.0), samples)?;
         let collider = Collider::new(Shape::LevelSet(field), Transform::identity());
         let mesh = collider_mesh([&collider], ColliderTessellation::new(3, 3, 96)?)?;
+        let exact_budget = mesh.triangles().len();
+        assert!(exact_budget < 96);
+        let mesh = collider_mesh([&collider], ColliderTessellation::new(3, 3, exact_budget)?)?;
         let geometry = PreparedGeometry::prepare(
             &[GeometryInstance {
                 mesh: &mesh,
