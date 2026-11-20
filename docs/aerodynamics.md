@@ -535,17 +535,19 @@ give the following comparison for an isolated adiabatic sphere. The
 incompressible values here are diagnostic evaluations outside the world
 model's Mach limit, and the two DNS grids do not establish a full uncertainty.
 
-| Diameter Re | DNS drag coefficient | Incompressible drag coefficient | Compressible drag coefficient |
-| ---: | ---: | ---: | ---: |
-| 300 | 0.6644 | 0.677132 | 0.678455 |
-| 500 | 0.5679 | 0.565924 | 0.576417 |
-| 750 | 0.5085 | 0.499938 | 0.516344 |
+| Diameter Re | DNS drag coefficient | Brown–Lawler | Singh et al. | Loth et al. |
+| ---: | ---: | ---: | ---: | ---: |
+| 300 | 0.6644 | 0.677132 | 0.678455 | 0.690182 |
+| 500 | 0.5679 | 0.565924 | 0.576417 | 0.575479 |
+| 750 | 0.5085 | 0.499938 | 0.516344 | 0.506351 |
 
 The compressible coefficient exceeds the incompressible coefficient by
 0.20–3.28% across these points. At Mach 2 the compressible model underpredicts
 the same study's finer-grid drag by 8.26–9.36% at these Reynolds numbers.
-Table 3 starts at Mach 0.3 and does not establish a transition law between
-the two world models.
+The Loth correlation differs from DNS by −0.42% to +3.88% at Mach 0.3 and
+underpredicts by 7.19–13.87% at Mach 2. The wider Mach domain therefore does
+not establish better agreement across these cases. Table 3 starts at Mach 0.3
+and does not establish a transition law between the world models.
 
 `sphere_drag::compression_dominated_particle_drag_coefficient` is a separate
 frontal-area coefficient for isolated spherical particles. It implements the

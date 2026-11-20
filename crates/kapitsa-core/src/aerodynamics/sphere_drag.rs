@@ -578,9 +578,12 @@ mod tests {
         ] {
             let predicted = continuum_drag_coefficient(mach, re)?;
             let relative_error = 100.0 * (predicted - fine) / fine;
+            let particle = compression_dominated_particle_drag_coefficient(mach, re)?;
+            let particle_error = 100.0 * (particle - fine) / fine;
             println!(
                 "Re={re:.0} M={mach:.1} DNS={base:.4}/{fine:.4} model={predicted:.6} error={relative_error:+.2}%"
             );
+            println!("  Loth={particle:.6} error={particle_error:+.2}%");
             if mach == MIN_MACH {
                 let cd = incompressible_drag_coefficient(re)?;
                 let error = 100.0 * (cd - fine) / fine;
@@ -590,6 +593,7 @@ mod tests {
                 );
             }
             assert!(predicted.is_finite());
+            assert!(particle.is_finite());
         }
         Ok(())
     }
