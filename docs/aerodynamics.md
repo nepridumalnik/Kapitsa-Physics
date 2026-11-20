@@ -529,6 +529,21 @@ for the world loads described above; it does not replace `Simple` lift or infer
 wings from meshes. The finite-span slope relation is the classical lifting-line
 approximation, not a FAR code port.
 
+`FiniteWing::with_flat_plate_post_stall(blend_angle)` adds a bounded
+separated-flow extension. The existing `max_attached_angle` is the
+caller-selected stall onset. Over `blend_angle` beyond it, the attached
+coefficients are smoothly blended to the flat-plate forms
+`CL = 2 sin(alpha) cos(alpha) AR/(AR + 2)` and
+`CD = profile_drag + 2 sin²(alpha)`, and those forms hold through
+`|alpha| = pi/2`. `blend_angle` must be finite, positive and at most
+`pi/2 - max_attached_angle`; larger incidence returns `UnsupportedFlow`.
+
+This is an engineering post-stall approximation, not a prediction of stall
+onset, maximum lift, hysteresis, dynamic stall, separated-wake geometry,
+control-surface stall or roughness. It does not add a pitching-moment model.
+The flat-plate limit is not a validated substitute for a measured post-stall
+polar; use `WingPolar` when such data are available.
+
 `FiniteWing::with_subsonic_compressibility(max_mach)` optionally uses a
 Prandtl-Glauert lifting-line approximation, with slope
 `2 pi / (sqrt(1 - M^2) + 2/(e AR))`. The caller must choose a maximum Mach
@@ -824,6 +839,7 @@ engine does not blend models to hide a domain limit.
 | Slender-body normal load | Mach ≤ 0.3, small incidence, steady aligned flow | separation, wave drag, rotational derivatives |
 | Slender wave drag | Mach > 1, axis aligned, caller area slopes | predictive transonic closure |
 | `FiniteWing` default | Mach ≤ 0.3, attached flow | stall, separation |
+| Flat-plate post-stall | caller stall angle + blend, through ±π/2 | predictive onset, hysteresis, dynamic stall, wake geometry |
 | Prandtl–Glauert wing | caller maximum below Mach 1 | shock onset, wave drag |
 | NDARC wing lift/drag rise | caller maximum; ratio ≤ 1.1 or explicit plateau | general high-supersonic wing model |
 | Supersonic wing linear theory | 1.2 ≤ Mach ≤ min(caller max, 5), attached small incidence | thickness, camber, sweep, tip relief, shock detachment |
@@ -847,15 +863,19 @@ engine does not blend models to hide a domain limit.
 | `LothParticle` selector | transitional Re ≤ 45, compression Re > 45 | gaps such as Mach 0.22, Re 100 |
 
 Kutta-condition lifting potential flow with a wake for Mesh/Colliders,
-rotational potential flow, wake/shielding physics beyond geometric occlusion,
-base-flow interaction, surface roughness, high-speed transition, real-gas
-properties, a validated body-of-revolution transonic solver and a validated
-general supersonic lifting-surface solution with thickness, sweep, tip relief
-and shock detachment remain outside the implemented models. The predictive hull transonic row is an equivalent-section
-Korn/Lock estimate, not a validated transonic body solution; the supersonic
-wing row is a bounded Ackeret/finite-span estimate, not a general solver. The modified Newtonian Mesh/Colliders closure supplies
-compression pressure only; it does not constitute a subsonic panel solution. Callers must not treat the table as
-evidence of accuracy outside each cited correlation's tested conditions.
+rotational potential flow, predictive stall onset/hysteresis/dynamic stall,
+wake/shielding physics beyond geometric occlusion, base-flow interaction,
+surface roughness, high-speed transition, real-gas properties, a validated
+body-of-revolution transonic solver and a validated general supersonic
+lifting-surface solution with thickness, sweep, tip relief and shock
+detachment remain outside the implemented models. The predictive hull
+transonic row is an equivalent-section Korn/Lock estimate, not a validated
+transonic body solution; the supersonic wing row is a bounded
+Ackeret/finite-span estimate. The modified Newtonian Mesh/Colliders closure
+supplies compression pressure only, while the potential panel is bounded to
+closed isolated meshes without wake/circulation. Callers must not treat the
+table as evidence of accuracy outside each cited correlation's tested
+conditions.
 
 The friction rows are separate opt-ins, not a stitched continuous closure.
 Coefficient values can step where the incompressible, high-subsonic and

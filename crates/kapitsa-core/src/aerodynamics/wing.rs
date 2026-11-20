@@ -5,7 +5,10 @@
 //! Prandtl-Glauert subsonic compressibility, NDARC transonic corrections and a
 //! bounded Ackeret `4/sqrt(M²−1)` supersonic finite-wing estimate. The
 //! supersonic model uses `AR/(AR+2)` as an engineering finite-span factor and
-//! does not model thickness, sweep, tip relief or shock detachment.
+//! does not model thickness, sweep, tip relief or shock detachment. An optional
+//! flat-plate post-stall blend extends the attached limit through `±pi/2`; it
+//! uses a caller-selected stall onset and does not predict hysteresis or dynamic
+//! stall.
 //! `WingSurface` optionally replaces that closure with caller-supplied TOTAL
 //! CL/CD data and a quasi-steady control incidence shift. No wing interference.
 //! Coefficients refer to planform area; angles are in radians.
@@ -218,6 +221,13 @@ pub struct FiniteWing {
     max_attached_angle: f64,
     compressibility: Compressibility,
     drag_rise: Option<DragRise>,
+    post_stall: Option<PostStall>,
+}
+
+/// Explicit flat-plate post-stall blend width beyond the attached limit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PostStall {
+    blend_angle: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -653,7 +663,32 @@ impl FiniteWing {
             max_attached_angle,
             compressibility: Compressibility::Incompressible,
             drag_rise: None,
+            post_stall: None,
         })
+    }
+
+    /// Adds a bounded flat-plate post-stall extension beyond the attached limit.
+    ///
+    /// The existing `max_attached_angle` is the caller-selected stall onset.
+    /// Over `blend_angle` beyond it, attached lift/drag are blended smoothly to
+    /// the separated flat-plate forms `CL = 2 sin(alpha) cos(alpha) AR/(AR+2)`
+    /// and `CD = profile_drag + 2 sin²(alpha)`. Beyond the blend, those forms
+    /// hold up to `±pi/2`; larger incidence returns `UnsupportedFlow`.
+    ///
+    /// `blend_angle` must be finite, positive and at most
+    /// `pi/2 - max_attached_angle`. This is an
+    /// engineering post-stall approximation, not a prediction of stall onset,
+    /// hysteresis, dynamic stall, separated-wake geometry or roughness effects.
+    /// It does not add a pitching-moment model or a control-surface stall model.
+    pub fn with_flat_plate_post_stall(mut self, blend_angle: f64) -> Result<Self, crate::Error> {
+        if !blend_angle.is_finite()
+            || blend_angle <= 0.0
+            || self.max_attached_angle + blend_angle > PI / 2.0
+        {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        self.post_stall = Some(PostStall { blend_angle });
+        Ok(self)
     }
 
     /// Enables a subsonic Prandtl-Glauert lifting-line approximation.
@@ -836,9 +871,15 @@ impl FiniteWing {
             }
             Compressibility::Supersonic { min_mach, max_mach } => (min_mach, max_mach),
         };
-        if mach < min_mach || mach > max_mach || alpha.abs() > self.max_attached_angle {
+        let post_stall_limit = if self.post_stall.is_some() {
+            PI / 2.0
+        } else {
+            self.max_attached_angle
+        };
+        if mach < min_mach || mach > max_mach || alpha.abs() > post_stall_limit {
             return Err(crate::Error::from(WingError::UnsupportedFlow));
         }
+        let alpha_attached = alpha.clamp(-self.max_attached_angle, self.max_attached_angle);
         let effective_aspect = self.efficiency * self.aspect_ratio;
         let beta = match self.compressibility {
             Compressibility::Subsonic { .. } => (1.0 - mach * mach).sqrt(),
@@ -874,12 +915,12 @@ impl FiniteWing {
             }
             _ => 1.0,
         };
-        let lift = (slope * alpha) * lift_factor;
+        let mut lift = (slope * alpha_attached) * lift_factor;
         if effective_aspect == 0.0 || !lift.is_finite() {
             return Err(crate::Error::from(WingError::ArithmeticOverflow));
         }
-        let drag = match self.compressibility {
-            Compressibility::Supersonic { .. } => self.profile_drag + (lift * alpha).abs(),
+        let mut drag = match self.compressibility {
+            Compressibility::Supersonic { .. } => self.profile_drag + (lift * alpha_attached).abs(),
             _ => {
                 let drag_rise = if let Some(model) = self.drag_rise {
                     let critical_mach = if model.lift_sensitivity != 0.0 {
@@ -908,6 +949,18 @@ impl FiniteWing {
                 self.profile_drag + (lift / effective_aspect) * (lift / PI) + drag_rise
             }
         };
+        if let Some(post_stall) = self.post_stall
+            && alpha.abs() > self.max_attached_angle
+        {
+            let blend =
+                ((alpha.abs() - self.max_attached_angle) / post_stall.blend_angle).clamp(0.0, 1.0);
+            let blend = blend * blend * (3.0 - 2.0 * blend);
+            let finite_span = self.aspect_ratio / (self.aspect_ratio + 2.0);
+            let flat_lift = 2.0 * alpha.sin() * alpha.cos() * finite_span;
+            let flat_drag = self.profile_drag + 2.0 * alpha.sin().powi(2);
+            lift = (1.0 - blend) * lift + blend * flat_lift;
+            drag = (1.0 - blend) * drag + blend * flat_drag;
+        }
         if effective_aspect == 0.0 || !lift.is_finite() || !drag.is_finite() {
             return Err(crate::Error::from(WingError::ArithmeticOverflow));
         }
@@ -1345,6 +1398,42 @@ mod tests {
             model.coefficients(0.0, 1.21),
             Err(crate::Error::from(WingError::UnsupportedFlow))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn flat_plate_post_stall_blends_and_bounds_incidence() -> Result<(), crate::Error> {
+        let base = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?;
+        let model = base.with_flat_plate_post_stall(0.2)?;
+        assert_eq!(model.coefficients(0.3, 0.1)?, base.coefficients(0.3, 0.1)?);
+        let left = model.coefficients(0.3, 0.1)?;
+        let right = model.coefficients(0.3001, 0.1)?;
+        assert!((left.lift - right.lift).abs() < 1e-3);
+        assert!((left.drag - right.drag).abs() < 1e-3);
+        let separated = model.coefficients(PI / 4.0, 0.1)?;
+        let expected_lift = 2.0 * (PI / 4.0).sin() * (PI / 4.0).cos() * 0.8;
+        assert!((separated.lift - expected_lift).abs() < 1e-12);
+        assert!((separated.drag - (0.02 + 1.0)).abs() < 1e-12);
+        let normal = model.coefficients(PI / 2.0, 0.1)?;
+        assert!(normal.lift.abs() < 1e-12);
+        assert!((normal.drag - 2.02).abs() < 1e-12);
+        let negative = model.coefficients(-PI / 4.0, 0.1)?;
+        assert!((negative.lift + expected_lift).abs() < 1e-12);
+        assert!((negative.drag - separated.drag).abs() < 1e-12);
+        assert_eq!(
+            model.coefficients(PI / 2.0 + 0.01, 0.1),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
+        assert_eq!(
+            base.coefficients(0.31, 0.1),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
+        for blend in [0.0, -1.0, PI / 2.0 + 0.01, f64::NAN] {
+            assert!(
+                base.with_flat_plate_post_stall(blend).is_err(),
+                "accepted blend={blend}"
+            );
+        }
         Ok(())
     }
 

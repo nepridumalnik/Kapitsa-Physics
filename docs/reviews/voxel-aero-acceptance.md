@@ -8,14 +8,15 @@ advanced since this map was written, notably for high-speed skin friction,
 rarefied particle drag, subsonic Mesh/Colliders compression pressure, a
 geometry-derived predictive hull transonic drag-rise estimate, a bounded
 linearized supersonic finite-wing lift/wave-drag estimate and a bounded
-incompressible potential-flow panel model for closed isolated meshes; the
-acceptance gaps below remain open.
+incompressible potential-flow panel model for closed isolated meshes and a
+caller-blended flat-plate post-stall wing extension; the acceptance gaps below
+remain open.
 
 | Plan | Available evidence | Remaining acceptance work |
 | --- | --- | --- |
 | 1.1 Predictive transonic hull | Caller-supplied Mach/normal-force tables; geometry-derived Korn critical Mach with Lock drag rise and a bounded Mach 1.05–1.2 handoff; interpolation and world tests. Supersonic slender wave primitive. | Validate the equivalent-section estimate against independent body-of-revolution pressure/drag data, add lift/sweep effects, establish the supersonic handoff, and compare Sears–Haack and blunt-body curves with independent reference data. Tables and the Korn/Lock correlation are not a validated TSD solver. |
 | 1.2 Subsonic Mesh/Colliders Cp | Default unmodified Newtonian requires Mach >= 5. Opt-in modified Newtonian compression covers Mach 0–5 with isentropic/Rayleigh-pitot `Cp_max`. An opt-in incompressible source-panel model covers closed isolated Mesh/Colliders bodies at Mach ≤ 0.2 and ≤ 256 triangles, with world tests and a sphere net-force consistency check. Explicit base Cp supports selected faces and visibility checks. | The panel model has no Kutta wake/circulation, rotation, clusters/parts or separation, and is not experimentally validated. Compare sphere/cylinder Cp and force distributions with independent data, establish panel convergence and rotating moments, and add a wake model before accepting general subsonic lifting-body Cp. |
-| 1.3–1.6 Stall, interference, body lift, failures | Existing polars, geometric shielding, slender-body loads and an Ackeret `4/sqrt(M²−1)` finite-wing estimate with an `AR/(AR+2)` factor cover parts of the underlying infrastructure. | The supersonic wing model lacks thickness, sweep, tip-relief and shock-detachment validation. Predictive stall and spin demo, downwash interaction, non-slender crossflow validation and aerodynamic weld failure must be assessed against their individual criteria; none is accepted here. |
+| 1.3–1.6 Stall, interference, body lift, failures | Existing polars, geometric shielding, slender-body loads, an Ackeret `4/sqrt(M²−1)` finite-wing estimate with an `AR/(AR+2)` factor and a caller-blended flat-plate post-stall extension cover parts of the infrastructure. | The supersonic wing model lacks thickness, sweep, tip-relief and shock-detachment validation. The post-stall model has a caller-selected onset and no hysteresis, dynamic stall or wake geometry. Predictive stall/spin demo, downwash interaction, non-slender crossflow validation and aerodynamic weld failure must be assessed; none is accepted here. |
 | 2.1–2.5 Existing-model extensions | Some related features already exist; see `docs/aerodynamics.md` for their individual domains. | Audit each requested extension against current code and tests before declaring completion. |
 | 2.6–2.8 Performance, runtime and tools | Benchmarks and runtime controls exist. | Production-complexity benchmark and remaining APIs/tools are not established; the supplied plan identifies these as post-merge roadmap. |
 | 3 Fixes | Some independent checks have passed. | Entire section deferred by explicit user direction; do not represent it as completed. |
