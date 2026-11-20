@@ -65,6 +65,7 @@ pub(crate) enum SphereDragRegime {
     CreepingParticle,
     FreeMolecularParticle,
     TransitionalParticle,
+    LothParticle,
 }
 
 impl SphereDrag {
@@ -186,6 +187,9 @@ impl SphereDrag {
             }
             SphereDragRegime::TransitionalParticle => {
                 Some(transitional_particle_drag_coefficient as fn(f64, f64) -> _)
+            }
+            SphereDragRegime::LothParticle => {
+                Some(loth_particle_drag_coefficient as fn(f64, f64) -> _)
             }
         };
         if let Some(coefficient) = coefficient {
@@ -634,6 +638,20 @@ pub fn compression_dominated_particle_drag_coefficient(
     Ok(viscous + pressure)
 }
 
+/// Selects the rarefaction- or compression-dominated branch of the Loth
+/// spherical-particle correlation at diameter Reynolds number 45. The
+/// transitional branch includes 45, and each branch retains its documented
+/// domain. The switch does not interpolate across the two fits.
+/// See [`transitional_particle_drag_coefficient`] and
+/// [`compression_dominated_particle_drag_coefficient`].
+pub fn loth_particle_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate::Error> {
+    if reynolds <= MAX_RAREFACTION_REYNOLDS {
+        transitional_particle_drag_coefficient(mach, reynolds)
+    } else {
+        compression_dominated_particle_drag_coefficient(mach, reynolds)
+    }
+}
+
 /// Continuum drag coefficient, referenced to the sphere's frontal area.
 ///
 /// Inputs are freestream Mach and diameter-based Reynolds numbers. Only air
@@ -687,6 +705,31 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loth_particle_drag_switches_at_reynolds_45_without_filling_domain_gaps()
+    -> Result<(), crate::Error> {
+        let boundary = 45.0_f64;
+        let mach = 4.0;
+        let below = loth_particle_drag_coefficient(mach, boundary)?;
+        let above = loth_particle_drag_coefficient(mach, boundary.next_up())?;
+        assert_eq!(
+            below,
+            transitional_particle_drag_coefficient(mach, boundary)?
+        );
+        assert_eq!(
+            above,
+            compression_dominated_particle_drag_coefficient(mach, boundary.next_up())?
+        );
+        println!("Mach {mach}: Re=45 drag {below:.6}, above Re=45 {above:.6}");
+        for (mach, re) in [(0.22, 100.0), (0.5, 45.0)] {
+            assert_eq!(
+                loth_particle_drag_coefficient(mach, re),
+                Err(SphereDragError::UnsupportedDomain.into())
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn knudsen_number_survives_overflowing_and_underflowing_denominator_products()

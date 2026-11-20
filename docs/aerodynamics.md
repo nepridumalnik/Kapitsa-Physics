@@ -646,6 +646,12 @@ Mach branches are discontinuous at Mach 1. The lower-Mach branch supplies the
 value at the breakpoint. `Aerodynamics::TransitionalParticle` applies this
 coefficient during stepping with the local atmospheric state and viscosity.
 
+`Aerodynamics::LothParticle` selects the transitional branch through Re = 45
+and the compression-dominated branch above Re = 45. Both retain their Mach
+and Kn limits. For example, Mach 0.22 at Re = 100 remains unsupported. At
+Mach 4 the coefficient is approximately 1.67448 at Re = 45 and 1.65904 just
+above it. The switch preserves this empirical difference.
+
 ## Skin friction
 
 For a laminar flat plate, the local Blasius relation is `c_f(x) = 0.664 / sqrt(Re_x)`. Integrating from the leading edge to plate length `L` gives the streamwise average `C_f = 1.328 / sqrt(Re_L)`. The distinction between local and averaged coefficients matters when summing sections.

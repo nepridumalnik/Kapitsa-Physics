@@ -1755,6 +1755,7 @@ impl PhysicsWorld {
                     | crate::aerodynamics::Aerodynamics::CreepingParticle(_)
                     | crate::aerodynamics::Aerodynamics::FreeMolecularParticle(_)
                     | crate::aerodynamics::Aerodynamics::TransitionalParticle(_)
+                    | crate::aerodynamics::Aerodynamics::LothParticle(_)
                     | crate::aerodynamics::Aerodynamics::Colliders
             )
         {
@@ -3371,7 +3372,7 @@ impl PhysicsWorld {
         use crate::aerodynamics::{
             Aerodynamics::{
                 CompressionDominatedParticle, ContinuumSphere, CreepingParticle,
-                FreeMolecularParticle, IncompressibleSphere, SlipCorrectedParticle,
+                FreeMolecularParticle, IncompressibleSphere, LothParticle, SlipCorrectedParticle,
                 TransitionalParticle,
             },
             sphere_drag::SphereDragRegime,
@@ -3383,6 +3384,7 @@ impl PhysicsWorld {
             CreepingParticle(model) => Some((model, SphereDragRegime::CreepingParticle)),
             FreeMolecularParticle(model) => Some((model, SphereDragRegime::FreeMolecularParticle)),
             TransitionalParticle(model) => Some((model, SphereDragRegime::TransitionalParticle)),
+            LothParticle(model) => Some((model, SphereDragRegime::LothParticle)),
             CompressionDominatedParticle(model) => {
                 Some((model, SphereDragRegime::CompressionDominatedParticle))
             }
@@ -3419,6 +3421,7 @@ impl PhysicsWorld {
             | CreepingParticle(_)
             | FreeMolecularParticle(_)
             | TransitionalParticle(_)
+            | LothParticle(_)
             | crate::aerodynamics::Aerodynamics::Wing(_)
             | crate::aerodynamics::Aerodynamics::Wings(_)
             | crate::aerodynamics::Aerodynamics::Hull(_)

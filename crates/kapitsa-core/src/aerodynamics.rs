@@ -48,6 +48,9 @@ pub enum Aerodynamics {
     /// Rarefaction-dominated transitional drag on an isolated spherical particle.
     /// See [`sphere_drag::transitional_particle_drag_coefficient`].
     TransitionalParticle(sphere_drag::SphereDrag),
+    /// Selects between the supported Loth spherical-particle branches by Reynolds number.
+    /// See [`sphere_drag::loth_particle_drag_coefficient`].
+    LothParticle(sphere_drag::SphereDrag),
     Wing(wing::WingSurface),
     Wings(Vec<wing::WingSurface>),
     Hull(Vec<hull::HullSection>),
@@ -60,6 +63,9 @@ impl fmt::Debug for Aerodynamics {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => formatter.write_str("None"),
+            Self::LothParticle(model) => {
+                formatter.debug_tuple("LothParticle").field(model).finish()
+            }
             Self::TransitionalParticle(model) => formatter
                 .debug_tuple("TransitionalParticle")
                 .field(model)

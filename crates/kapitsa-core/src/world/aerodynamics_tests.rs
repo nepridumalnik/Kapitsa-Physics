@@ -16,8 +16,8 @@ fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepEr
 #[test]
 fn rarefied_particles_apply_drag_and_reject_dense_gas() -> Result<(), Box<dyn std::error::Error>> {
     use crate::aerodynamics::sphere_drag::{
-        SphereDrag, SphereDragError, free_molecular_particle_drag_coefficient,
-        transitional_particle_drag_coefficient,
+        SphereDrag, SphereDragError, compression_dominated_particle_drag_coefficient,
+        free_molecular_particle_drag_coefficient, transitional_particle_drag_coefficient,
     };
 
     let diameter = 0.001_f64;
@@ -38,6 +38,16 @@ fn rarefied_particles_apply_drag_and_reject_dense_gas() -> Result<(), Box<dyn st
             Aerodynamics::TransitionalParticle(model),
             transitional_particle_drag_coefficient(1.0, 2.0)?,
         ),
+        (
+            0.02,
+            Aerodynamics::LothParticle(model),
+            transitional_particle_drag_coefficient(1.0, 2.0)?,
+        ),
+        (
+            0.5,
+            Aerodynamics::LothParticle(model),
+            compression_dominated_particle_drag_coefficient(1.0, 50.0)?,
+        ),
     ] {
         let mut world = PhysicsWorld::new();
         world.set_mesh_sound_speed(sound_speed)?;
@@ -57,7 +67,7 @@ fn rarefied_particles_apply_drag_and_reject_dense_gas() -> Result<(), Box<dyn st
         assert!((before.state().linear_velocity() - Vec3::X * expected).length() < 1e-12);
 
         world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
-            1.0,
+            10_000.0,
             Vec3::ZERO,
         )?));
         assert!(
