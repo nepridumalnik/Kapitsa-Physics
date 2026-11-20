@@ -227,6 +227,24 @@ with axial Mach, a total Mach limit of 0.95, and caller-supplied inclusive Re
 bounds within 1–100 million. These are implementation limits. The model
 does not infer transition, pressure gradients or surface roughness.
 
+`SkinFriction::high_speed_laminar` is a separate Eckert reference-temperature
+model for attached laminar flat-plate flow from low subsonic through hypersonic
+Mach numbers. It assumes air with `gamma = 1.4`, `R = 287.05 J/(kg K)`, a
+recovery factor `r = sqrt(Pr) = sqrt(0.72)` and Sutherland viscosity with
+`S = 110.4 K`. The edge temperature follows from the supplied sound speed under
+constant pressure, so this is not a temperature or real-gas model. The caller
+supplies `Tw / Taw` in `(0, 10]`; one selects the adiabatic wall. The reference
+temperature follows [Eckert's air relation, NASA CR-1966-12405](https://ntrs.nasa.gov/api/citations/19660012405/downloads/19660012405.pdf):
+`T* / Te = 0.5 + 0.5 Tw / Te + 0.22 (Tr / Te - 1)`.
+The mean coefficient is `Cf = 1.328 C / sqrt(Re_L)`, where
+`C = sqrt((rho*/rho_e)(mu*/mu_e))`, `rho*/rho_e = Te/T*` and Sutherland supplies
+`mu*/mu_e`. It accepts total Mach ≤ 10 and caller-selected inclusive Re bounds
+within 10 thousand to 100 million. These are implementation limits. The model
+does not infer transition, roughness, pressure gradients, shock-boundary-layer
+interaction, wall heat transfer or real-gas properties. Passing through Mach 1
+is a property of the correlation, not validation against transonic shock data.
+The caller must establish attached laminar flow.
+
 For a diagnostic comparison with the local shear measurements in
 [NACA TN 3486, table I](https://ntrs.nasa.gov/api/citations/19930084308/downloads/19930084308.pdf),
 differentiate `x Cf_mean` at fixed Mach and constant freestream properties.
