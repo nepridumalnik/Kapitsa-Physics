@@ -181,8 +181,8 @@ const SURFACE_TRIANGLE_WORK: usize = 4;
 fn grid_build_work_estimate(entries: usize, cells: usize, scans: usize) -> Option<usize> {
     // Initialize both buffers and scan counts to construct prefix offsets.
     const CELL_PASSES: usize = 3;
-    sort_work_estimate(entries)?
-        .checked_add(entries)? // Copy sorted entries into the final index.
+    entries
+        .checked_mul(3)? // Count, initialize, and populate entries.
         .checked_add(cells.checked_mul(CELL_PASSES)?)?
         .checked_add(1)?
         .checked_add(scans)
@@ -271,8 +271,8 @@ impl TriangleGrid {
         if triangles.is_empty() {
             return Err(crate::Error::from(GeometryError::EmptyGeometry));
         }
-        // Bounds, entry counting and entry construction each scan the input.
-        const TRIANGLE_SCAN_WORK: usize = 3;
+        // Bounds, preflight, bucket counting and bucket population scan the input.
+        const TRIANGLE_SCAN_WORK: usize = 4;
         let scan_work = triangles
             .len()
             .checked_mul(TRIANGLE_SCAN_WORK)
@@ -310,8 +310,7 @@ impl TriangleGrid {
             }
             Ok(values.map(|value| (value.floor().max(0.0) as usize).min(target.saturating_sub(1))))
         };
-        let mut entry_count = 0usize;
-        for triangle in triangles {
+        let triangle_bounds = |triangle: &SurfaceTriangle| -> Result<_, crate::Error> {
             let lower = cell(
                 triangle
                     .vertices
@@ -324,6 +323,11 @@ impl TriangleGrid {
                     .iter()
                     .fold(Vec3::splat(f64::NEG_INFINITY), |v, &p| v.max(p)),
             )?;
+            Ok((lower, upper))
+        };
+        let mut entry_count = 0usize;
+        for triangle in triangles {
+            let (lower, upper) = triangle_bounds(triangle)?;
             let spans = [
                 upper[0].saturating_sub(lower[0]).saturating_add(1),
                 upper[1].saturating_sub(lower[1]).saturating_add(1),
@@ -345,59 +349,41 @@ impl TriangleGrid {
         let build_work = grid_build_work_estimate(entry_count, cell_count, scan_work)
             .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         check_surface_work(Some(build_work), max_work)?;
-        let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(entry_count)
-            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
-        let mut counts = allocated(cell_count, 0usize)?;
-        for (triangle_index, triangle) in triangles.iter().enumerate() {
-            let lower = cell(
-                triangle
-                    .vertices
-                    .iter()
-                    .fold(Vec3::splat(f64::INFINITY), |v, &p| v.min(p)),
-            )?;
-            let upper = cell(
-                triangle
-                    .vertices
-                    .iter()
-                    .fold(Vec3::splat(f64::NEG_INFINITY), |v, &p| v.max(p)),
-            )?;
-            for z in lower[2]..=upper[2] {
-                for y in lower[1]..=upper[1] {
-                    for x in lower[0]..=upper[0] {
-                        let i = index([x, y, z], dimensions);
-                        counts[i] = counts[i]
-                            .checked_add(1)
-                            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
-                        checked_push(&mut entries, (i, triangle_index))?;
-                    }
-                }
+        let mut cursors = allocated(cell_count, 0usize)?;
+        let occupied_cells = |triangle: &SurfaceTriangle| -> Result<_, crate::Error> {
+            let (lower, upper) = triangle_bounds(triangle)?;
+            Ok((lower[2]..=upper[2]).flat_map(move |z| {
+                (lower[1]..=upper[1]).flat_map(move |y| {
+                    (lower[0]..=upper[0]).map(move |x| index([x, y, z], dimensions))
+                })
+            }))
+        };
+        for triangle in triangles {
+            for cell in occupied_cells(triangle)? {
+                cursors[cell] += 1;
             }
         }
         let mut offsets = allocated(cell_count + 1, 0usize)?;
-        for (i, count) in counts.into_iter().enumerate() {
-            offsets[i + 1] = offsets[i]
-                .checked_add(count)
-                .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
+        for (cell, cursor) in cursors.iter_mut().enumerate() {
+            // Preflight bounds the sum of all bucket counts.
+            offsets[cell + 1] = offsets[cell] + *cursor;
+            *cursor = offsets[cell];
         }
-        let mut sort_work = build_work;
-        budgeted_sort(&mut entries, &mut sort_work, max_work, Ord::cmp)?;
-        let mut indexed_triangles = Vec::new();
-        indexed_triangles
-            .try_reserve_exact(entries.len())
-            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
-        for (_, triangle) in entries {
-            checked_push(&mut indexed_triangles, triangle)?;
+        let mut indexed_triangles = allocated(entry_count, 0usize)?;
+        // Insertion in input order preserves the canonical order within a bucket.
+        for (triangle_index, triangle) in triangles.iter().enumerate() {
+            for cell in occupied_cells(triangle)? {
+                indexed_triangles[cursors[cell]] = triangle_index;
+                cursors[cell] += 1;
+            }
         }
-        let triangles = indexed_triangles;
         Ok(Self {
             origin: min,
             cell_size,
             dimensions,
             offsets,
-            triangles,
-            build_work: sort_work,
+            triangles: indexed_triangles,
+            build_work,
         })
     }
 

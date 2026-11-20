@@ -397,11 +397,11 @@ fn candidate_mark_allocation_requires_work_budget_up_front() {
 }
 
 #[test]
-fn grid_build_estimate_reserves_cell_buffers_prefix_scan_and_index_copy() {
+fn grid_build_estimate_reserves_cell_buffers_prefix_scan_and_index_entries() {
     const ENTRIES: usize = 4;
     const CELLS: usize = 3;
     const SCANS: usize = 6;
-    let expected = sort_work_estimate(ENTRIES).unwrap() + ENTRIES + 3 * CELLS + 1 + SCANS;
+    let expected = 3 * ENTRIES + 3 * CELLS + 1 + SCANS;
     assert_eq!(
         grid_build_work_estimate(ENTRIES, CELLS, SCANS),
         Some(expected)
@@ -412,22 +412,29 @@ fn grid_build_estimate_reserves_cell_buffers_prefix_scan_and_index_copy() {
 }
 
 #[test]
-fn triangle_grid_index_ranges_cover_each_triangle_cell_entry() {
+fn triangle_grid_scatter_preserves_bucket_membership_and_order() -> Result<(), crate::Error> {
     let triangles = [
-        visibility_triangle(Vec3::ZERO, Vec3::Y, Vec3::Z),
-        visibility_triangle(Vec3::X, Vec3::X + Vec3::Y, Vec3::X + Vec3::Z),
+        visibility_triangle(Vec3::ZERO, Vec3::Y * 0.5, Vec3::Z * 0.5),
+        visibility_triangle(Vec3::ZERO, Vec3::new(2.0, 0.0, 2.0), Vec3::Y * 2.0),
+        visibility_triangle(
+            Vec3::new(2.0, 1.5, 1.5),
+            Vec3::new(2.0, 2.0, 1.5),
+            Vec3::new(2.0, 1.5, 2.0),
+        ),
     ];
-    let grid = TriangleGrid::build(&triangles, 10_000).unwrap();
-    assert_eq!(grid.offsets.first(), Some(&0));
-    assert_eq!(grid.offsets.last(), Some(&grid.triangles.len()));
-    for range in grid.offsets.windows(2) {
-        assert!(range[0] <= range[1]);
-        let entries = &grid.triangles[range[0]..range[1]];
-        assert!(entries.windows(2).all(|pair| pair[0] <= pair[1]));
-        assert!(entries.iter().all(|&index| index < triangles.len()));
-    }
-    assert!(grid.triangles.contains(&0));
-    assert!(grid.triangles.contains(&1));
+    // Four triangle scans, three passes per grid cell and entry, and the
+    // extra prefix offset. The middle triangle's AABB spans all eight cells.
+    const WORK: usize = 4 * 3 + 3 * 8 + 3 * 10 + 1;
+    let grid = TriangleGrid::build(&triangles, WORK)?;
+    assert_eq!(grid.build_work, WORK);
+    assert_eq!(grid.dimensions, [2, 2, 2]);
+    assert_eq!(grid.offsets, [0, 2, 3, 4, 5, 6, 7, 8, 10]);
+    assert_eq!(grid.triangles, [0, 1, 1, 1, 1, 1, 1, 1, 1, 2]);
+    assert!(matches!(
+        TriangleGrid::build(&triangles, WORK - 1),
+        Err(error) if error.downcast_ref::<GeometryError>() == Some(&GeometryError::WorkBudgetExceeded)
+    ));
+    Ok(())
 }
 
 #[test]
@@ -1082,7 +1089,7 @@ fn unshadowed_patch_replacement_has_budget_boundary() {
         }
     }
     // Includes one unit for replacing the partition and one for frame conversion.
-    const REQUIRED_WORK: usize = 116;
+    const REQUIRED_WORK: usize = 117;
     assert_eq!(high, REQUIRED_WORK);
     assert_eq!(
         evaluate(low),
