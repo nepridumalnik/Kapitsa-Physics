@@ -27,6 +27,7 @@ use std::{f64::consts::PI, sync::Arc};
 /// Values are Mach-major (`mach_index * angles.len() + angle_index`).
 /// CD already includes induced and profile drag; these are not 2D section data.
 /// Bilinear interpolation is supported only inside the closed supplied domain.
+/// A single Mach row permits angle interpolation at that Mach value only.
 /// No stall or transonic behavior is inferred beyond the supplied data.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WingPolar {
@@ -41,13 +42,36 @@ impl WingPolar {
         angles: Vec<f64>,
         coefficients: Vec<WingCoefficients>,
     ) -> Result<Self, crate::Error> {
+        if mach.len() < 2 {
+            return Err(WingError::InvalidParameters.into());
+        }
+        Self::from_rows(mach, angles, coefficients)
+    }
+
+    /// Creates a polar measured at a single nonnegative Mach number. Angles
+    /// are in radians and must contain at least two increasing knots. Lookup
+    /// at any other Mach number returns [`WingError::UnsupportedFlow`].
+    pub fn at_mach(
+        mach: f64,
+        angles: Vec<f64>,
+        coefficients: Vec<WingCoefficients>,
+    ) -> Result<Self, crate::Error> {
+        Self::from_rows(vec![mach], angles, coefficients)
+    }
+
+    fn from_rows(
+        mach: Vec<f64>,
+        angles: Vec<f64>,
+        coefficients: Vec<WingCoefficients>,
+    ) -> Result<Self, crate::Error> {
         let valid_axis = |axis: &[f64]| {
-            axis.len() >= 2
+            !axis.is_empty()
                 && axis.iter().all(|v| v.is_finite())
                 && axis.windows(2).all(|pair| pair[0] < pair[1])
         };
         if !valid_axis(&mach)
             || mach[0] < 0.0
+            || angles.len() < 2
             || !valid_axis(&angles)
             || mach.len().checked_mul(angles.len()) != Some(coefficients.len())
             || coefficients
@@ -71,6 +95,9 @@ impl WingPolar {
             if value < axis[0] || value > axis[axis.len() - 1] {
                 return Err(crate::Error::from(WingError::UnsupportedFlow));
             }
+            if axis.len() == 1 {
+                return Ok((0, 0.0));
+            }
             let index = axis
                 .partition_point(|knot| *knot <= value)
                 .saturating_sub(1)
@@ -93,6 +120,7 @@ impl WingPolar {
             drag: x.drag * (1.0 - t) + y.drag * t,
         };
         let n = self.angles.len();
+        let next_m = (m + 1).min(self.mach.len() - 1);
         let result = mix(
             mix(
                 self.coefficients[m * n + a],
@@ -100,8 +128,8 @@ impl WingPolar {
                 at,
             ),
             mix(
-                self.coefficients[(m + 1) * n + a],
-                self.coefficients[(m + 1) * n + a + 1],
+                self.coefficients[next_m * n + a],
+                self.coefficients[next_m * n + a + 1],
                 at,
             ),
             mt,
@@ -1036,12 +1064,10 @@ mod tests {
                 drag: 0.27292,
             },
         ];
-        // WingPolar requires two Mach knots. The second, duplicated row is a
-        // structural fixture only: it supplies no evidence at another Mach.
-        let polar = WingPolar::new(
-            vec![0.15, 0.16],
+        let polar = WingPolar::at_mach(
+            0.15,
             degrees.iter().map(|a| a.to_radians()).collect(),
-            measured.iter().chain(measured.iter()).copied().collect(),
+            measured.to_vec(),
         )?;
         for (angle, expected) in degrees.into_iter().zip(measured) {
             let actual = polar.coefficients(angle.to_radians(), 0.15)?;
@@ -1062,6 +1088,10 @@ mod tests {
         );
         assert_eq!(
             polar.coefficients(17.13_f64.to_radians(), 0.14),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
+        assert_eq!(
+            polar.coefficients(17.13_f64.to_radians(), 0.15_f64.next_up()),
             Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         Ok(())

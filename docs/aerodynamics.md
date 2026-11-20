@@ -447,8 +447,10 @@ or poststall lift reduction is represented only if the caller supplies such
 values. Table support is not prediction of those phenomena. There is no default
 poststall dataset. A `WingPolar` lookup regression uses section data from Ladson,
 NASA TM-4074, table IX, at Mach 0.15 and Reynolds number 5.95 million; it tests
-interpolation only, not their applicability to a finite wing. Its duplicated
-second Mach row satisfies the API's grid requirement and is not measured data.
+interpolation only, not their applicability to a finite wing.
+`WingPolar::at_mach` accepts one measured Mach row and interpolates its angles.
+Any other Mach number returns `UnsupportedFlow`, including its adjacent
+representable values. `WingPolar::new` still requires two or more Mach rows.
 
 `surface.with_control(WingControl::new(deflection, max_deflection, effectiveness)?)`
 adds `effectiveness * deflection` to physical AoA for coefficient lookup only.
