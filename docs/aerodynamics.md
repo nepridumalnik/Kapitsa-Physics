@@ -196,8 +196,12 @@ No transition threshold or mixed-regime closure is inferred. Zero axial speed
 skips friction and its Reynolds check. Omitting friction is inviscid. These
 flat-plate correlations are incompressible only: an enabled wetted friction load
 above total Mach 0.3 returns `UnsupportedSkinFrictionMach`, even with an explicit
-Mach Cd curve and zero axial speed. No compressible viscosity correlation is
-available; viscosity alone cannot enable one. Vacuum and fully disabled loads
+Mach Cd curve and zero axial speed. For smooth sections with an attached, fully
+turbulent boundary layer, opt into `SkinFriction::compressible_turbulent`.
+It uses [the corrected Schlichting correlation, equation (51)](https://ntrs.nasa.gov/api/citations/20000069005/downloads/20000069005.pdf)
+with axial Mach, a total Mach limit of 0.95, and caller-supplied inclusive Re
+bounds within 1–100 million. These are implementation limits. The model
+does not infer transition, pressure gradients or surface roughness. Vacuum and fully disabled loads
 still skip these domain checks.
 
 Finite kinematics and positive finite sound speed are validated even in vacuum

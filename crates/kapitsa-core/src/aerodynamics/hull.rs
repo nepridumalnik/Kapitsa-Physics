@@ -33,9 +33,9 @@
 //! assumed. Turbulent means the whole plate, not transition partway along it.
 //! Friction opposes axial flow only, never total perpendicular speed. Zero
 //! axial speed skips friction and its Reynolds check. None is inviscid.
-//! These incompressible correlations have no compressible viscosity closure:
-//! enabled wetted friction above total Mach 0.3 is explicitly rejected even when
-//! a Mach curve is configured, including pure crossflow.
+//! These correlations reject total Mach above 0.3, including pure crossflow.
+//! A separate compressible turbulent flat-plate correlation covers high
+//! subsonic flow under its own Mach and Reynolds limits.
 //! Finite kinematics and positive sound speed are validated even in vacuum or
 //! with disabled areas; those cases then skip Mach and Reynolds domain checks.
 //! Mach is based on the full local relative speed, including omega cross r.
@@ -330,6 +330,7 @@ pub enum BoundaryLayer {
 pub struct SkinFriction {
     dynamic_viscosity: f64,
     regime: BoundaryLayer,
+    compressible: bool,
     min_reynolds: f64,
     max_reynolds: f64,
 }
@@ -352,16 +353,62 @@ impl SkinFriction {
         Ok(Self {
             dynamic_viscosity,
             regime,
+            compressible: false,
             min_reynolds,
             max_reynolds,
         })
     }
-    fn mean_coefficient(self, reynolds: f64) -> Result<f64, crate::Error> {
+
+    /// Empirical mean skin friction for an attached, fully turbulent boundary
+    /// layer on a smooth flat plate, using NASA NAG2-908 report equation (51).
+    /// Fallback viscosity is in Pa·s. The caller supplies inclusive Reynolds
+    /// bounds within 1 million to 100 million. Total Mach must be ≤ 0.95.
+    /// These are implementation limits. Pressure gradients and roughness are
+    /// outside the model. The Mach correction uses local axial speed.
+    pub fn compressible_turbulent(
+        dynamic_viscosity: f64,
+        min_reynolds: f64,
+        max_reynolds: f64,
+    ) -> Result<Self, crate::Error> {
+        const MIN_REYNOLDS: f64 = 1e6;
+        const MAX_REYNOLDS: f64 = 1e8;
+        if min_reynolds < MIN_REYNOLDS || max_reynolds > MAX_REYNOLDS {
+            return Err(HullError::InvalidParameters.into());
+        }
+        let mut friction = Self::new(
+            dynamic_viscosity,
+            BoundaryLayer::Turbulent,
+            min_reynolds,
+            max_reynolds,
+        )?;
+        friction.compressible = true;
+        Ok(friction)
+    }
+
+    fn max_mach(self) -> f64 {
+        const MAX_COMPRESSIBLE_MACH: f64 = 0.95;
+        if self.compressible {
+            MAX_COMPRESSIBLE_MACH
+        } else {
+            0.3
+        }
+    }
+
+    fn mean_coefficient(self, reynolds: f64, axial_mach: f64) -> Result<f64, crate::Error> {
         if !reynolds.is_finite() {
             return Err(crate::Error::from(HullError::ArithmeticOverflow));
         }
         if reynolds < self.min_reynolds || reynolds > self.max_reynolds {
             return Err(crate::Error::from(HullError::UnsupportedReynolds));
+        }
+        if self.compressible {
+            const SCHLICHTING_SCALE: f64 = 0.455;
+            const REYNOLDS_LOG_EXPONENT: f64 = 2.58;
+            const MACH_SCALE: f64 = 0.144;
+            const MACH_EXPONENT: f64 = 0.65;
+            return Ok(SCHLICHTING_SCALE
+                / (reynolds.log10().powf(REYNOLDS_LOG_EXPONENT)
+                    * (1.0 + MACH_SCALE * axial_mach * axial_mach).powf(MACH_EXPONENT)));
         }
         Ok(match self.regime {
             BoundaryLayer::Laminar => 1.328 / reynolds.sqrt(),
@@ -513,7 +560,7 @@ impl HullSection {
 
     /// Replace constant Cd values with explicit caller data, without changing geometry.
     /// Cloning the curve shares its immutable allocation across sections.
-    /// SkinFriction remains incompressible and cannot be used above Mach 0.3.
+    /// Skin friction retains its independently configured Mach and Reynolds limits.
     pub fn with_mach_curve(mut self, curve: MachCurve) -> Self {
         self.mach_curve = Some(curve);
         self
@@ -604,9 +651,12 @@ impl HullSection {
             }
             (self.axial_cd, self.crossflow_cd)
         };
-        // No compressible viscosity correlation is supplied. Reject explicit
-        // friction above its domain even if this point's axial speed is zero.
-        if mach > 0.3 && self.wetted_area != 0.0 && self.skin_friction.is_some() {
+        // Reject outside the friction's domain even with zero axial speed.
+        if self.wetted_area != 0.0
+            && self
+                .skin_friction
+                .is_some_and(|friction| mach > friction.max_mach())
+        {
             return Err(crate::Error::from(HullError::UnsupportedSkinFrictionMach));
         }
         let axis = flow
@@ -693,7 +743,7 @@ impl HullSection {
                     .dynamic_viscosity()
                     .unwrap_or(friction.dynamic_viscosity),
             )?;
-            let cf = friction.mean_coefficient(reynolds)?;
+            let cf = friction.mean_coefficient(reynolds, axial_speed.abs() / flow.sound_speed)?;
             axial_force = axial_force
                 .checked_add(resistance(
                     axial,
@@ -1564,6 +1614,32 @@ mod tests {
         )
         .unwrap();
         close(reversed.evaluate(flow(v)).unwrap().force, w.force);
+    }
+
+    #[test]
+    fn compressible_turbulent_friction_applies_high_subsonic_loads() -> Result<(), crate::Error> {
+        let mut s = section(Vec3::ZERO);
+        s.axial_cd = 0.0;
+        s.crossflow_cd = 0.0;
+        let speed = 272.0;
+        let viscosity = 1.2 * speed * s.length / 1e7;
+        s.skin_friction = Some(SkinFriction::compressible_turbulent(viscosity, 1e6, 1e8)?);
+        let cf = 0.002_836_432_024_730_856_5;
+        close(
+            s.evaluate(flow(Vec3::X * speed))?.force,
+            Vec3::X * (-0.5 * 1.2 * speed * speed * s.wetted_area * cf),
+        );
+        assert_eq!(s.evaluate(flow(Vec3::Y * speed))?.force, Vec3::ZERO);
+        assert_eq!(
+            s.evaluate(flow(Vec3::X * 340.0)),
+            Err(HullError::UnsupportedSkinFrictionMach.into())
+        );
+        assert_eq!(
+            s.evaluate(flow(Vec3::X)),
+            Err(HullError::UnsupportedReynolds.into())
+        );
+        assert!(SkinFriction::compressible_turbulent(viscosity, 1e5, 1e8).is_err());
+        Ok(())
     }
 
     #[test]
