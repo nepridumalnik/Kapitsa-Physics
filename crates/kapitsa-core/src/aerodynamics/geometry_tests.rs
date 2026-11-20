@@ -105,6 +105,14 @@ fn oriented_voxelization_preserves_a_sealed_hollow_cavity() -> Result<(), crate:
     assert!(solid.occupied_at(center)?);
     assert!(hollow.occupied_at(Vec3::new(0.125, 0.5, 0.5))?);
     assert!(hollow.volume() < solid.volume());
+    let bounded = GeometryConfig {
+        max_work: 180_000,
+        ..settings
+    };
+    assert_eq!(
+        PreparedGeometry::prepare_with_oriented_cavities(&inputs, bounded)?,
+        hollow
+    );
     Ok(())
 }
 fn instance(mesh: &TriangleMesh, offset: Vec3) -> GeometryInstance<'_> {

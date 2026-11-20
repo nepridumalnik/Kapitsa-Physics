@@ -42,9 +42,10 @@ Overlaps count once; the lowest `GeometryOwner` wins attribution ties, independe
 for closed meshes. Oppositely oriented inner walls must belong to the same
 instance as the enclosing shell. The method sums [signed triangle solid
 angles](https://users.cs.utah.edu/~ladislav/jacobson13robust/jacobson13robust.pdf)
-for non-surface cells enclosed by the voxel shell, then fills cells with a
-nonzero winding number. Surface cells remain occupied. The work budget reserves
-one winding contribution per grid cell and source triangle before allocation.
+once per six-connected region enclosed by the voxel shell, then fills regions
+with nonzero winding number. Surface cells remain occupied. The work budget
+reserves the region traversal before allocation and charges each winding
+evaluation before testing its source triangles.
 The existing `prepare` entry point and automatic world preparation use solid fill.
 
 References for geometric concepts: [Voxel](https://en.wikipedia.org/wiki/Voxel), [Hyperplane separation theorem — separating axis theorem](https://en.wikipedia.org/wiki/Hyperplane_separation_theorem), [Flood fill](https://en.wikipedia.org/wiki/Flood_fill). No FAR implementation code is used.

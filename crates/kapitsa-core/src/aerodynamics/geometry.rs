@@ -659,6 +659,30 @@ fn triangle_grid_bounds(
     )
 }
 
+fn flood_voxels(
+    shell: &[bool],
+    visited: &mut [bool],
+    dimensions: [usize; 3],
+    queue: &mut Vec<usize>,
+) {
+    let mut head = 0;
+    while head < queue.len() {
+        let p = coordinates(queue[head], dimensions);
+        head += 1;
+        for axis in 0..3 {
+            for positive in [false, true] {
+                if let Some(i) = neighbor(p, axis, positive, dimensions)
+                    && !shell[i]
+                    && !visited[i]
+                {
+                    visited[i] = true;
+                    queue.push(i);
+                }
+            }
+        }
+    }
+}
+
 fn has_nonzero_winding(instance: &GeometryInstance<'_>, point: Vec3) -> Result<bool, crate::Error> {
     // Jacobson et al. (2013), section 4.1, equation (2), evaluated with unit rays.
     // Away from an oriented closed surface the sum is an integer number of turns.
@@ -707,7 +731,7 @@ impl PreparedGeometry {
     /// Preserves resolved cavities in closed oriented meshes. The walls of a
     /// cavity must have winding opposite to the enclosing shell in the same
     /// instance. Cells touched by triangles remain conservatively occupied.
-    /// The worst-case solid-angle evaluation is charged to `config.max_work`.
+    /// The region traversal and solid-angle evaluations count toward `config.max_work`.
     pub fn prepare_with_oriented_cavities(
         instances: &[GeometryInstance<'_>],
         config: GeometryConfig,
@@ -820,8 +844,12 @@ impl PreparedGeometry {
             .and_then(|n| n.checked_add(triangle_count.saturating_mul(10)))
             .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         if oriented_cavities {
+            // At most one additional visit, seed check, six neighbor checks
+            // and one occupancy write per cell across enclosed regions.
+            const REGION_WORK_PER_CELL: usize = 9;
             work = count
-                .checked_mul(triangle_count)
+                .checked_mul(instances.len())
+                .and_then(|n| n.checked_mul(REGION_WORK_PER_CELL))
                 .and_then(|n| work.checked_add(n))
                 .ok_or(GeometryError::WorkBudgetExceeded)?;
         }
@@ -906,36 +934,35 @@ impl PreparedGeometry {
                         queue.push(i);
                     }
                 }
-                let mut head = 0;
-                while head < queue.len() {
-                    let p = coordinates(queue[head], dimensions);
-                    head += 1;
-                    for axis in 0..3 {
-                        for positive in [false, true] {
-                            if let Some(i) = neighbor(p, axis, positive, dimensions)
-                                && !shell[i]
-                                && !exterior[i]
-                            {
-                                exterior[i] = true;
-                                queue.push(i);
+                flood_voxels(&shell, &mut exterior, dimensions, &mut queue);
+                if oriented_cavities {
+                    for i in 0..count {
+                        if exterior[i] || shell[i] {
+                            continue;
+                        }
+                        work = work
+                            .checked_add(instance.mesh.triangles().len())
+                            .filter(|&next| next <= config.max_work)
+                            .ok_or(GeometryError::WorkBudgetExceeded)?;
+                        // Adjacent non-surface cells share a path that cannot
+                        // cross a triangle, so winding is invariant in the region.
+                        let p = coordinates(i, dimensions);
+                        let center = origin + vector(p.map(|v| (v as f64 + 0.5) * h));
+                        let filled = has_nonzero_winding(instance, center)?;
+                        queue.clear();
+                        exterior[i] = true;
+                        queue.push(i);
+                        flood_voxels(&shell, &mut exterior, dimensions, &mut queue);
+                        if filled {
+                            for &cell in &queue {
+                                shell[cell] = true;
                             }
                         }
                     }
                 }
             }
             for i in 0..count {
-                let filled_interior = if is_closed && !exterior[i] && !shell[i] {
-                    if oriented_cavities {
-                        let p = coordinates(i, dimensions);
-                        let center = origin + vector(p.map(|v| (v as f64 + 0.5) * h));
-                        has_nonzero_winding(instance, center)?
-                    } else {
-                        true
-                    }
-                } else {
-                    false
-                };
-                if shell[i] || filled_interior {
+                if shell[i] || (is_closed && !exterior[i]) {
                     occupancy[i] = Some(
                         occupancy[i].map_or(instance.owner, |owner| owner.min(instance.owner)),
                     );
