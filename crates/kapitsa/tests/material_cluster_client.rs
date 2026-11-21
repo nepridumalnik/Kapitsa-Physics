@@ -456,6 +456,40 @@ async fn part_aerodynamic_geometry_commands_apply_loads_on_both_executors()
             client.poll_body_shape(id).await?,
             BodyShapeStatus::Unmanaged
         );
+        // A supported mesh can still exceed the cook budget. Exercise the
+        // worker's own typed failure, separately from stale publication.
+        let oversized = kapitsa::shape::TriangleMesh::new(
+            vec![Vec3::ZERO, Vec3::Y * 1e6, Vec3::Z * 1e6],
+            vec![[0, 1, 2]],
+        )?;
+        client
+            .set_part_aerodynamic_mesh(part, Some(oversized))
+            .await?;
+        let (completion, result) = std::sync::mpsc::channel();
+        client
+            .queue_body_shape_with_completion(id, PendingAero::ZeroForce, &worker, Some(completion))
+            .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match client.poll_body_shape(id).await? {
+                    BodyShapeStatus::Cooking => tokio::task::yield_now().await,
+                    BodyShapeStatus::Failed(error) => {
+                        assert!(
+                            error
+                                .downcast_ref::<kapitsa::aerodynamics::geometry::GeometryError>()
+                                .is_some(),
+                            "{error:?}"
+                        );
+                        assert_eq!(result.try_recv()?, Err(error));
+                        return Ok::<(), Box<dyn std::error::Error>>(());
+                    }
+                    other => return Err(format!("expected cook failure, got {other:?}").into()),
+                }
+            }
+        })
+        .await??;
+        assert!(client.cancel_body_shape(id).await?);
+        client.set_part_aerodynamic_colliders(part, true).await?;
         client
             .set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1024)?)
             .await?;
