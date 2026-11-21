@@ -7,7 +7,7 @@
 
 ## 2. Parallel execution
 
-- [ ] 2.1 Add private-pool and shared-pool builder modes using `RayonExecutor`; test invalid configuration, worker participation, independent worlds, pool reuse and release.
+- [x] 2.1 Add private-pool and shared-pool builder modes using `RayonExecutor`; test invalid configuration, worker participation, independent worlds, pool reuse and release.
 - [x] 2.2 Compare sequential and parallel body states, events, impulses and diagnostics in a deterministic contact fixture; run the parallel-only and service test configurations.
 
 ## 3. Public integration

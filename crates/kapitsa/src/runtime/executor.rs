@@ -224,6 +224,11 @@ impl StepExecutor for RayonExecutor {
 }
 
 impl RayonExecutor {
+    #[cfg(test)]
+    pub(super) fn pool_weak(&self) -> std::sync::Weak<ThreadPool> {
+        Arc::downgrade(&self.pool)
+    }
+
     /// Creates an independent worker budget over an existing Rayon pool.
     pub fn from_pool(pool: Arc<ThreadPool>) -> Self {
         let spare = pool.current_num_threads().saturating_sub(1);

@@ -98,3 +98,29 @@ impl PhysicsSystem {
         Ok(self.world.committed_step_results())
     }
 }
+
+#[cfg(all(test, feature = "parallel"))]
+#[test]
+fn private_pool_runs_scoped_work_on_multiple_threads_and_is_released()
+-> Result<(), Box<dyn std::error::Error>> {
+    use kapitsa_core::execution::StepExecutor;
+    use std::{num::NonZeroUsize, sync::Barrier, thread};
+
+    let mut system = PhysicsSystem::builder(PhysicsWorld::new())
+        .workers(NonZeroUsize::new(2).ok_or("positive worker count required")?)
+        .build()?;
+    let executor = system.executor.as_ref().ok_or("missing private executor")?;
+    let pool = executor.pool_weak();
+    let rendezvous = Barrier::new(2);
+    let identify_worker = || {
+        rendezvous.wait();
+        (thread::current().id(), rayon::current_thread_index())
+    };
+    let (left, right) = executor.join(identify_worker, identify_worker);
+    assert_ne!(left.0, right.0);
+    assert!(left.1.is_some() && right.1.is_some());
+    system.update(0.01)?;
+    drop(system);
+    assert!(pool.upgrade().is_none());
+    Ok(())
+}
