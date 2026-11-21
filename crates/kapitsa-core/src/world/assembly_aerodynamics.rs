@@ -1364,6 +1364,134 @@ mod tests {
         )?)
     }
 
+    #[rstest::rstest]
+    #[case::merge(false, 0)]
+    #[case::merge_sharded(true, 0)]
+    #[case::split(false, 1)]
+    #[case::split_sharded(true, 1)]
+    #[case::root_transfer(false, 2)]
+    #[case::root_transfer_sharded(true, 2)]
+    fn bound_wave_and_shielded_wing_keep_topology_owners(
+        #[case] sharded: bool,
+        #[case] topology: u8,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::{
+            geometry::OwnerSlot,
+            shape::CookedSource,
+            wing::{FiniteWing, WingSurface},
+        };
+        let mut results = Vec::new();
+        for (bound, shielded, rebind) in [
+            (false, true, false),
+            (true, true, false),
+            (false, false, false),
+            (true, true, true),
+        ] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::X * -680.0,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let first = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+            let second = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+            let root = world.enable_cluster(first)?;
+            let loaded = world.enable_cluster(second)?;
+            let mut model = wave_model()?;
+            model.mesh = Arc::new(super::super::shape_binding_tests::cube()?);
+            world.set_part_voxel_wave(loaded, Some(model))?;
+            let wing = WingSurface::new(
+                FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?
+                    .with_supersonic_linear_theory(1.2, 3.0)?,
+                Transform::new(Vec3::Y * 0.25, kapitsa_math::Quat::IDENTITY)?,
+                4.0,
+            )?;
+            let wing = if shielded {
+                wing.with_rectangular_footprint(Vec3::splat(0.5), 2.0, 2.0)?
+            } else {
+                wing
+            };
+            world.set_part_aerodynamic_wings(loaded, vec![wing])?;
+            // A wave-only mesh on the other root permits a full two-slot binding
+            // before split/root transfer without introducing pressure loads.
+            world.set_part_wave_source_mesh_shared(
+                root,
+                Some(Arc::clone(
+                    world.part_aerodynamic_mesh_arc(loaded).ok_or("wave mesh")?,
+                )),
+            )?;
+            if topology != 0 {
+                world.merge_clusters(first, second, weld())?;
+            }
+            let bind = |world: &mut PhysicsWorld, body| -> Result<(), Box<dyn std::error::Error>> {
+                let parts = world
+                    .cluster(body)
+                    .ok_or("binding cluster")?
+                    .parts()
+                    .to_vec();
+                let sources = parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &part)| {
+                        Ok(CookedSource {
+                            mesh: Arc::clone(
+                                world.part_aerodynamic_mesh_arc(part).ok_or("source mesh")?,
+                            ),
+                            local_transform: Transform::identity(),
+                            slot: OwnerSlot::new(u32::try_from(i)?),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+                let shape = world.cook_shape(&sources, false)?;
+                world.bind_shape(body, shape, parts)?;
+                Ok(())
+            };
+            if bound {
+                bind(&mut world, if topology == 0 { second } else { first })?;
+            }
+            match topology {
+                0 => world.merge_clusters(first, second, weld())?,
+                1 => {
+                    let bridge = world.cluster(first).ok_or("merged cluster")?.welds()[0];
+                    world.break_weld(bridge)?;
+                }
+                _ => world.destroy_cluster_part(root)?,
+            }
+            let body = world.part_body(loaded).ok_or("load owner body")?;
+            if rebind {
+                bind(&mut world, body)?;
+            }
+            // All cases compare against the same ordinary, body-local reference.
+            if sharded && bound {
+                world.step_with_shards(
+                    1e-8,
+                    &mut [Vec::new(), Vec::new()],
+                    &SequentialExecutor,
+                    2,
+                )?;
+            } else {
+                world.step(1e-8)?;
+            }
+            let [wave] = world.part_hull_wrenches() else {
+                return Err("expected one wave wrench".into());
+            };
+            let [wing] = world.part_wing_wrenches() else {
+                return Err("expected one wing wrench".into());
+            };
+            assert_eq!((wave.body, wave.part), (body, loaded));
+            assert_eq!((wing.body, wing.part), (body, loaded));
+            assert!(wave.wrench.force.length() > 0.0);
+            assert!(wing.wrench.force.length() > 0.0);
+            assert!(wing.wrench.moment.length() > 0.0);
+            assert_eq!(world.shape_binding(body).is_some(), rebind);
+            results.push((wave.wrench, wing.wrench));
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[0], results[3]);
+        assert!(results[0].1.force.length() < results[2].1.force.length());
+        Ok(())
+    }
+
     #[test]
     fn bound_wave_model_keeps_local_wave_response() -> Result<(), Box<dyn std::error::Error>> {
         use crate::aerodynamics::{geometry::OwnerSlot, shape::CookedSource};

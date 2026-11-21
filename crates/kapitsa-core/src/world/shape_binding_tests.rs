@@ -17,7 +17,7 @@ use crate::rigid_body::RigidBody;
 use crate::shape::TriangleMesh;
 use crate::transform::Transform;
 
-fn cube() -> Result<TriangleMesh, crate::Error> {
+pub(super) fn cube() -> Result<TriangleMesh, crate::Error> {
     TriangleMesh::new(
         vec![
             Vec3::ZERO,
