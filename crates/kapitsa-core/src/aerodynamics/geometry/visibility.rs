@@ -204,7 +204,7 @@ pub(super) fn crossing_point(a: Vec3, b: Vec3, da: f64, db: f64) -> Result<Vec3,
     let interpolate = |near: f64, far: f64| {
         let difference = far - near;
         if difference.is_finite() {
-            near + difference * fraction
+            difference.mul_add(fraction, near)
         } else {
             near * (1.0 - fraction) + far * fraction
         }
@@ -691,6 +691,17 @@ mod tests {
             crossing_point(b, a, largest, -largest)?,
             Vec3::new(0.0, 4.0, 0.0)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn crossing_interpolation_retains_subnormal_product_residual() -> Result<(), crate::Error> {
+        let smallest = f64::from_bits(1);
+        let near = Vec3::X * smallest;
+        let far = -Vec3::X * smallest;
+        let point = crossing_point(near, far, 1.0, -3.0)?;
+        assert_eq!(point, Vec3::ZERO);
+        assert_eq!(point, crossing_point(far, near, -3.0, 1.0)?);
         Ok(())
     }
 
