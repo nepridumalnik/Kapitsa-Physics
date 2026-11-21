@@ -240,7 +240,10 @@ impl PhysicsWorld {
             let result = match result {
                 Ok(result) => result,
                 Err(TryRecvError::Empty) => return true,
-                Err(TryRecvError::Disconnected) => Err(ShapeRegistryError::StaleBinding.into()),
+                Err(error @ TryRecvError::Disconnected) => Err(crate::Error::from_source(
+                    crate::ErrorKind::Aerodynamics,
+                    error,
+                )),
             };
             match result.and_then(|shape| self.publish_body_shape(body, shape, job.parts.clone())) {
                 Ok(_) => false,
@@ -493,6 +496,27 @@ mod tests {
     use crate::{shape::TriangleMesh, transform::Transform};
     use kapitsa_math::Vec3;
     use std::sync::Arc;
+
+    #[test]
+    fn disconnected_cook_reports_transport_failure() -> Result<(), crate::Error> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        let (sender, pending) = PendingShape::test_channel();
+        world.track_body_shape(body, vec![part], PendingAero::ZeroForce, pending)?;
+        assert_eq!(world.body_shape_status(body), BodyShapeStatus::Cooking);
+        drop(sender);
+        world.poll_body_shapes();
+        assert!(
+            matches!(world.body_shape_status(body), BodyShapeStatus::Failed(error)
+            if error.downcast_ref::<TryRecvError>() == Some(&TryRecvError::Disconnected))
+        );
+        assert!(world.shape_registry().is_empty());
+        Ok(())
+    }
 
     #[rstest::rstest]
     #[case(false, PendingAero::ZeroForce, false)]
