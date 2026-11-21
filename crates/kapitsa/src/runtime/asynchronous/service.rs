@@ -1570,6 +1570,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn overloaded_step_keeps_dt_and_reports_speed_floor() {
         let mut simulation = Simulation::new_from_config(config(100)).unwrap();
+        // Observe the gated step, not a later catch-up step that can replace
+        // its load metrics before the scheduler handles a pause request.
+        simulation.set_time_horizon(Some(Duration::from_millis(10)));
         let (entered_tx, entered_rx) = oneshot::channel();
         let (release_tx, release_rx) = mpsc::channel();
         simulation
