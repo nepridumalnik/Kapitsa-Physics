@@ -38,7 +38,7 @@ pub(super) fn suppress_pending_shape(
 ) -> bool {
     pending
         .and_then(|jobs| jobs.get(&body))
-        .is_some_and(|job| job.policy == PendingAero::ZeroForce || !previous_is_current())
+        .is_some_and(|job| job.policy != PendingAero::KeepPrevious || !previous_is_current())
 }
 
 use super::{BodyEntry, BodyId, ClusterError, PartId, PhysicsWorld};
