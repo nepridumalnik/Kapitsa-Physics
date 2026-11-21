@@ -12,6 +12,8 @@
 //! rejected. A failed cook or replacement never mutates the registry.
 
 use std::fmt;
+
+pub mod worker;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 

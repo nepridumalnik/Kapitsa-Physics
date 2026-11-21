@@ -1,0 +1,131 @@
+//! Bounded, off-thread cooking of immutable shape inputs.
+
+use std::{io, sync::mpsc, thread};
+
+use super::{CookedShape, CookedSource, GeometryConfig};
+
+/// A single background cook worker with bounded waiting capacity.
+pub struct ShapeWorker {
+    requests: mpsc::SyncSender<Request>,
+}
+
+struct Request {
+    sources: Vec<CookedSource>,
+    config: GeometryConfig,
+    oriented_cavities: bool,
+    result: mpsc::SyncSender<Result<CookedShape, crate::Error>>,
+}
+
+/// Failure to enqueue a cook, before any work is published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubmitError {
+    /// All waiting slots are occupied.
+    Full,
+    /// The worker is no longer running.
+    Disconnected,
+}
+
+/// One pending cook. Dropping it discards the result without blocking.
+pub struct PendingShape {
+    result: mpsc::Receiver<Result<CookedShape, crate::Error>>,
+}
+
+impl PendingShape {
+    /// Polls the result without blocking. Disconnection is distinct from a cook error.
+    pub fn try_recv(&self) -> Result<Result<CookedShape, crate::Error>, mpsc::TryRecvError> {
+        self.result.try_recv()
+    }
+
+    /// Waits for this cook outside the simulation step.
+    pub fn recv(self) -> Result<Result<CookedShape, crate::Error>, mpsc::RecvError> {
+        self.result.recv()
+    }
+}
+
+impl ShapeWorker {
+    /// Starts one worker. Capacity counts waiting requests, not the active cook.
+    pub fn new(capacity: usize) -> io::Result<Self> {
+        let (requests, receiver) = mpsc::sync_channel::<Request>(capacity);
+        thread::Builder::new()
+            .name("kapitsa-shape-cook".into())
+            .spawn(move || {
+                while let Ok(request) = receiver.recv() {
+                    let result = CookedShape::cook(
+                        &request.sources,
+                        request.config,
+                        request.oriented_cavities,
+                    );
+                    let _ = request.result.send(result);
+                }
+            })?;
+        Ok(Self { requests })
+    }
+
+    /// Queues owned cook inputs without blocking the caller.
+    pub fn submit(
+        &self,
+        sources: Vec<CookedSource>,
+        config: GeometryConfig,
+        oriented_cavities: bool,
+    ) -> Result<PendingShape, SubmitError> {
+        let (result, receiver) = mpsc::sync_channel(1);
+        self.requests
+            .try_send(Request {
+                sources,
+                config,
+                oriented_cavities,
+                result,
+            })
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => SubmitError::Full,
+                mpsc::TrySendError::Disconnected(_) => SubmitError::Disconnected,
+            })?;
+        Ok(PendingShape { result: receiver })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aerodynamics::geometry::GeometryError;
+
+    #[test]
+    fn cancelled_result_cannot_replace_the_next_request() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let worker = ShapeWorker::new(2)?;
+        let config = super::super::assembly_pressure_config();
+        let obsolete = worker
+            .submit(Vec::new(), config, false)
+            .map_err(|_| "obsolete submission rejected")?;
+        let mesh = crate::shape::TriangleMesh::new(
+            vec![
+                kapitsa_math::Vec3::ZERO,
+                kapitsa_math::Vec3::Y,
+                kapitsa_math::Vec3::Z,
+            ],
+            vec![[0, 1, 2]],
+        )?;
+        let current = worker
+            .submit(
+                vec![CookedSource {
+                    mesh: std::sync::Arc::new(mesh),
+                    local_transform: crate::transform::Transform::identity(),
+                    slot: super::super::OwnerSlot::new(0),
+                }],
+                config,
+                false,
+            )
+            .map_err(|_| "current submission rejected")?;
+        drop(obsolete);
+        assert_eq!(current.recv()??.sources().len(), 1);
+        let invalid = worker
+            .submit(Vec::new(), config, false)
+            .map_err(|_| "invalid submission rejected")?;
+        let error = invalid.recv()?.err().ok_or("empty cook accepted")?;
+        assert_eq!(
+            error.downcast_ref::<GeometryError>(),
+            Some(&GeometryError::EmptyGeometry)
+        );
+        Ok(())
+    }
+}
