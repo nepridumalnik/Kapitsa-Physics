@@ -392,3 +392,26 @@ both four-vessel worlds for 16 steps, then measures 16 more steps. Both paths
 recorded 4,800 allocations and 1,168,384 bytes, with identical linear and
 angular velocities. This demonstrates no added allocations for this warmed
 mesh workload, not an allocation-free physics step.
+
+## First step after a managed mesh edit
+
+On Windows, using the optimized Cargo bench profile on `0b221ce` with this
+benchmark, one clustered body was warmed with a six-triangle mesh, then edited
+to a 96-triangle mesh before timing one full step. Setup and the edit are
+excluded; scheduling, publication, and waiting are included for `BlockStep`.
+The two paths produced identical nonzero pressure wrenches in every pair.
+
+```powershell
+$env:KAPITSA_POST_EDIT_BENCH = '1'
+cargo bench -p kapitsa-core --bench aerodynamics --locked
+```
+
+| Path | Median (ms) | Range (ms) |
+| --- | ---: | ---: |
+| Synchronous local preparation | 7.529 | 7.261–8.202 |
+| Background preparation, `BlockStep` | 7.413 | 7.254–8.049 |
+
+Seven measured pairs followed three warmup pairs; route order alternated.
+The ranges overlap: this does not demonstrate a speedup. Cooking is off the
+step thread, but `BlockStep` still waits for it. This fixture does not measure
+nonblocking policies, multiple assemblies, or throughput under queue contention.

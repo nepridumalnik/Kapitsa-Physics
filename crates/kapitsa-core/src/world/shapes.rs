@@ -715,8 +715,54 @@ mod tests {
     }
 
     #[test]
-    fn managed_edit_supersedes_in_flight_inputs() -> Result<(), Box<dyn std::error::Error>> {
+    fn cancelling_ready_result_preserves_live_binding_and_motion()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        let mesh = Arc::new(super::super::shape_binding_tests::cube()?);
+        world.set_part_aerodynamic_mesh_shared(part, Some(Arc::clone(&mesh)))?;
+        let sources = [CookedSource {
+            mesh,
+            local_transform: Transform::identity(),
+            slot: OwnerSlot::new(0),
+        }];
+        let id = world.cook_shape(&sources, false)?;
+        world.bind_shape(body, id, vec![part])?;
+        let before = *world.body(body).ok_or("missing body")?.state();
+        let (sender, pending) = PendingShape::test_channel();
+        world.track_body_shape(body, vec![part], PendingAero::BlockStep, pending)?;
+        sender
+            .send(Ok(CookedShape::cook(
+                &sources,
+                assembly_pressure_config(),
+                false,
+            )?))
+            .map_err(|_| "pending channel disconnected")?;
+        assert!(world.cancel_body_shape(body));
+        world.poll_body_shapes();
+        assert_eq!(world.body_shape_status(body), BodyShapeStatus::Ready(id));
+        assert_eq!(world.shape_registry().len(), 1);
+        assert_eq!(*world.body(body).ok_or("missing body")?.state(), before);
+        Ok(())
+    }
+
+    fn managed_edit_supersedes_in_flight_inputs(
+        sharded: bool,
+    ) -> Result<
+        (
+            crate::rigid_body::BodyState,
+            crate::aerodynamics::pressure::PressureWrench,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::super::test_atmosphere(
+            crate::aerodynamics::AtmosphericState::new(1.0, Vec3::X * -2000.0)?,
+        ));
         let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
             Transform::identity(),
             crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
@@ -733,7 +779,16 @@ mod tests {
             .ok_or("missing initial job")?;
         job.result = Ok(pending);
         world.set_part_aerodynamic_mesh(part, Some(super::super::shape_binding_tests::cube()?))?;
-        world.step(1e-8)?;
+        if sharded {
+            world.step_with_shards(
+                1e-8,
+                &mut [Vec::new(), Vec::new()],
+                &crate::execution::SequentialExecutor,
+                2,
+            )?;
+        } else {
+            world.step(1e-8)?;
+        }
         assert!(
             sender
                 .send(Err(ShapeRegistryError::StaleBinding.into()))
@@ -742,6 +797,7 @@ mod tests {
         let BodyShapeStatus::Ready(id) = world.body_shape_status(body) else {
             return Err("replacement was not published".into());
         };
+        assert_eq!(world.shape_registry().len(), 1);
         let shape = world
             .shape_registry()
             .get(id)
@@ -752,6 +808,21 @@ mod tests {
                 .part_aerodynamic_mesh_arc(part)
                 .ok_or("missing live mesh")?
         ));
+        let loads = world
+            .owner_mesh_pressure(body)
+            .ok_or("missing pressure load")?;
+        assert_eq!(loads.len(), 1);
+        assert!(loads[0].1.force.length() > 1.0);
+        Ok((*world.body(body).ok_or("missing body")?.state(), loads[0].1))
+    }
+
+    #[test]
+    fn superseded_cook_commits_identical_motion_in_both_step_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            managed_edit_supersedes_in_flight_inputs(false)?,
+            managed_edit_supersedes_in_flight_inputs(true)?
+        );
         Ok(())
     }
 
@@ -828,8 +899,24 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn managed_merge_recooks_the_surviving_assembly() -> Result<(), Box<dyn std::error::Error>> {
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn managed_merge_and_root_transfer_recook_the_surviving_assembly(
+        #[case] sharded: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let step = |world: &mut PhysicsWorld| {
+            if sharded {
+                world.step_with_shards(
+                    1e-8,
+                    &mut [Vec::new(), Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    2,
+                )
+            } else {
+                world.step(1e-8)
+            }
+        };
         let mut world = PhysicsWorld::new();
         let mass = crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?;
         let first = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
@@ -850,17 +937,48 @@ mod tests {
         }
         let worker = ShapeWorker::new(2)?;
         world.manage_body_shape(first, PendingAero::BlockStep, &worker)?;
-        world.step(1e-8)?;
+        step(&mut world)?;
         let initial = world.shape_binding(first).ok_or("initial binding")?.shape();
         world.merge_clusters(
             first,
             second,
             super::super::shape_binding_tests::merge_weld(),
         )?;
-        world.step(1e-8)?;
+        step(&mut world)?;
         let current = world.shape_binding(first).ok_or("merged binding")?;
         assert_ne!(initial, current.shape());
         assert_eq!(current.parts(), &[a, b]);
+        let bridge = *world
+            .cluster(first)
+            .ok_or("merged cluster")?
+            .welds()
+            .first()
+            .ok_or("missing bridge")?;
+        let merged = current.shape();
+        world.break_weld(bridge)?;
+        step(&mut world)?;
+        let current = world.shape_binding(first).ok_or("split binding")?;
+        assert_ne!(current.shape(), merged);
+        assert_eq!(current.parts(), &[a]);
+        let detached = world.part_body(b).ok_or("detached owner")?;
+        assert_eq!(
+            world.body_shape_status(detached),
+            BodyShapeStatus::Unmanaged
+        );
+        world.merge_clusters(
+            first,
+            detached,
+            super::super::shape_binding_tests::merge_weld(),
+        )?;
+        step(&mut world)?;
+        let current = world.shape_binding(first).ok_or("remerged binding")?;
+        let merged = current.shape();
+        world.destroy_cluster_part(a)?;
+        step(&mut world)?;
+        let current = world.shape_binding(first).ok_or("root-transfer binding")?;
+        assert_ne!(current.shape(), merged);
+        assert_eq!(current.parts(), &[b]);
+        assert_eq!(world.cluster(first).ok_or("surviving cluster")?.root(), b);
         Ok(())
     }
 
@@ -1090,6 +1208,8 @@ mod tests {
         let id = world.publish_body_shape(body, first, vec![part])?;
         let old = worker.submit(sources.to_vec(), assembly_pressure_config(), false)?;
         world.set_part_aerodynamic_mesh(part, Some(make_mesh()?))?;
+        let before = *world.body(body).ok_or("missing body")?.state();
+        let revision = world.body_revision;
         let error = world
             .publish_body_shape(body, old.recv()??, vec![part])
             .err()
@@ -1100,6 +1220,8 @@ mod tests {
         );
         assert_eq!(world.shape_registry().len(), 1);
         assert_eq!(world.shape_binding(body).map(ShapeBinding::shape), Some(id));
+        assert_eq!(*world.body(body).ok_or("missing body")?.state(), before);
+        assert_eq!(world.body_revision, revision);
         let (sender, pending) = PendingShape::test_channel();
         world.track_body_shape(body, vec![part], PendingAero::ZeroForce, pending)?;
         sender
