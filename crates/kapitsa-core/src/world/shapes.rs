@@ -72,7 +72,8 @@ impl PhysicsWorld {
     }
 
     /// Re-cooks `sources` and atomically replaces the shape behind `id`,
-    /// keeping its identity and advancing its revision.
+    /// keeping its identity and advancing its revision. The expected revision
+    /// must match the registry before any cooking is performed.
     ///
     /// Existing bindings become stale: they no longer match the new revision,
     /// so evaluation falls back to body-local preparation until the body is
@@ -81,8 +82,13 @@ impl PhysicsWorld {
     pub fn replace_shape(
         &mut self,
         id: ShapeId,
+        expected_revision: u64,
         sources: &[CookedSource],
     ) -> Result<u64, crate::Error> {
+        let current = self.shapes.get(id).ok_or(ShapeRegistryError::StaleShape)?;
+        if current.revision() != expected_revision {
+            return Err(ShapeRegistryError::StaleBinding.into());
+        }
         let shape = CookedShape::cook(
             sources,
             assembly_pressure_config(),

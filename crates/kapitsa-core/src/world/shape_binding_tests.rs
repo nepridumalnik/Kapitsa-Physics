@@ -412,7 +412,17 @@ fn registry_replacement_stales_bindings_and_evaluation_falls_back()
     let before_control = body_velocity(&world, control)?;
     assert!((before_bound - before_control).length() < 1e-12);
 
-    assert_eq!(world.replace_shape(shape, &sources)?, 2);
+    assert_eq!(world.replace_shape(shape, 1, &sources)?, 2);
+    let previous_binding = world.shape_binding(bound).cloned();
+    let error = world
+        .replace_shape(shape, 1, &[])
+        .err()
+        .ok_or("stale revision accepted")?;
+    assert_eq!(
+        error.downcast_ref::<ShapeRegistryError>(),
+        Some(&ShapeRegistryError::StaleBinding)
+    );
+    assert_eq!(world.shape_binding(bound), previous_binding.as_ref());
     assert_eq!(
         world.shape_registry().get(shape).ok_or("shape")?.revision(),
         2
