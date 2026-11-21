@@ -16,7 +16,9 @@ fallback, `d5624ae` for exact projection from original vertex coordinates, and
 `efedd1d` for reversible power-of-two normalization that preserves stored
 shadow boundaries and windward values, and `c603ae5` for fused multiply-add
 crossing interpolation with finite coordinate differences, and `a633369` for
-fused residual correction of crossing fractions near binary rounding boundaries.
+fused residual correction of crossing fractions near binary rounding boundaries,
+and `3ef81e7` for reciprocal residual correction in the larger endpoint-order
+branch and its rational-reference regression.
 
 ## Scope
 
@@ -134,8 +136,20 @@ This change covers:
   `s = (-f).mul_add(d, r)`, then use `f + ((s + q) - f*e)/d`;
   these bounded correction quantities reduce ratio, sum and division rounding
   error without forming an overflowing distance sum or a separately rounded,
-  potentially underflowing residual product; the larger endpoint-order branch
-  retains `1/(1 + r)`;
+  potentially underflowing residual product;
+- applying `3ef81e7` reciprocal residual correction in the larger endpoint-order
+  branch: with the same `r`, `d`, `e` and `q`, compute `u = 1/d` and
+  `v = (-u).mul_add(d, 1.0)`, then use `u + (v - u*(e + q))/d` instead
+  of the uncorrected reciprocal; this accounts for reciprocal, denominator
+  and ratio rounding without forming the distance sum;
+- recording `3ef81e7` synthetic regression
+  `crossing_fraction_corrects_large_endpoint_reciprocal`: with
+  `a = f64::from_bits(0x4b18_5f64_cee3_79c6)` and
+  `b = f64::from_bits(0x4ae1_f9d1_568c_8566)`, both signed-distance pairs
+  `(a, -b)` and `(-a, b)` equal
+  `f64::from_bits(0x3fed_4c81_d7e1_b240)`, the nearest binary64 to the exact
+  rational `a/(a+b)`; this reference concerns the stored binary64 inputs,
+  not exact geometry, test execution evidence or independent physical validation;
 - recording `a633369` synthetic regression
   `crossing_fraction_corrects_ratio_at_rounding_boundary`: for
   `small = f64::from_bits(1)` and `large = f64::MIN_POSITIVE * 2.0`,

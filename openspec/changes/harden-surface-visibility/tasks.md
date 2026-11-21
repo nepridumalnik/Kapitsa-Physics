@@ -158,7 +158,8 @@
 - [x] Record `a633369`: correct the smaller crossing fraction using fused ratio
   and division residuals and the rounded denominator's error, with bounded
   correction quantities and no overflowing distance sum or separately rounded
-  residual product; retain `1/(1 + ratio)` for the larger endpoint-order branch.
+  residual product; the larger endpoint-order branch is subsequently corrected
+  by `3ef81e7` below.
 - [x] Document `crossing_fraction_corrects_ratio_at_rounding_boundary`: smallest
   subnormal `f64::from_bits(1)` and opposite distance
   `-(f64::MIN_POSITIVE * 2.0)` yield `2.0_f64.powi(-53).next_down()`, not the
@@ -168,3 +169,16 @@
   correct-rounding guarantee, possible fraction rounding to one, zero smaller
   fraction `PrecisionLoss` and non-finite-point `ArithmeticOverflow`; do not
   claim exact geometry or a global numeric error bound.
+- [x] Record `3ef81e7`: for the larger endpoint-order branch, use
+  `u = 1/d`, `v = (-u).mul_add(d, 1.0)` and
+  `u + (v - u*(e + q))/d`, with `r = small/large`, `d = 1 + r`,
+  `e = r - (d - 1)` and `q = (-r).mul_add(large, small)/large`;
+  correct reciprocal, denominator and ratio rounding without forming the
+  distance sum, while retaining the smaller-fraction underflow check.
+- [x] Document `crossing_fraction_corrects_large_endpoint_reciprocal`:
+  `a = f64::from_bits(0x4b18_5f64_cee3_79c6)` and
+  `b = f64::from_bits(0x4ae1_f9d1_568c_8566)` give
+  `f64::from_bits(0x3fed_4c81_d7e1_b240)` for both `(a, -b)` and `(-a, b)`,
+  using the nearest binary64 to exact rational `a/(a+b)` as reference for
+  stored inputs; record a synthetic assertion only, not execution evidence
+  or independent physical validation, and retain all binary64 limitations.

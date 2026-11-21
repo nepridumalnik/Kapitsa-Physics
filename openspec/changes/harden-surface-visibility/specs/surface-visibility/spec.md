@@ -334,6 +334,8 @@ to zero SHALL return `PrecisionLoss`.
 Crossing fractions SHALL use the smaller-to-larger absolute distance ratio.
 The smaller fraction SHALL apply fused ratio and division residual corrections
 and a correction for rounding `1 + ratio`, as recorded in `a633369`.
+The larger endpoint-order fraction SHALL apply fused reciprocal residual
+correction with the ratio and denominator errors, as recorded in `3ef81e7`.
 Finite coordinate differences SHALL use fused multiply-add for interpolation.
 Unrepresentable results SHALL return an error.
 
@@ -364,7 +366,30 @@ Unrepresentable results SHALL return an error.
   `s = (-f).mul_add(d, r)`
 - **AND** correction quantities are bounded; fused residuals avoid separately
   rounding potentially underflowing residual products, without forming the
-  distance sum; the larger endpoint-order branch retains `1/(1 + r)`
+  distance sum
+
+#### Scenario: Larger crossing fraction corrects the reciprocal residual
+
+- **WHEN** the first endpoint has the larger absolute distance and
+  `r = small/large`, `d = 1 + r`, `e = r - (d - 1)` and
+  `q = (-r).mul_add(large, small)/large`
+- **THEN** the larger endpoint-order branch computes `u = 1/d`,
+  `v = (-u).mul_add(d, 1.0)` and returns `u + (v - u*(e + q))/d`,
+  correcting reciprocal, denominator and ratio rounding without forming the
+  distance sum
+- **AND** the smaller-fraction zero check remains in effect before either branch
+
+#### Scenario: Synthetic reciprocal correction matches a rational reference
+
+- **WHEN** `crossing_fraction_corrects_large_endpoint_reciprocal` in `3ef81e7`
+  uses `a = f64::from_bits(0x4b18_5f64_cee3_79c6)` and
+  `b = f64::from_bits(0x4ae1_f9d1_568c_8566)`
+- **THEN** both `crossing_fraction(a, -b)` and `crossing_fraction(-a, b)`
+  equal `f64::from_bits(0x3fed_4c81_d7e1_b240)`, the nearest binary64 to the
+  exact rational `a/(a+b)` for those stored inputs
+- **AND** this is a synthetic regression assertion, not test execution evidence
+  or independent physical validation; matching this reference does not provide
+  a universal correct-rounding guarantee or exact geometry
 
 #### Scenario: Synthetic crossing fraction corrects a subnormal rounding boundary
 
