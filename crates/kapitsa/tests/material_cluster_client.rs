@@ -424,6 +424,13 @@ async fn part_aerodynamic_geometry_commands_apply_loads_on_both_executors()
             .queue_body_shape(id, PendingAero::ZeroForce, &worker)
             .await?;
         assert!(client.cancel_body_shape(id).await?);
+        client.stop_managing_body_shape(id).await?;
+        let (completion, result) = std::sync::mpsc::channel();
+        client
+            .manage_body_shape(id, PendingAero::ZeroForce, &worker, Some(completion))
+            .await?;
+        client.stop_managing_body_shape(id).await?;
+        assert!(result.try_recv().is_err());
         assert!(!client.cancel_body_shape(id).await?);
         assert_eq!(
             client.poll_body_shape(id).await?,
