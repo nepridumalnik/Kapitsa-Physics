@@ -140,3 +140,15 @@
   becomes `[1.5,-0.5,0]` with exactly zero affine distance at `X*0.75`, as a
   synthetic assertion only, without claiming execution or independent physical
   validation.
+- [x] Record `c603ae5`: use `difference.mul_add(fraction, near)` for finite
+  coordinate differences, retaining subnormal product contributions through
+  addition; keep weighted endpoint interpolation for overflowing differences.
+- [x] Document `crossing_interpolation_retains_subnormal_product_residual`:
+  endpoints `X*m` and `-X*m`, `m = f64::from_bits(1)`, and signed distances
+  `1.0`, `-3.0` yield fraction `0.25` and ties-to-even zero from `m/2`, in
+  either endpoint order; separate product rounding would leave `m`. Record
+  synthetic assertions only, not test execution or independent physical validation.
+- [x] Retain rounded binary64 differences, fractions and intersection coordinates,
+  possible fraction rounding to one, smaller-ratio underflow `PrecisionLoss`
+  and non-finite-point `ArithmeticOverflow`; do not claim exact geometry or a
+  global numeric error bound from fused multiply-add.

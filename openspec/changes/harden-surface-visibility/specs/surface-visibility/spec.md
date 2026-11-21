@@ -331,10 +331,10 @@ to zero SHALL return `PrecisionLoss`.
 
 ### Requirement: Preserve representable numeric intersections
 
-For finite endpoints with overflowing differences, crossings SHALL use
-ratio-preserving rescaling and coordinates SHALL use weighted interpolation
-when it preserves a representable intersection. Genuine non-finite results
-and precision loss SHALL remain errors, not missed intersections.
+Crossing calculations SHALL preserve representable intersections when
+finite distance or endpoint differences overflow. Finite coordinate
+differences SHALL use fused multiply-add for interpolation. Unrepresentable
+results SHALL return an error.
 
 #### Scenario: Finite distances have an overflowing difference
 
@@ -349,6 +349,29 @@ and precision loss SHALL remain errors, not missed intersections.
   but the weighted endpoint interpolation is finite
 - **THEN** the weighted interpolation form is used and the representable
   intersection is retained
+
+#### Scenario: Synthetic subnormal interpolation retains the product residual
+
+- **WHEN** `crossing_interpolation_retains_subnormal_product_residual` in
+  `c603ae5` crosses endpoints `X*m` and `-X*m`, where `m = f64::from_bits(1)`,
+  with signed distances `1.0` and `-3.0`
+- **THEN** fraction `0.25` and finite coordinate difference `-2*m` give an
+  unrounded fused result `m/2`, which rounds ties to even to `Vec3::ZERO`
+  rather than the `X*m` left by separately rounding the product `-m/2` to zero
+- **AND** reversing endpoints and their distances gives the same point
+- **AND** this is a synthetic regression assertion, not test execution evidence
+  or independent physical validation
+
+#### Scenario: Crossing arithmetic retains binary64 limits
+
+- **WHEN** crossings use fused multiply-add for finite coordinate differences
+- **THEN** coordinate subtraction and the crossing fraction still round to
+  binary64, and a fraction can still round to one
+- **AND** a smaller edge ratio rounding to zero remains `PrecisionLoss`, while
+  a non-finite constructed point remains `ArithmeticOverflow`
+- **AND** a final intersection coordinate may round to zero, as in the
+  subnormal regression; exact affine distance evaluation does not make
+  constructed intersection coordinates exact
 
 ### Requirement: Check area consistency per source partition
 

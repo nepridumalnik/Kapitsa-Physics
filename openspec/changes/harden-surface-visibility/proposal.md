@@ -14,7 +14,8 @@ fallback, `d5624ae` for exact projection from original vertex coordinates, and
 `3144d7c` for selective exact affine coefficients and amortized carry charges,
 `8607c83` for precharged exact evaluation of uncertain affine distances, and
 `efedd1d` for reversible power-of-two normalization that preserves stored
-shadow boundaries and windward values.
+shadow boundaries and windward values, and `c603ae5` for fused multiply-add
+crossing interpolation with finite coordinate differences.
 
 ## Scope
 
@@ -124,6 +125,22 @@ This change covers:
 - preserving representable shadow intersections when finite floating-point
   distance or coordinate differences would overflow during intersection
   arithmetic;
+- using `difference.mul_add(fraction, near)` for each finite coordinate
+  difference `far - near`, rounding the product and addition together so a
+  subnormal product residual can contribute before final binary64 rounding;
+  retaining weighted endpoint interpolation when the difference overflows;
+- recording `c603ae5` synthetic regression
+  `crossing_interpolation_retains_subnormal_product_residual`: endpoints
+  `X*m` and `-X*m`, where `m = f64::from_bits(1)`, with signed distances
+  `1.0` and `-3.0`, give fraction `0.25` and round the resulting `m/2` to
+  zero, identically after reversing endpoints and distances; separate product
+  rounding would lose `-m/2` before addition and leave `m`; this is not test
+  execution evidence or independent physical validation;
+- retaining binary64 rounding of coordinate differences, crossing fractions
+  and constructed intersections, including possible fraction rounding to one;
+  fused multiply-add does not make geometry exact or provide a global numeric
+  error bound; smaller-ratio underflow still returns `PrecisionLoss` and
+  non-finite constructed points still return `ArithmeticOverflow`;
 - checking that each source triangle's clipped pieces conserve its local
   barycentric area, with a heuristic precision allowance based on work for
   that source partition;
