@@ -872,6 +872,7 @@ pub struct PhysicsWorld {
     assembly_aerodynamics: Option<HashMap<BodyId, assembly_aerodynamics::AssemblyAerodynamics>>,
     shapes: crate::aerodynamics::shape::ShapeRegistry,
     shape_bindings: Option<HashMap<BodyId, crate::aerodynamics::shape::ShapeBinding>>,
+    pending_shapes: Option<HashMap<BodyId, shapes::PendingBodyShape>>,
     welds: DensePool<Weld>,
     colliders: DensePool<ColliderEntry>,
     chunks: DensePool<chunk::ChunkEntry>,
@@ -1612,6 +1613,7 @@ impl PhysicsWorld {
             assembly_aerodynamics: None,
             shapes: crate::aerodynamics::shape::ShapeRegistry::new(),
             shape_bindings: None,
+            pending_shapes: None,
             welds: DensePool::new(),
             colliders: DensePool::new(),
             chunks: DensePool::new(),
@@ -4334,6 +4336,7 @@ impl PhysicsWorld {
         self.part_wing_pending.clear();
         self.simple_surface_pending.clear();
         self.raw_simple_pending.clear();
+        self.finish_pending_shapes();
         self.prune_stale_shape_bindings();
         let atmosphere = self.atmosphere;
         if matches!(atmosphere, Atmosphere::Vacuum) {
@@ -4361,6 +4364,20 @@ impl PhysicsWorld {
                 world: self.world_id,
                 dense: dense_id,
             };
+            if shapes::suppress_pending_shape(self.pending_shapes.as_ref(), body_id, || {
+                shapes::resolve_shared_shape(
+                    &self.shapes,
+                    self.shape_bindings.as_ref(),
+                    &self.parts,
+                    self.part_aerodynamic_geometry.as_ref(),
+                    self.preserve_assembly_mesh_cavities,
+                    body_id,
+                    entry,
+                )
+                .is_some()
+            }) {
+                continue;
+            }
             if self.aerodynamics_body_updates.try_reserve(1).is_err() {
                 return Err(Error::from(StepError::Aerodynamics {
                     body_id,

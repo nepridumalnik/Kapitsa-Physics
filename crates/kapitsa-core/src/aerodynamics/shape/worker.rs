@@ -77,7 +77,7 @@ impl PendingAero {
 /// One pending cook. Dropping it discards the result without blocking.
 pub struct PendingShape {
     cancelled: Arc<AtomicBool>,
-    result: mpsc::Receiver<Result<CookedShape, crate::Error>>,
+    result: std::sync::Mutex<mpsc::Receiver<Result<CookedShape, crate::Error>>>,
 }
 
 impl Drop for PendingShape {
@@ -87,14 +87,35 @@ impl Drop for PendingShape {
 }
 
 impl PendingShape {
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (mpsc::SyncSender<Result<CookedShape, crate::Error>>, Self) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        (
+            sender,
+            Self {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                result: std::sync::Mutex::new(receiver),
+            },
+        )
+    }
+    pub(crate) fn wait(&mut self) -> Result<Result<CookedShape, crate::Error>, mpsc::TryRecvError> {
+        self.result
+            .get_mut()
+            .map_err(|_| mpsc::TryRecvError::Disconnected)?
+            .recv()
+            .map_err(|_| mpsc::TryRecvError::Disconnected)
+    }
     /// Polls the result without blocking. Disconnection is distinct from a cook error.
-    pub fn try_recv(&self) -> Result<Result<CookedShape, crate::Error>, mpsc::TryRecvError> {
-        self.result.try_recv()
+    pub fn try_recv(&mut self) -> Result<Result<CookedShape, crate::Error>, mpsc::TryRecvError> {
+        self.result
+            .get_mut()
+            .map_err(|_| mpsc::TryRecvError::Disconnected)?
+            .try_recv()
     }
 
     /// Waits for this cook outside the simulation step.
     pub fn recv(self) -> Result<Result<CookedShape, crate::Error>, mpsc::RecvError> {
-        self.result.recv()
+        self.result.lock().map_err(|_| mpsc::RecvError)?.recv()
     }
 }
 
@@ -143,7 +164,7 @@ impl ShapeWorker {
             })?;
         Ok(PendingShape {
             cancelled,
-            result: receiver,
+            result: std::sync::Mutex::new(receiver),
         })
     }
 }
