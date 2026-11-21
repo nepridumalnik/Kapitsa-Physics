@@ -16,6 +16,36 @@ fn wing(local: Transform) -> Result<WingSurface, crate::Error> {
     WingSurface::new(FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?, local, 1.0)
 }
 
+#[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "Run alone: process-wide allocation counter"]
+fn wing_control_batch_adds_no_allocations() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::command::{BatchScratch, PhysicsCommand, apply_command_batch};
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?)?;
+    let part = world.enable_cluster(body)?;
+    world.set_part_aerodynamic_wings(
+        part,
+        vec![wing(Transform::identity())?.with_control(WingControl::new(0.0, 0.2, 1.0)?)],
+    )?;
+    let wing = world.part_wing_id(part, 0).ok_or("missing wing")?;
+    let mut scratch = BatchScratch::default();
+    let commands =
+        [-0.1, 0.1].map(|deflection| PhysicsCommand::SetPartWingDeflection { wing, deflection });
+    apply_command_batch(&mut world, &commands, &mut scratch)?;
+    let counts = super::tests::tracked_world_allocations(|| {
+        for _ in 0..128 {
+            assert!(apply_command_batch(&mut world, &commands, &mut scratch).is_ok());
+        }
+    });
+    println!("128 warm wing control batches: {counts:?} (allocations, bytes)");
+    assert_eq!(counts, (0, 0));
+    Ok(())
+}
+
 #[test]
 fn wing_control_ids_survive_deflection_but_not_replacement()
 -> Result<(), Box<dyn std::error::Error>> {
