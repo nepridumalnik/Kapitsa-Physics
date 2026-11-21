@@ -172,6 +172,19 @@ fn factors(point: Vec3) -> [Factor; 3] {
     components(point).map(Factor::new)
 }
 
+pub(super) fn dot(a: Vec3, b: Vec3) -> Result<f64, crate::Error> {
+    let mut sums = [[0; LIMBS]; 2];
+    let one = Factor::new(1.0);
+    for (a, b) in factors(a).into_iter().zip(factors(b)) {
+        add_product(&mut sums, [a, b, one], false);
+    }
+    let result = Determinant::difference(sums);
+    match result.leading_bit() {
+        Some(leading) => result.scaled(leading, -MIN_EXPONENT),
+        None => Ok(0.0),
+    }
+}
+
 pub(super) fn affine(values: [f64; 3], point: Vec3) -> Result<f64, crate::Error> {
     let [a, b, c] = values.map(Factor::new);
     let x = Factor::new(point.x);

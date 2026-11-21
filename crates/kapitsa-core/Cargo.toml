@@ -60,3 +60,7 @@ harness = false
 [[bench]]
 name = "wing_shielding"
 harness = false
+
+[[bench]]
+name = "voxel_hull"
+harness = false

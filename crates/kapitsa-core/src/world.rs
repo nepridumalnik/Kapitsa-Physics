@@ -109,6 +109,14 @@ mod aerodynamics {
                 {
                     continue;
                 }
+                super::shapes::require_cooked_pressure(
+                    world.mesh_pressure_model,
+                    body_id,
+                    entry,
+                    world.part_aerodynamic_geometry.as_ref(),
+                    &world.parts,
+                    shared.is_some(),
+                )?;
                 if !entry.body.base_pressure_patches.is_empty()
                     || entry.body.potential_sphere.is_some()
                 {
@@ -181,6 +189,8 @@ mod cluster;
 mod error;
 #[cfg(test)]
 mod gravity_fields_tests;
+#[cfg(test)]
+mod hull_rollback_tests;
 mod id;
 #[cfg(feature = "bench-internals")]
 mod metrics;
@@ -250,6 +260,7 @@ struct MeshAerodynamics {
 }
 
 struct BodyEntry {
+    cooked_primary_hull: Option<shapes::CookedPrimaryHull>,
     body: RigidBody,
     first_collider: Option<ColliderId>,
     cluster: Option<RigidCluster>,
@@ -1735,6 +1746,11 @@ impl PhysicsWorld {
     /// on non-cluster bodies. The default is solid fill. The next preparation
     /// uses the new rule, with the existing voxel and work budgets.
     pub fn set_body_mesh_oriented_cavities(&mut self, enabled: bool) {
+        if self.preserve_body_mesh_cavities != enabled {
+            for (_, entry) in self.bodies.iter_mut() {
+                entry.cooked_primary_hull = None;
+            }
+        }
         self.preserve_body_mesh_cavities = enabled;
     }
 
@@ -2232,6 +2248,7 @@ impl PhysicsWorld {
             self.world_id = allocate_world_id(&NEXT_WORLD_ID)?;
         }
         let dense = self.bodies.insert(BodyEntry {
+            cooked_primary_hull: None,
             body,
             first_collider: None,
             cluster: None,
@@ -2855,6 +2872,7 @@ impl PhysicsWorld {
                                             assembly_aerodynamics::PartGeometry::Mesh(_)
                                                 | assembly_aerodynamics::PartGeometry::Wave(_)
                                                 | assembly_aerodynamics::PartGeometry::WaveSourceMesh(_)
+                                                | assembly_aerodynamics::PartGeometry::WingShieldingMesh(_)
                                         )
                                     }))
                     });
@@ -3636,6 +3654,11 @@ impl PhysicsWorld {
                         crate::aerodynamics::pressure::evaluate_prepared_mesh_modified_newtonian(
                             mesh_patches.ok_or_else(error)?,
                             flow,
+                        )
+                    }
+                    crate::aerodynamics::pressure::MeshPressureModel::ModifiedNewtonianTriangleQuadrature => {
+                        crate::aerodynamics::pressure::evaluate_prepared_triangle_quadrature(
+                            mesh_patches.ok_or_else(error)?, flow,
                         )
                     }
                     crate::aerodynamics::pressure::MeshPressureModel::PotentialFlow => {
@@ -4471,6 +4494,14 @@ impl PhysicsWorld {
                 body_id,
                 entry,
             );
+            shapes::require_cooked_pressure(
+                self.mesh_pressure_model,
+                body_id,
+                entry,
+                self.part_aerodynamic_geometry.as_ref(),
+                &self.parts,
+                shared.is_some(),
+            )?;
             let assembly_prepared = assembly_aerodynamics::prepare(
                 body_id,
                 entry,
@@ -4634,14 +4665,19 @@ impl PhysicsWorld {
                         geometry_version: 0,
                         config_version: 1,
                     };
-                    let geometry = prepared.cache.prepare(key, mesh, config).map_err(|cause| {
+                    let geometry = if self.mesh_pressure_model == crate::aerodynamics::MeshPressureModel::ModifiedNewtonianTriangleQuadrature {
+                        entry.cooked_primary_hull.as_ref().ok_or(StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::shape::ShapeRegistryError::InvalidBinding.into(),
+                        })?.geometry.as_ref()
+                    } else { prepared.cache.prepare(key, mesh, config).map_err(|cause| {
                         StepError::Aerodynamics {
                             body_id,
                             cause: crate::Error::from(
                                 crate::aerodynamics::AerodynamicsError::Geometry(cause),
                             ),
                         }
-                    })?;
+                    })? };
                     let relative = entry
                         .body
                         .state()
@@ -6313,6 +6349,17 @@ impl PhysicsWorld {
                             };
                             let mut temporary_assembly = None;
                             let shared = self.shared_shape(step.body_id, entry);
+                            if let Err(error) = shapes::require_cooked_pressure(
+                                self.mesh_pressure_model,
+                                step.body_id,
+                                entry,
+                                self.part_aerodynamic_geometry.as_ref(),
+                                &self.parts,
+                                shared.is_some(),
+                            ) {
+                                step.error = Some(error);
+                                continue;
+                            }
                             let local_assembly = if staged.is_none()
                                 && assembly_aerodynamics::configured(
                                     entry,

@@ -451,6 +451,50 @@ impl WingSurface {
             .map(|footprint| (self.local_transform, footprint))
     }
 
+    /// Detects area overlap with a coplanar source triangle, not volume shielding.
+    pub(crate) fn overlaps_footprint(
+        &self,
+        body_to_wing: crate::transform::Transform,
+        vertices: [kapitsa_math::Vec3; 3],
+    ) -> Result<bool, crate::Error> {
+        use kapitsa_math::Vec3;
+        let Some(footprint) = self.footprint else {
+            return Ok(false);
+        };
+        let points = vertices.map(|v| body_to_wing.transform_point(v) - footprint.center);
+        if points.iter().any(|p| !p.is_finite()) {
+            return Err(WingError::ArithmeticOverflow.into());
+        }
+        let scale = points
+            .iter()
+            .fold(footprint.chord.max(footprint.span), |s, p| {
+                s.max(p.x.abs()).max(p.y.abs()).max(p.z.abs())
+            });
+        let tolerance = 64.0 * f64::EPSILON;
+        let points = points.map(|p| p / scale);
+        if points.iter().any(|p| p.z.abs() > tolerance) {
+            return Ok(false);
+        }
+        let half_x = 0.5 * (footprint.chord / scale);
+        let half_y = 0.5 * (footprint.span / scale);
+        let edge_axes = [0, 1, 2].map(|i| {
+            let edge = points[(i + 1) % 3] - points[i];
+            Vec3::new(-edge.y, edge.x, 0.0).try_normalize()
+        });
+        for axis in [Some(Vec3::X), Some(Vec3::Y)]
+            .into_iter()
+            .chain(edge_axes)
+            .flatten()
+        {
+            let [a, b, c] = points.map(|p| p.dot(axis));
+            let radius = half_x * axis.x.abs() + half_y * axis.y.abs();
+            if a.max(b).max(c).min(radius) - a.min(b).min(c).max(-radius) <= tolerance {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(crate) fn volume_visibility(
         &self,
         geometry: &super::geometry::PreparedGeometry,
