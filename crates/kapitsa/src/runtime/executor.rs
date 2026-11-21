@@ -172,14 +172,20 @@ impl StepExecutor for RayonExecutor {
         RA: Send,
         RB: Send,
     {
-        if self
-            .spare_workers
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |available| {
-                available.checked_sub(1)
-            })
-            .is_err()
-        {
-            return (left(), right());
+        let mut available = self.spare_workers.load(Ordering::Relaxed);
+        loop {
+            let Some(remaining) = available.checked_sub(1) else {
+                return (left(), right());
+            };
+            match self.spare_workers.compare_exchange_weak(
+                available,
+                remaining,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => available = actual,
+            }
         }
         // Never wait for a permit: nested work runs locally when the budget is
         // exhausted. Keep this permit until BOTH branches finish, also on panic.
