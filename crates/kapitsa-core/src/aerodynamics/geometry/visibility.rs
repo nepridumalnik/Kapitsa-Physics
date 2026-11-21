@@ -192,9 +192,21 @@ pub(super) fn crossing_fraction(a: f64, b: f64) -> Result<f64, crate::Error> {
     // underflowing product. All quantities in this correction are bounded.
     // Exact binary scaling keeps subnormal operands and their fused residual
     // representable during the ratio correction.
-    let (scaled_small, scaled_large) = if large < f64::MIN_POSITIVE {
-        const SUBNORMAL_SCALE: f64 = 4_503_599_627_370_496.0; // 2^52
-        (small * SUBNORMAL_SCALE, large * SUBNORMAL_SCALE)
+    const NORMALIZATION_SHIFT: i32 = 1022;
+    let exponent = ((large.to_bits() >> 52) & 0x7ff) as i32;
+    let shift = if exponent == 0 {
+        52
+    } else {
+        NORMALIZATION_SHIFT - exponent
+    };
+    let (scaled_small, scaled_large) = if shift > 0 {
+        (scale(small, shift)?, scale(large, shift)?)
+    } else if shift < 0 {
+        // Scaling a tiny numerator down can erase information needed for FMA.
+        match (scale(small, shift), scale(large, shift)) {
+            (Ok(a), Ok(b)) if a.is_normal() => (a, b),
+            _ => (small, large),
+        }
     } else {
         (small, large)
     };
@@ -765,6 +777,16 @@ mod tests {
         let expected = f64::from_bits(0x3ef8_6816_e38d_5625);
         assert_eq!(crossing_fraction(small, -large)?, expected);
         assert_eq!(crossing_fraction(-small, large)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn crossing_fraction_corrects_normal_ratio_near_underflow() -> Result<(), crate::Error> {
+        // Expected from exact rational arithmetic on the binary64 inputs.
+        let small = f64::from_bits(0x2a38_b9be_9e64_a7b4);
+        let large = f64::from_bits(0x6a04_e05d_a5d8_626a);
+        let expected = f64::from_bits(0x0022_f335_6d15_4415);
+        assert_eq!(crossing_fraction(small, -large)?, expected);
         Ok(())
     }
 
