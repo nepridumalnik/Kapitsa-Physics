@@ -86,12 +86,19 @@ Audit facts that shape the design:
 
 Decisions:
 
-1. **Slot-based ownership.** `GeometryOwner` becomes `{ Body, Slot(OwnerSlot) }`
-   with `OwnerSlot` a small `Copy` index newtype. This is a documented breaking
-   change to a public enum, authorized by the spec delta requiring owner slots;
-   the crate is pre-1.0. The world assembly path assigns slots in sorted
-   `PartId` order, which preserves the current overlap tie-break and canonical
-   patch ordering bit-for-bit within one body.
+1. **Slot-based ownership, additive.** `GeometryOwner` gains
+   `Slot(OwnerSlot)` with `OwnerSlot` a small `Copy` index newtype; the
+   existing `Body` and `Part(PartId)` variants are preserved. Cooked shared
+   shapes bake `Slot` owners so prepared geometry is vessel-independent;
+   body-bound evaluation keeps `Part` owners after the binding resolves slots
+   to parts, leaving `OwnerPressureWorkspace`, weld-reaction dispatch and
+   public load accessors unchanged. This avoids a breaking public-API change
+   and keeps published weld loads resolvable after assembly-cache drops.
+   Overlap masks, sections and volume are owner-independent, and slot order
+   assigned in sorted `PartId` order reproduces the current tie-break and
+   canonical patch ordering bit-for-bit. `Part` and `Slot` owners are never
+   mixed within one preparation; assembly pressure evaluation rejects
+   unresolved slot owners explicitly.
 2. **Registry.** `ShapeRegistry` mirrors `MaterialStorage`: storage-scoped
    `ShapeId { registry, DenseId }` over a `DensePool` of cooked shapes, with
    generation-guarded lookups and explicit removal. A `CookedShape` holds the
@@ -107,9 +114,10 @@ Decisions:
    tickets are reused for shape preparation/publication; the cache key is
    generalized from `BodyId` to the shape identity. The primary single-body
    mesh path keeps its current behavior in this change.
-5. **Translation at world boundaries.** Slot owners are translated to `PartId`
-   through the binding before weld-reaction dispatch and public load
-   publication. `PartHullWrench`/`PartWingWrench` channels are unchanged.
+5. **Binding resolution at evaluation.** The binding resolves slots to
+   `PartId` when constructing evaluation instances, so weld-reaction dispatch,
+   `OwnerPressureWorkspace` and public load accessors keep operating on part
+   owners unchanged. `PartHullWrench`/`PartWingWrench` channels are unchanged.
 6. **Determinism.** Slot order is fixed by the cooked shape; bindings never
    alter cooked data. Ordinary and sharded paths must agree, and a geometry
    edit on one vessel must not invalidate another vessel's shared shape.

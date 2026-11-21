@@ -1011,9 +1011,18 @@ fn evaluate_pressure(
                 .and_then(|rotation| velocity.checked_add(rotation))
                 .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))
         })?;
+    // Shared-shape evaluation resolves slot owners to parts through the
+    // binding before instance construction; unresolved slots cannot be
+    // attributed to wave-only parts here and are rejected explicitly.
+    if patches
+        .iter()
+        .any(|patch| matches!(patch.owner, GeometryOwner::Slot(_)))
+    {
+        return Err(crate::Error::from(GeometryError::InvalidGeometry));
+    }
     patches.retain(|patch| match patch.owner {
         GeometryOwner::Part(part) => wave_only_parts.binary_search(&part).is_err(),
-        GeometryOwner::Body => true,
+        GeometryOwner::Body | GeometryOwner::Slot(_) => true,
     });
     Ok(patches)
 }
