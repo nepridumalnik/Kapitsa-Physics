@@ -1,5 +1,9 @@
 //! Bounded, off-thread cooking of immutable shape inputs.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::{io, sync::mpsc, thread};
 
 use super::{CookedShape, CookedSource, GeometryConfig};
@@ -10,6 +14,7 @@ pub struct ShapeWorker {
 }
 
 struct Request {
+    cancelled: Arc<AtomicBool>,
     sources: Vec<CookedSource>,
     config: GeometryConfig,
     oriented_cavities: bool,
@@ -38,7 +43,14 @@ impl std::error::Error for SubmitError {}
 
 /// One pending cook. Dropping it discards the result without blocking.
 pub struct PendingShape {
+    cancelled: Arc<AtomicBool>,
     result: mpsc::Receiver<Result<CookedShape, crate::Error>>,
+}
+
+impl Drop for PendingShape {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
 }
 
 impl PendingShape {
@@ -61,6 +73,9 @@ impl ShapeWorker {
             .name("kapitsa-shape-cook".into())
             .spawn(move || {
                 while let Ok(request) = receiver.recv() {
+                    if request.cancelled.load(Ordering::Relaxed) {
+                        continue;
+                    }
                     let result = CookedShape::cook(
                         &request.sources,
                         request.config,
@@ -80,8 +95,10 @@ impl ShapeWorker {
         oriented_cavities: bool,
     ) -> Result<PendingShape, SubmitError> {
         let (result, receiver) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
         self.requests
             .try_send(Request {
+                cancelled: Arc::clone(&cancelled),
                 sources,
                 config,
                 oriented_cavities,
@@ -91,7 +108,10 @@ impl ShapeWorker {
                 mpsc::TrySendError::Full(_) => SubmitError::Full,
                 mpsc::TrySendError::Disconnected(_) => SubmitError::Disconnected,
             })?;
-        Ok(PendingShape { result: receiver })
+        Ok(PendingShape {
+            cancelled,
+            result: receiver,
+        })
     }
 }
 
