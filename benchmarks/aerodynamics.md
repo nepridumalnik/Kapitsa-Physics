@@ -292,3 +292,8 @@ small partial-visibility fixture, 1.445 ms for the moderate fixture and
 6.66 us for wide projected edges. The workspace test suite was running
 concurrently, so these values are not an isolated performance comparison.
 Both aerodynamic and wing-shielding benchmark targets completed.
+
+The subnormal crossing-ratio revision `98036f8` completed both benchmark
+targets. Small partial visibility measured 21.54 us median and wide
+projected edges 6.25 us median. A workspace test build ran concurrently;
+these values are not an isolated performance comparison.
