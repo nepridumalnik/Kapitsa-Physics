@@ -399,6 +399,17 @@ mod tests {
             }
         };
         if policy == PendingAero::ZeroForce {
+            let mut snapshots = [Vec::new()];
+            world.fill_step_shards(&mut snapshots)?;
+            let snapshot = snapshots[0].first_mut().ok_or("missing snapshot")?;
+            snapshot.integrate(1e-8)?;
+            assert_eq!(
+                snapshot
+                    .predicted
+                    .ok_or("missing prediction")?
+                    .linear_velocity(),
+                Vec3::ZERO
+            );
             advance(&mut world)?;
             assert!(world.owner_mesh_pressure(body).is_none());
             assert_eq!(

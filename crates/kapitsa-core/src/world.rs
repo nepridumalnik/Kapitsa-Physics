@@ -6214,6 +6214,11 @@ impl PhysicsWorld {
                         if apply_aerodynamics
                             && !matches!(atmosphere, Atmosphere::Vacuum)
                             && let Some(entry) = self.bodies.get(step.body_id.dense)
+                            && !shapes::suppress_pending_shape(
+                                self.pending_shapes.as_ref(),
+                                step.body_id,
+                                || self.shared_shape(step.body_id, entry).is_some(),
+                            )
                             && (!entry.body.aerodynamic_surfaces.is_empty()
                                 || !entry.body.base_pressure_patches.is_empty()
                                 || assembly_aerodynamics::wings_configured(entry, &self.parts)
