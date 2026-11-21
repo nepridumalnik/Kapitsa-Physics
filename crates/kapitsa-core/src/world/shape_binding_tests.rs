@@ -272,36 +272,84 @@ fn taller_cube() -> Result<TriangleMesh, crate::Error> {
     )
 }
 
+fn clustered_shared_body(
+    world: &mut PhysicsWorld,
+    offset: Vec3,
+    mesh: &Arc<TriangleMesh>,
+) -> Result<(BodyId, super::PartId), crate::Error> {
+    let body = world.add_body(RigidBody::new_dynamic(
+        Transform::new(offset, Quat::IDENTITY)?,
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?)?;
+    world.set_aerodynamics(body, Aerodynamics::None)?;
+    let part = world.enable_cluster(body)?;
+    world.set_part_aerodynamic_mesh_shared(part, Some(Arc::clone(mesh)))?;
+    Ok((body, part))
+}
+
 #[test]
-fn bound_and_unbound_bodies_share_pressure_physics() -> Result<(), Box<dyn std::error::Error>> {
+fn two_bodies_share_one_cooked_shape() -> Result<(), Box<dyn std::error::Error>> {
     let mut world = wind_world()?;
-    let (bound, bound_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
-    let (local, _) = clustered_mesh_body(&mut world, Vec3::X * 100.0)?;
-    let mesh = part_mesh(&world, bound_part)?;
-    let shape = world.cook_shape(&[source(&mesh, Vec3::ZERO, 0)?], false)?;
-    world.bind_shape(bound, shape, vec![bound_part])?;
+    let shared_mesh = Arc::new(cube()?);
+    let (first, first_part) = clustered_shared_body(&mut world, Vec3::ZERO, &shared_mesh)?;
+    let (second, second_part) = clustered_shared_body(&mut world, Vec3::X * 100.0, &shared_mesh)?;
+    let (local, _local_part) = clustered_shared_body(&mut world, Vec3::X * 200.0, &shared_mesh)?;
+    let sources = vec![source(&shared_mesh, Vec3::ZERO, 0)?];
+    let shape = world.cook_shape(&sources, false)?;
+    world.bind_shape(first, shape, vec![first_part])?;
+    world.bind_shape(second, shape, vec![second_part])?;
     world.step(1e-8)?;
-    assert!(
-        world.shape_binding(bound).is_some(),
-        "matching binding must survive the step"
-    );
+    assert_eq!(world.shape_registry().len(), 1);
+    assert!(world.shape_binding(first).is_some());
+    assert!(world.shape_binding(second).is_some());
+    assert!(world.shape_binding(local).is_none());
     let caches = world.assembly_aerodynamics.as_ref().ok_or("caches")?;
-    let shared_entry = caches.get(&bound).ok_or("shared entry")?;
-    assert!(
-        shared_entry.local_source_count() == 0,
-        "bound body must not rebuild per-body sources"
+    for body in [first, second] {
+        assert_eq!(
+            caches
+                .get(&body)
+                .ok_or("shared entry")?
+                .local_source_count(),
+            0,
+            "bound body must not rebuild per-body sources"
+        );
+    }
+    assert_eq!(
+        caches
+            .get(&local)
+            .ok_or("local entry")?
+            .local_source_count(),
+        1
     );
-    let local_entry = caches.get(&local).ok_or("local entry")?;
-    assert_eq!(local_entry.local_source_count(), 1);
-    let bound_velocity = body_velocity(&world, bound)?;
+    let first_velocity = body_velocity(&world, first)?;
+    let second_velocity = body_velocity(&world, second)?;
     let local_velocity = body_velocity(&world, local)?;
     assert!(
-        bound_velocity.length() > 1e-6,
-        "expected a nonzero pressure response, got {bound_velocity:?}"
+        first_velocity.length() > 1e-6,
+        "expected a nonzero pressure response, got {first_velocity:?}"
     );
-    assert!(
-        (bound_velocity - local_velocity).length() < 1e-12,
-        "velocity mismatch: bound {bound_velocity:?} vs local {local_velocity:?}"
+    assert!((first_velocity - second_velocity).length() < 1e-12);
+    assert!((first_velocity - local_velocity).length() < 1e-12);
+    Ok(())
+}
+
+#[test]
+fn bind_rejects_equal_but_distinct_mesh_allocations() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let (first, first_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
+    let (second, second_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
+    let first_mesh = part_mesh(&world, first_part)?;
+    let second_mesh = part_mesh(&world, second_part)?;
+    assert!(!Arc::ptr_eq(&first_mesh, &second_mesh));
+    let shape = world.cook_shape(&[source(&first_mesh, Vec3::ZERO, 0)?], false)?;
+    world.bind_shape(first, shape, vec![first_part])?;
+    let error = world
+        .bind_shape(second, shape, vec![second_part])
+        .err()
+        .ok_or("distinct allocation must not bind")?;
+    assert_eq!(
+        error.downcast_ref::<ShapeRegistryError>(),
+        Some(&ShapeRegistryError::InvalidBinding)
     );
     Ok(())
 }
@@ -537,5 +585,51 @@ fn removing_the_root_part_transfers_root_and_stales_binding()
         "destroyed root must not leave geometry behind"
     );
     assert!(world.cluster_part(root).is_none());
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+fn allocation_world(shared: bool) -> Result<PhysicsWorld, Box<dyn std::error::Error>> {
+    const BODIES: usize = 4;
+    let mut world = wind_world()?;
+    if shared {
+        let mesh = Arc::new(cube()?);
+        let sources = vec![source(&mesh, Vec3::ZERO, 0)?];
+        let shape = world.cook_shape(&sources, false)?;
+        for index in 0..BODIES {
+            let offset = Vec3::X * (100.0 * index as f64);
+            let (body, part) = clustered_shared_body(&mut world, offset, &mesh)?;
+            world.bind_shape(body, shape, vec![part])?;
+        }
+    } else {
+        for index in 0..BODIES {
+            clustered_mesh_body(&mut world, Vec3::X * (100.0 * index as f64))?;
+        }
+    }
+    Ok(world)
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "Run alone: compares cold one-step allocations for shared versus body-local vessels"]
+fn shared_shape_cold_step_allocates_less_than_body_local() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut local = allocation_world(false)?;
+    let mut shared = allocation_world(true)?;
+    let (local_allocations, local_bytes) = super::tests::tracked_world_allocations(|| {
+        assert!(local.step(1e-8).is_ok());
+    });
+    let (shared_allocations, shared_bytes) = super::tests::tracked_world_allocations(|| {
+        assert!(shared.step(1e-8).is_ok());
+    });
+    println!(
+        "cold step, 4 vessels: local={local_allocations} allocations/{local_bytes} bytes, \
+         shared={shared_allocations} allocations/{shared_bytes} bytes"
+    );
+    assert!(
+        shared_allocations < local_allocations,
+        "shared cooking must avoid per-body preparation allocations: \
+         shared={shared_allocations}, local={local_allocations}"
+    );
     Ok(())
 }

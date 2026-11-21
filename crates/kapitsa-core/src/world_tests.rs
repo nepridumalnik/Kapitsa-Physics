@@ -4958,7 +4958,7 @@ fn calibrated_force_source_repeats(pilot: Duration) -> usize {
 }
 
 #[cfg(feature = "bench-internals")]
-fn tracked_world_allocations(mut operation: impl FnMut()) -> (usize, usize) {
+pub(super) fn tracked_world_allocations(mut operation: impl FnMut()) -> (usize, usize) {
     WORLD_ALLOCATION_COUNT.store(0, Ordering::Relaxed);
     WORLD_ALLOCATION_BYTES.store(0, Ordering::Relaxed);
     TRACK_WORLD_ALLOCATIONS.store(true, Ordering::Relaxed);

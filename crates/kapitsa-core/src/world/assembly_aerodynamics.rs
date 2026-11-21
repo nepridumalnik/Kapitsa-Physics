@@ -182,6 +182,28 @@ impl PhysicsWorld {
         part: PartId,
         mesh: Option<TriangleMesh>,
     ) -> Result<(), ClusterError> {
+        self.install_part_mesh(part, mesh.map(Arc::new))
+    }
+
+    /// Replaces the part's geometry with a shared mesh allocation.
+    ///
+    /// Bodies whose parts receive the same `Arc` can bind one cooked shape:
+    /// binding validates mesh identity by pointer, so a shared allocation is
+    /// what makes the reused occupancy unambiguous. [`Self::part_aerodynamic_mesh`]
+    /// and `None` behave as for [`Self::set_part_aerodynamic_mesh`].
+    pub fn set_part_aerodynamic_mesh_shared(
+        &mut self,
+        part: PartId,
+        mesh: Option<Arc<TriangleMesh>>,
+    ) -> Result<(), Error> {
+        self.install_part_mesh(part, mesh).map_err(Error::from)
+    }
+
+    fn install_part_mesh(
+        &mut self,
+        part: PartId,
+        mesh: Option<Arc<TriangleMesh>>,
+    ) -> Result<(), ClusterError> {
         let body = self
             .cluster_part(part)
             .ok_or(ClusterError::InvalidPartId)?
@@ -193,7 +215,7 @@ impl PhysicsWorld {
             geometry
                 .try_reserve(1)
                 .map_err(|_| ClusterError::StorageCapacityExceeded)?;
-            geometry.insert(part, PartGeometry::Mesh(Arc::new(mesh)));
+            geometry.insert(part, PartGeometry::Mesh(mesh));
         } else if let Some(geometry) = &mut self.part_aerodynamic_geometry {
             geometry.remove(&part);
         }
