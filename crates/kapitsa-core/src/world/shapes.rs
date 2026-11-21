@@ -94,6 +94,26 @@ impl PhysicsWorld {
             assembly_pressure_config(),
             self.preserve_assembly_mesh_cavities,
         )?;
+        self.publish_shape_replacement(id, expected_revision, shape)
+    }
+
+    /// Installs a shape prepared outside the world, if the target revision and
+    /// assembly preparation settings still match. Rejection changes nothing.
+    pub fn publish_shape_replacement(
+        &mut self,
+        id: ShapeId,
+        expected_revision: u64,
+        shape: CookedShape,
+    ) -> Result<u64, crate::Error> {
+        let current = self.shapes.get(id).ok_or(ShapeRegistryError::StaleShape)?;
+        if current.revision() != expected_revision {
+            return Err(ShapeRegistryError::StaleBinding.into());
+        }
+        if shape.config() != assembly_pressure_config()
+            || shape.oriented_cavities() != self.preserve_assembly_mesh_cavities
+        {
+            return Err(ShapeRegistryError::InvalidBinding.into());
+        }
         self.shapes.replace(id, shape)
     }
 
@@ -219,5 +239,55 @@ impl PhysicsWorld {
                 bindings.remove(&body);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aerodynamics::geometry::OwnerSlot;
+    use crate::aerodynamics::shape::worker::ShapeWorker;
+    use crate::{shape::TriangleMesh, transform::Transform};
+    use kapitsa_math::Vec3;
+    use std::sync::Arc;
+
+    #[test]
+    fn completed_worker_result_cannot_overwrite_newer_revision()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let source = CookedSource {
+            mesh: Arc::new(TriangleMesh::new(
+                vec![Vec3::ZERO, Vec3::Y, Vec3::Z],
+                vec![[0, 1, 2]],
+            )?),
+            local_transform: Transform::identity(),
+            slot: OwnerSlot::new(0),
+        };
+        let id = world.cook_shape(std::slice::from_ref(&source), false)?;
+        let worker = ShapeWorker::new(2)?;
+        let old = worker
+            .submit(vec![source.clone()], assembly_pressure_config(), false)
+            .map_err(|_| "old submission rejected")?;
+        let new = worker
+            .submit(vec![source], assembly_pressure_config(), false)
+            .map_err(|_| "new submission rejected")?;
+        assert_eq!(world.publish_shape_replacement(id, 1, new.recv()??)?, 2);
+        let current = world
+            .shape_registry()
+            .get(id)
+            .ok_or("missing shape")?
+            .geometry() as *const _;
+        let error = world
+            .publish_shape_replacement(id, 1, old.recv()??)
+            .err()
+            .ok_or("stale result installed")?;
+        assert_eq!(
+            error.downcast_ref::<ShapeRegistryError>(),
+            Some(&ShapeRegistryError::StaleBinding)
+        );
+        let stored = world.shape_registry().get(id).ok_or("missing shape")?;
+        assert_eq!(stored.revision(), 2);
+        assert!(std::ptr::eq(current, stored.geometry()));
+        Ok(())
     }
 }
