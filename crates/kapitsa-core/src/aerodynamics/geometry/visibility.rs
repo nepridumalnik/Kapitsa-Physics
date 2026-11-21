@@ -225,12 +225,12 @@ fn normalize(values: [f64; 3]) -> Result<[f64; 3], crate::Error> {
     if maximum == 0.0 {
         return Ok(values);
     }
-    let scaled = values.map(|v| v / maximum);
-    if values
-        .iter()
-        .zip(&scaled)
-        .any(|(a, b)| *a != 0.0 && *b == 0.0)
-    {
+    // Divide by a binary power to keep the stored half-space unchanged.
+    // The minimum normal power also scales a subnormal maximum safely.
+    let exponent_bits = maximum.to_bits() & (0x7ff_u64 << 52);
+    let power = f64::from_bits(exponent_bits.max(1 << 52));
+    let scaled = values.map(|v| v / power);
+    if values.iter().zip(&scaled).any(|(a, b)| *a != *b * power) {
         return Err(crate::Error::from(GeometryError::PrecisionLoss));
     }
     Ok(scaled)
@@ -818,6 +818,14 @@ mod tests {
             sum.add(SMALL);
         }
         assert_eq!(sum.value(), 1.0 + f64::EPSILON);
+    }
+
+    #[test]
+    fn binary_normalization_preserves_exact_boundary() -> Result<(), crate::Error> {
+        let values = normalize([3.0, -1.0, 0.0])?;
+        assert_eq!(values, [1.5, -0.5, 0.0]);
+        assert_eq!(distance(values, Vec3::X * 0.75)?, 0.0);
+        Ok(())
     }
 
     #[test]
