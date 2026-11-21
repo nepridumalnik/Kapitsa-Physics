@@ -306,3 +306,7 @@ The reciprocal correction on `3ef81e7` completed both benchmark targets.
 Small partial visibility measured 21.45 us median and wide projected edges
 6.17 us median. A workspace test build ran concurrently, so this is not an
 isolated performance comparison.
+
+The subnormal residual scaling on `b3ab97b` completed both benchmark targets.
+Small partial visibility measured 21.20 us median. The workspace test suite
+was active concurrently, so this is not an isolated performance comparison.
