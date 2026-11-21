@@ -498,7 +498,7 @@ fn bound_body_ordinary_and_sharded_steps_agree() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-fn merge_weld() -> WeldDesc {
+pub(super) fn merge_weld() -> WeldDesc {
     WeldDesc {
         frame_a: JointFrame::IDENTITY,
         frame_b: JointFrame::IDENTITY,

@@ -4370,7 +4370,10 @@ impl PhysicsWorld {
                     self.shape_bindings.as_ref(),
                     &self.parts,
                     self.part_aerodynamic_geometry.as_ref(),
-                    self.preserve_assembly_mesh_cavities,
+                    (
+                        self.preserve_assembly_mesh_cavities,
+                        self.pending_shapes.as_ref(),
+                    ),
                     body_id,
                     entry,
                 )
@@ -4425,7 +4428,10 @@ impl PhysicsWorld {
                 self.shape_bindings.as_ref(),
                 &self.parts,
                 self.part_aerodynamic_geometry.as_ref(),
-                self.preserve_assembly_mesh_cavities,
+                (
+                    self.preserve_assembly_mesh_cavities,
+                    self.pending_shapes.as_ref(),
+                ),
                 body_id,
                 entry,
             );

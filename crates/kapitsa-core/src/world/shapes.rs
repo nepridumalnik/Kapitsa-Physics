@@ -13,6 +13,7 @@ use std::sync::mpsc::TryRecvError;
 
 pub(super) struct PendingBodyShape {
     parts: Vec<PartId>,
+    welds: Vec<super::WeldId>,
     policy: PendingAero,
     result: Result<PendingShape, crate::Error>,
 }
@@ -46,12 +47,38 @@ pub(super) fn resolve_shared_shape<'a>(
     bindings: Option<&'a HashMap<BodyId, ShapeBinding>>,
     parts: &DensePool<ClusterPart>,
     geometry: Option<&HashMap<PartId, super::assembly_aerodynamics::PartGeometry>>,
-    oriented_cavities: bool,
+    settings: (bool, Option<&HashMap<BodyId, PendingBodyShape>>),
     body_id: BodyId,
     entry: &BodyEntry,
 ) -> Option<(&'a ShapeBinding, &'a CookedShape)> {
     let binding = bindings?.get(&body_id)?;
     let shape = shapes.get(binding.shape())?;
+    let (oriented_cavities, pending) = settings;
+    if let Some(job) = pending.and_then(|jobs| jobs.get(&body_id))
+        && entry
+            .cluster
+            .as_ref()
+            .is_none_or(|cluster| cluster.welds() != job.welds)
+    {
+        return None;
+    }
+    if let Some(job) = pending.and_then(|jobs| jobs.get(&body_id))
+        && job.policy == PendingAero::KeepPrevious
+        && let Some(cluster) = &entry.cluster
+        && cluster.welds() == job.welds
+        && cluster.parts().len() == binding.parts().len()
+        && shape.revision() == binding.revision()
+        && shape.oriented_cavities() == oriented_cavities
+        && binding.parts().iter().all(|part| {
+            cluster.parts().contains(part)
+                && matches!(
+                    geometry.and_then(|items| items.get(part)),
+                    Some(super::assembly_aerodynamics::PartGeometry::Mesh(_))
+                )
+        })
+    {
+        return Some((binding, shape));
+    }
     super::assembly_aerodynamics::binding_matches(
         body_id,
         entry,
@@ -80,10 +107,12 @@ impl PhysicsWorld {
         {
             return Err(ShapeRegistryError::InvalidBinding.into());
         }
+        let welds = cluster.welds().to_vec();
         self.pending_shapes.get_or_insert_with(HashMap::new).insert(
             body,
             PendingBodyShape {
                 parts,
+                welds,
                 policy,
                 result: Ok(cook),
             },
@@ -96,8 +125,12 @@ impl PhysicsWorld {
             return;
         };
         pending.retain(|&body, job| {
-            if self.cluster(body).is_none() {
+            let Some(cluster) = self.cluster(body) else {
                 return false;
+            };
+            if cluster.welds() != job.welds || cluster.parts().len() != job.parts.len() {
+                job.result = Err(ShapeRegistryError::StaleBinding.into());
+                return true;
             }
             let Ok(cook) = &mut job.result else {
                 return true;
@@ -293,7 +326,10 @@ impl PhysicsWorld {
             self.shape_bindings.as_ref(),
             &self.parts,
             self.part_aerodynamic_geometry.as_ref(),
-            self.preserve_assembly_mesh_cavities,
+            (
+                self.preserve_assembly_mesh_cavities,
+                self.pending_shapes.as_ref(),
+            ),
             body,
             entry,
         )
@@ -311,6 +347,13 @@ impl PhysicsWorld {
         };
         let mut stale = Vec::new();
         for (&body, binding) in bindings {
+            if self
+                .pending_shapes
+                .as_ref()
+                .is_some_and(|jobs| jobs.contains_key(&body))
+            {
+                continue;
+            }
             let matches = self
                 .bodies
                 .get(body.dense)
@@ -355,13 +398,18 @@ mod tests {
     use std::sync::Arc;
 
     #[rstest::rstest]
-    #[case(false, PendingAero::ZeroForce)]
-    #[case(true, PendingAero::ZeroForce)]
-    #[case(false, PendingAero::BlockStep)]
-    #[case(true, PendingAero::BlockStep)]
+    #[case(false, PendingAero::ZeroForce, false)]
+    #[case(true, PendingAero::ZeroForce, false)]
+    #[case(false, PendingAero::BlockStep, false)]
+    #[case(true, PendingAero::BlockStep, false)]
+    #[case(false, PendingAero::KeepPrevious, false)]
+    #[case(true, PendingAero::KeepPrevious, false)]
+    #[case(false, PendingAero::KeepPrevious, true)]
+    #[case(true, PendingAero::KeepPrevious, true)]
     fn pending_policy_controls_pressure(
         #[case] sharded: bool,
         #[case] policy: PendingAero,
+        #[case] merge: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut world = PhysicsWorld::new();
         world.set_atmosphere(super::super::test_atmosphere(
@@ -374,8 +422,24 @@ mod tests {
         let part = world.enable_cluster(body)?;
         let mesh = Arc::new(super::super::shape_binding_tests::cube()?);
         world.set_part_aerodynamic_mesh_shared(part, Some(Arc::clone(&mesh)))?;
+        if policy == PendingAero::KeepPrevious {
+            let sources = [CookedSource {
+                mesh: Arc::clone(&mesh),
+                local_transform: Transform::identity(),
+                slot: OwnerSlot::new(0),
+            }];
+            let previous = world.cook_shape(&sources, false)?;
+            world.bind_shape(body, previous, vec![part])?;
+        }
         let (sender, pending) = PendingShape::test_channel();
         world.track_body_shape(body, vec![part], policy, pending)?;
+        let mesh = if policy == PendingAero::KeepPrevious {
+            let replacement = Arc::new(super::super::shape_binding_tests::cube()?);
+            world.set_part_aerodynamic_mesh_shared(part, Some(Arc::clone(&replacement)))?;
+            replacement
+        } else {
+            mesh
+        };
         let shape = CookedShape::cook(
             &[CookedSource {
                 mesh,
@@ -398,6 +462,36 @@ mod tests {
                 world.step(1e-8)
             }
         };
+        if policy == PendingAero::KeepPrevious && !merge {
+            let previous = world.shape_binding(body).ok_or("previous binding")?.shape();
+            advance(&mut world)?;
+            assert_eq!(
+                world.shape_binding(body).map(ShapeBinding::shape),
+                Some(previous)
+            );
+            assert!(world.owner_mesh_pressure(body).is_some());
+        }
+        if merge {
+            let second = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+                Transform::identity(),
+                crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+            )?)?;
+            world.enable_cluster(second)?;
+            world.merge_clusters(
+                body,
+                second,
+                super::super::shape_binding_tests::merge_weld(),
+            )?;
+            advance(&mut world)?;
+            assert!(world.owner_mesh_pressure(body).is_none());
+            assert_eq!(
+                world
+                    .body_shape_failure(body)
+                    .and_then(|e| e.downcast_ref::<ShapeRegistryError>()),
+                Some(&ShapeRegistryError::StaleBinding)
+            );
+            return Ok(());
+        }
         if policy == PendingAero::ZeroForce {
             let mut snapshots = [Vec::new()];
             world.fill_step_shards(&mut snapshots)?;
