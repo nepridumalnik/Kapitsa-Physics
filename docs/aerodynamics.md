@@ -550,6 +550,11 @@ accepted reference or frame still computes all three coefficients
 together. Direction rescaling uses a power of two.
 An overflowing axial depth separation selects the general depth predicate.
 
+Shadow-plane coefficients and windward values are normalized by a power of
+two. Reversing the scaling must recover every input coefficient exactly;
+otherwise preparation returns `PrecisionLoss`. This preserves the represented
+half-space while keeping coefficients bounded.
+
 Windward and partition triangle areas use the same exact accumulator when
 the adaptive 2D frame exceeds its span. The result is the barycentric area
 fraction rounded at its absolute scale. This preserves representable
