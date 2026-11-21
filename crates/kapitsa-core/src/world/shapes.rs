@@ -17,6 +17,7 @@ pub(super) struct PendingBodyShape {
     policy: PendingAero,
     result: Result<PendingShape, crate::Error>,
     completion: Option<BodyShapeCompletion>,
+    inputs: Option<(Vec<CookedSource>, bool)>,
 }
 
 pub(super) struct ManagedBodyShape {
@@ -161,7 +162,8 @@ impl PhysicsWorld {
             if self
                 .pending_shapes
                 .as_ref()
-                .is_some_and(|jobs| jobs.contains_key(&body))
+                .and_then(|jobs| jobs.get(&body))
+                .is_some_and(|job| self.pending_inputs_match(body, job))
                 || matches!(self.body_shape_status(body), BodyShapeStatus::Ready(_))
             {
                 return Ok(());
@@ -176,6 +178,23 @@ impl PhysicsWorld {
         });
         self.managed_shapes = Some(managed);
         result
+    }
+
+    fn pending_inputs_match(&self, body: BodyId, job: &PendingBodyShape) -> bool {
+        let Some((sources, cavities)) = &job.inputs else {
+            return true;
+        };
+        *cavities == self.preserve_assembly_mesh_cavities
+            && self
+                .cluster(body)
+                .is_some_and(|cluster| cluster.parts() == job.parts && cluster.welds() == job.welds)
+            && job.parts.iter().zip(sources).all(|(&part, source)| {
+                self.part_aerodynamic_mesh_arc(part)
+                    .is_some_and(|mesh| std::sync::Arc::ptr_eq(mesh, &source.mesh))
+                    && self
+                        .cluster_part(part)
+                        .is_some_and(|entry| entry.local_transform() == source.local_transform)
+            })
     }
     /// Queues preparation of the assembly's current explicit meshes.
     pub fn queue_body_shape(
@@ -222,7 +241,7 @@ impl PhysicsWorld {
             .collect::<Result<Vec<_>, crate::Error>>()?;
         let cook = worker
             .submit(
-                sources,
+                sources.clone(),
                 assembly_pressure_config(),
                 self.preserve_assembly_mesh_cavities,
             )
@@ -234,6 +253,7 @@ impl PhysicsWorld {
             .and_then(|jobs| jobs.get_mut(&body))
         {
             job.completion = completion;
+            job.inputs = Some((sources, self.preserve_assembly_mesh_cavities));
         }
         Ok(())
     }
@@ -260,6 +280,7 @@ impl PhysicsWorld {
                 policy,
                 result: Ok(cook),
                 completion: None,
+                inputs: None,
             },
         );
         self.body_revision = self.body_revision.wrapping_add(1);
@@ -621,6 +642,47 @@ mod tests {
     use crate::{shape::TriangleMesh, transform::Transform};
     use kapitsa_math::Vec3;
     use std::sync::Arc;
+
+    #[test]
+    fn managed_edit_supersedes_in_flight_inputs() -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        world.set_part_aerodynamic_mesh(part, Some(super::super::shape_binding_tests::cube()?))?;
+        let worker = ShapeWorker::new(2)?;
+        world.manage_body_shape(body, PendingAero::BlockStep, &worker)?;
+        let (sender, pending) = PendingShape::test_channel();
+        let job = world
+            .pending_shapes
+            .as_mut()
+            .and_then(|jobs| jobs.get_mut(&body))
+            .ok_or("missing initial job")?;
+        job.result = Ok(pending);
+        world.set_part_aerodynamic_mesh(part, Some(super::super::shape_binding_tests::cube()?))?;
+        world.step(1e-8)?;
+        assert!(
+            sender
+                .send(Err(ShapeRegistryError::StaleBinding.into()))
+                .is_err()
+        );
+        let BodyShapeStatus::Ready(id) = world.body_shape_status(body) else {
+            return Err("replacement was not published".into());
+        };
+        let shape = world
+            .shape_registry()
+            .get(id)
+            .ok_or("missing installed shape")?;
+        assert!(Arc::ptr_eq(
+            &shape.sources()[0].mesh,
+            world
+                .part_aerodynamic_mesh_arc(part)
+                .ok_or("missing live mesh")?
+        ));
+        Ok(())
+    }
 
     #[rstest::rstest]
     #[case(false)]
