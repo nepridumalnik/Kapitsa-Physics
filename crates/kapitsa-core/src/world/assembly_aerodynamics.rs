@@ -2123,6 +2123,67 @@ mod tests {
     }
 
     #[test]
+    fn runtime_deflection_reuses_shielding_cache() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::wing::{FiniteWing, WingControl, WingSurface};
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::X * -50.0,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+            let part = world.enable_cluster(body)?;
+            world.set_part_wave_source_mesh(
+                part,
+                Some(super::super::shape_binding_tests::cube()?),
+            )?;
+            let wing = WingSurface::new(
+                FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
+                Transform::identity(),
+                4.0,
+            )?
+            .with_rectangular_footprint(Vec3::splat(0.5), 2.0, 2.0)?
+            .with_spanwise_projection(0.1)?
+            .with_control(WingControl::new(0.0, 0.2, 1.0)?);
+            world.set_part_aerodynamic_wings(part, vec![wing])?;
+            let id = world.part_wing_id(part, 0).ok_or("missing wing")?;
+            let mut shards = [Vec::new(), Vec::new()];
+            let mut step = |world: &mut PhysicsWorld| {
+                if sharded {
+                    world.step_with_shards(1e-8, &mut shards, &SequentialExecutor, 2)
+                } else {
+                    world.step(1e-8)
+                }
+            };
+            let cache_address = |world: &PhysicsWorld| {
+                world
+                    .assembly_aerodynamics
+                    .as_ref()?
+                    .get(&body)
+                    .map(|entry| entry.wing_cache.as_ptr())
+            };
+            step(&mut world)?;
+            let neutral = *world
+                .part_wing_wrenches()
+                .first()
+                .ok_or("missing neutral load")?;
+            let cached = cache_address(&world).ok_or("missing shielding cache")?;
+            world.set_part_wing_deflection(id, 0.1)?;
+            assert_eq!(cache_address(&world), Some(cached));
+            step(&mut world)?;
+            assert_eq!(cache_address(&world), Some(cached));
+            let deflected = world
+                .part_wing_wrenches()
+                .first()
+                .ok_or("missing deflected load")?;
+            assert_eq!(deflected.wing, id);
+            assert!(deflected.wrench.force.z > neutral.wrench.force.z);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn wing_shielding_tracks_collider_and_footprint_edits() -> Result<(), Box<dyn std::error::Error>>
     {
         use crate::aerodynamics::wing::{FiniteWing, WingSurface};
