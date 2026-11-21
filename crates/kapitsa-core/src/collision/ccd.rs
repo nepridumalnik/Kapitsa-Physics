@@ -320,7 +320,7 @@ pub(crate) fn convex_toi_motion(
         {
             return sphere_cuboid_toi(sphere.radius(), motion_a, cuboid, motion_b);
         }
-        (Shape::Sphere(sphere), Shape::Cuboid(cuboid)) if motion_b.rotation_bound == 0.0 => {
+        (Shape::Sphere(sphere), Shape::Cuboid(cuboid)) => {
             return sphere_cuboid_toi_sampled(sphere.radius(), motion_a, cuboid, motion_b);
         }
         (Shape::Cuboid(cuboid), Shape::Sphere(sphere))
@@ -331,7 +331,7 @@ pub(crate) fn convex_toi_motion(
             return sphere_cuboid_toi(sphere.radius(), motion_b, cuboid, motion_a)
                 .map(|hit| hit.map(reverse_hit));
         }
-        (Shape::Cuboid(cuboid), Shape::Sphere(sphere)) if motion_a.rotation_bound == 0.0 => {
+        (Shape::Cuboid(cuboid), Shape::Sphere(sphere)) => {
             return sphere_cuboid_toi_sampled(sphere.radius(), motion_b, cuboid, motion_a)
                 .map(|hit| hit.map(reverse_hit));
         }
@@ -642,7 +642,11 @@ fn sphere_cuboid_toi_sampled(
     cuboid: &crate::shape::Cuboid,
     cuboid_motion: &CcdMotion,
 ) -> Result<Option<CcdHit>, crate::Error> {
-    let motion_bound = sphere_motion.translation_bound + cuboid_motion.translation_bound;
+    // Bound the change in sphere-to-box separation by the center motion
+    // and the maximum travel of a point on the rotating box.
+    let motion_bound = sphere_motion.translation_bound
+        + cuboid_motion.translation_bound
+        + cuboid_motion.rotation_bound * cuboid.half_extents().length();
     let radius_squared = radius * radius;
     if !motion_bound.is_finite() || !radius.is_finite() || !radius_squared.is_finite() {
         return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
