@@ -27,9 +27,13 @@ the acceptance gaps below remain open.
 | 2.6–2.8 Performance, runtime and tools | Benchmarks and runtime controls exist. | Production-complexity benchmark and remaining APIs/tools are not established; the supplied plan identifies these as post-merge roadmap. |
 | 3 Fixes | Some independent checks have passed. | Entire section deferred by explicit user direction; do not represent it as completed. |
 | 4.1–4.8 Refactoring | Existing code has model modules and partial context grouping. | Audit and implement each requested decomposition, common grid, preparation, composition, errors, context, fixtures and conventions; none accepted here. |
-| 5.1 Verification/CI | Workspace tests, Clippy and formatting passed locally; rustdoc and scalar aero benchmark ran locally. `.github/workflows/ci.yml` defines corresponding CI checks. | Confirm hosted CI, remaining verification markers and all acceptance criteria; section 3 remains deferred. Historical commit messages cannot be rewritten without authorization. |
+| 5.1 Verification/CI | Full workspace tests, Clippy `-D warnings` over all targets, formatting, rustdoc `-D warnings`, the declared MSRV 1.95 check and benchmark compilation passed at the stabilization head; final scalar aero and wing-shielding measurements are recorded in `benchmarks/aerodynamics.md`. `.github/workflows/ci.yml` defines the corresponding hosted checks (formatting, Clippy, Linux/Windows tests, MSRV check, rustdoc, benchmark compilation, public API snapshot). | Confirm the first hosted CI run and all remaining acceptance criteria; the physical-validation gaps above stay open and section 3 remains deferred. Historical commit messages cannot be rewritten without authorization. |
 | 5.2–5.5 Benchmarks, physical report, release, merge | Scalar baseline and analytical regression tests exist. | Production benchmark scenarios and thresholds, independent validation/FAR-parity report, release migration materials, review and authorized merge remain open. |
 
 The production plan includes P1 work beyond the P0 closures. Sections 1.7–1.9
-and 2.6–2.8 are identified there as post-merge roadmap. This document does not
+and 2.6–2.8 are identified there as post-merge roadmap. The agreed post-merge
+aerodynamics roadmap (shared prepared shapes, asynchronous cooking, runtime
+control surfaces) is tracked in `openspec/roadmap/aerodynamics.md` and its
+planned changes; it is infrastructure and control work, not new physical
+models, and it does not close the validation gaps above. This document does not
 change those priorities, grant merge authorization, or imply stage 3 is complete.
