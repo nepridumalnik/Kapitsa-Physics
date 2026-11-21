@@ -167,6 +167,26 @@ impl PhysicsWorld {
         Ok(())
     }
 
+    pub(crate) fn validate_part_wing_deflection(
+        &self,
+        wing: super::PartWingId,
+        deflection: f64,
+    ) -> Result<(), Error> {
+        use crate::aerodynamics::wing::WingError;
+        let entry = self
+            .cluster_part(wing.part)
+            .ok_or(ClusterError::InvalidPartId)?;
+        let surface = entry
+            .aerodynamic_wings
+            .get(wing.index)
+            .filter(|_| entry.wing_revision == wing.revision)
+            .ok_or(WingError::InvalidWingId)?;
+        surface
+            .control()
+            .ok_or(WingError::ControlNotConfigured)?
+            .set_deflection(deflection)
+    }
+
     /// Replaces explicit hull sections in the stable part-local frame.
     /// Sections are additive to wings and the body's primary aerodynamics.
     /// No shape inference or coefficient changes are performed.

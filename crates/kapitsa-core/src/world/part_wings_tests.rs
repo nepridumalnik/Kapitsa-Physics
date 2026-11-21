@@ -62,6 +62,41 @@ fn weld() -> WeldDesc {
         },
     }
 }
+
+#[test]
+fn wing_deflection_batch_validates_before_mutating() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::command::{BatchScratch, PhysicsCommand, apply_command_batch};
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?)?;
+    let part = world.enable_cluster(body)?;
+    let surface = wing(Transform::identity())?.with_control(WingControl::new(0.0, 0.2, 1.0)?);
+    world.set_part_aerodynamic_wings(part, vec![surface.clone(), surface])?;
+    let command = |index, deflection| -> Result<_, Box<dyn std::error::Error>> {
+        Ok(PhysicsCommand::SetPartWingDeflection {
+            wing: world.part_wing_id(part, index).ok_or("missing wing")?,
+            deflection,
+        })
+    };
+    let invalid = [command(0, 0.1)?, command(1, 0.3)?];
+    let valid = [command(0, 0.1)?, command(1, -0.1)?];
+    let values = |world: &PhysicsWorld| -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+        world
+            .part_aerodynamic_wings(part)
+            .ok_or("missing wings")?
+            .iter()
+            .map(|surface| Ok(surface.control().ok_or("missing control")?.deflection()))
+            .collect()
+    };
+    let mut scratch = BatchScratch::default();
+    assert!(apply_command_batch(&mut world, &invalid, &mut scratch).is_err());
+    assert_eq!(values(&world)?, [0.0, 0.0]);
+    apply_command_batch(&mut world, &valid, &mut scratch)?;
+    assert_eq!(values(&world)?, [0.1, -0.1]);
+    Ok(())
+}
 fn advance(world: &mut PhysicsWorld, sharded: bool) -> Result<(), crate::Error> {
     if sharded {
         world.step_with_shards(

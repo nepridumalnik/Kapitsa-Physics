@@ -547,6 +547,10 @@ impl WingSurface {
             .set_deflection(deflection)
     }
 
+    pub(crate) fn control(&self) -> Option<WingControl> {
+        self.control
+    }
+
     /// Evaluate at physical AoA, with an optional configured incidence shift.
     pub fn coefficients(&self, angle: f64, mach: f64) -> Result<WingCoefficients, crate::Error> {
         let effective = angle + self.control.map_or(0.0, |c| c.deflection * c.effectiveness);

@@ -122,6 +122,18 @@ impl PhysicsClient {
                 .await?,
         )
     }
+    /// Changes an existing wing's control deflection in radians.
+    pub async fn set_part_wing_deflection(
+        &self,
+        wing: kapitsa_core::world::PartWingId,
+        deflection: f64,
+    ) -> Result<(), Error> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartWingDeflection { wing, deflection })
+                .await?,
+        )
+    }
+
     /// Replaces explicit hull sections in the stable part-local frame; empty clears.
     /// Takes owned configuration (including shared immutable Mach data) and applies
     /// it in queue order, even while paused. Loads remain additive; no coefficients
