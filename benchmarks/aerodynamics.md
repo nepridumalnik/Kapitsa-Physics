@@ -310,3 +310,7 @@ isolated performance comparison.
 The subnormal residual scaling on `b3ab97b` completed both benchmark targets.
 Small partial visibility measured 21.20 us median. The workspace test suite
 was active concurrently, so this is not an isolated performance comparison.
+
+The scaled crossing residual revision `791d0e4` completed both benchmark
+targets. Small partial visibility measured 21.90 us median. A workspace test
+suite was active concurrently, so this is not an isolated comparison.
