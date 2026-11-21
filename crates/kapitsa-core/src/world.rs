@@ -179,7 +179,7 @@ mod query;
 #[cfg(test)]
 mod shape_binding_tests;
 mod shapes;
-pub use shapes::BodyShapeStatus;
+pub use shapes::{BodyShapeCompletion, BodyShapeStatus};
 
 pub use aerodynamics::{AerodynamicSurface, AerodynamicTarget, AerodynamicsTask};
 pub use chunk::{AddChunkBatchError, AddChunkError, ChunkOperationError, RemoveChunkBatchError};

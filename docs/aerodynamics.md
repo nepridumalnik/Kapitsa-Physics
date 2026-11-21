@@ -98,8 +98,11 @@ For explicit mesh assemblies, create a bounded `aerodynamics::shape::worker::Sha
 and call `PhysicsClient::queue_body_shape` after editing the assembly. The queue
 captures the current sources at the command boundary; the worker cooks them
 without borrowing the simulation world. `poll_body_shape` publishes available
-results and reports `Cooking`, `Ready`, or `Failed` even while paused. This API
-uses polling, not a pushed notification. `cancel_body_shape` prevents an
+results and reports `Cooking`, `Ready`, or `Failed` even while paused.
+`queue_body_shape_with_completion` optionally delivers the publication result
+(shape ID or typed failure) once the world processes it. While paused, polling
+drives publication. Cancellation or supersession closes the completion channel.
+`cancel_body_shape` prevents an
 unpublished result from installing and leaves the installed binding unchanged.
 
 `ZeroForce` suppresses aerodynamic loads while the request is pending.

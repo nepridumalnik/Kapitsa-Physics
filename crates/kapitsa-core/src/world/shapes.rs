@@ -16,7 +16,11 @@ pub(super) struct PendingBodyShape {
     welds: Vec<super::WeldId>,
     policy: PendingAero,
     result: Result<PendingShape, crate::Error>,
+    completion: Option<BodyShapeCompletion>,
 }
+
+/// Sends the outcome once the world publishes or rejects a background result.
+pub type BodyShapeCompletion = std::sync::mpsc::Sender<Result<ShapeId, crate::Error>>;
 
 /// Status of background preparation for an assembly.
 #[derive(Clone, Debug, PartialEq)]
@@ -113,6 +117,18 @@ impl PhysicsWorld {
         policy: PendingAero,
         worker: &crate::aerodynamics::shape::worker::ShapeWorker,
     ) -> Result<(), crate::Error> {
+        self.queue_body_shape_with_completion(body, policy, worker, None)
+    }
+
+    /// Queues cooking and optionally reports its publication outcome.
+    /// Cancellation or supersession disconnects the completion channel.
+    pub fn queue_body_shape_with_completion(
+        &mut self,
+        body: BodyId,
+        policy: PendingAero,
+        worker: &crate::aerodynamics::shape::worker::ShapeWorker,
+        completion: Option<BodyShapeCompletion>,
+    ) -> Result<(), crate::Error> {
         let parts = self
             .cluster(body)
             .ok_or(ClusterError::NotClustered)?
@@ -144,7 +160,15 @@ impl PhysicsWorld {
                 self.preserve_assembly_mesh_cavities,
             )
             .map_err(|error| crate::Error::from_source(crate::ErrorKind::Aerodynamics, error))?;
-        self.track_body_shape(body, parts, policy, cook)
+        self.track_body_shape(body, parts, policy, cook)?;
+        if let Some(job) = self
+            .pending_shapes
+            .as_mut()
+            .and_then(|jobs| jobs.get_mut(&body))
+        {
+            job.completion = completion;
+        }
+        Ok(())
     }
     /// Tracks an already queued cook for this assembly, superseding any older request.
     pub fn track_body_shape(
@@ -168,6 +192,7 @@ impl PhysicsWorld {
                 welds,
                 policy,
                 result: Ok(cook),
+                completion: None,
             },
         );
         self.body_revision = self.body_revision.wrapping_add(1);
@@ -248,7 +273,11 @@ impl PhysicsWorld {
                 return false;
             };
             if cluster.welds() != job.welds || cluster.parts().len() != job.parts.len() {
-                job.result = Err(ShapeRegistryError::StaleBinding.into());
+                let error = crate::Error::from(ShapeRegistryError::StaleBinding);
+                if let Some(completion) = job.completion.take() {
+                    let _ = completion.send(Err(error.clone()));
+                }
+                job.result = Err(error);
                 return true;
             }
             let Ok(cook) = &mut job.result else {
@@ -267,7 +296,12 @@ impl PhysicsWorld {
                     error,
                 )),
             };
-            match result.and_then(|shape| self.publish_body_shape(body, shape, job.parts.clone())) {
+            let outcome =
+                result.and_then(|shape| self.publish_body_shape(body, shape, job.parts.clone()));
+            if let Some(completion) = job.completion.take() {
+                let _ = completion.send(outcome.clone());
+            }
+            match outcome {
                 Ok(_) => false,
                 Err(error) => {
                     job.result = Err(error);

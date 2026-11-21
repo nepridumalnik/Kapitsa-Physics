@@ -177,6 +177,7 @@ pub enum PhysicsCommand {
         body: BodyId,
         policy: crate::aerodynamics::shape::worker::PendingAero,
         worker: crate::aerodynamics::shape::worker::ShapeWorker,
+        completion: Option<crate::world::BodyShapeCompletion>,
     },
     /// Publishes available background results and reads the body's status.
     PollBodyShape {
@@ -1372,8 +1373,9 @@ pub(crate) fn apply_command_inner(
             body,
             policy,
             worker,
+            completion,
         } => {
-            world.queue_body_shape(body, policy, &worker)?;
+            world.queue_body_shape_with_completion(body, policy, &worker, completion)?;
             PhysicsCommandResult::Done
         }
         PhysicsCommand::CancelBodyShape { body } => {

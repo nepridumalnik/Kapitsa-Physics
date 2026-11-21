@@ -114,11 +114,26 @@ impl PhysicsClient {
         policy: kapitsa_core::aerodynamics::shape::worker::PendingAero,
         worker: &kapitsa_core::aerodynamics::shape::worker::ShapeWorker,
     ) -> Result<(), Error> {
+        self.queue_body_shape_with_completion(body, policy, worker, None)
+            .await
+    }
+
+    /// Queues a cook and sends its outcome when the world processes publication.
+    /// While paused, call `poll_body_shape` to drive publication. Superseding
+    /// or cancelling the request disconnects its completion channel.
+    pub async fn queue_body_shape_with_completion(
+        &self,
+        body: BodyId,
+        policy: kapitsa_core::aerodynamics::shape::worker::PendingAero,
+        worker: &kapitsa_core::aerodynamics::shape::worker::ShapeWorker,
+        completion: Option<kapitsa_core::world::BodyShapeCompletion>,
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::QueueBodyShape {
                 body,
                 policy,
                 worker: worker.clone(),
+                completion,
             })
             .await?,
         )

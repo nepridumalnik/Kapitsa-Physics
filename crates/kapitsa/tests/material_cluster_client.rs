@@ -395,8 +395,9 @@ async fn part_aerodynamic_geometry_commands_apply_loads_on_both_executors()
         use kapitsa::aerodynamics::shape::worker::{PendingAero, ShapeWorker};
         use kapitsa_core::world::BodyShapeStatus;
         let worker = ShapeWorker::new(2)?;
+        let (completion, result) = std::sync::mpsc::channel();
         client
-            .queue_body_shape(id, PendingAero::BlockStep, &worker)
+            .queue_body_shape_with_completion(id, PendingAero::BlockStep, &worker, Some(completion))
             .await?;
         let published = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -414,6 +415,7 @@ async fn part_aerodynamic_geometry_commands_apply_loads_on_both_executors()
             }
         })
         .await??;
+        assert_eq!(result.try_recv()??, published);
         assert_eq!(
             client.poll_body_shape(id).await?,
             BodyShapeStatus::Ready(published)
@@ -427,8 +429,33 @@ async fn part_aerodynamic_geometry_commands_apply_loads_on_both_executors()
             client.poll_body_shape(id).await?,
             BodyShapeStatus::Ready(published)
         );
+        let (completion, result) = std::sync::mpsc::channel();
+        client
+            .queue_body_shape_with_completion(id, PendingAero::ZeroForce, &worker, Some(completion))
+            .await?;
         client.set_part_aerodynamic_colliders(part, true).await?;
-        assert_eq!(client.poll_body_shape(id).await?, BodyShapeStatus::Unmanaged);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match client.poll_body_shape(id).await? {
+                    BodyShapeStatus::Cooking => tokio::task::yield_now().await,
+                    BodyShapeStatus::Failed(error) => {
+                        assert_eq!(result.try_recv()?, Err(error));
+                        return Ok::<(), Box<dyn std::error::Error>>(());
+                    }
+                    other => {
+                        return Err(
+                            format!("expected stale publication failure, got {other:?}").into()
+                        );
+                    }
+                }
+            }
+        })
+        .await??;
+        assert!(client.cancel_body_shape(id).await?);
+        assert_eq!(
+            client.poll_body_shape(id).await?,
+            BodyShapeStatus::Unmanaged
+        );
         client
             .set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1024)?)
             .await?;
