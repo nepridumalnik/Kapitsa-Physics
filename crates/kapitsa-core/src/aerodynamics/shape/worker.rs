@@ -25,6 +25,17 @@ pub enum SubmitError {
     Disconnected,
 }
 
+impl std::fmt::Display for SubmitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Full => "shape cook queue is full",
+            Self::Disconnected => "shape cook worker is disconnected",
+        })
+    }
+}
+
+impl std::error::Error for SubmitError {}
+
 /// One pending cook. Dropping it discards the result without blocking.
 pub struct PendingShape {
     result: mpsc::Receiver<Result<CookedShape, crate::Error>>,
