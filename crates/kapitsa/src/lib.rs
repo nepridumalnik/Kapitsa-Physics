@@ -29,8 +29,8 @@ pub mod aerodynamics {
         AerodynamicForce, AerodynamicProperties, AerodynamicSurface, AerodynamicTarget,
         Aerodynamics, AerodynamicsError, AerodynamicsTask, Atmosphere, AtmosphericState,
         ColliderTessellation, DensityProfile, MeshPressureModel, SphericalAtmosphere,
-        SphericalAtmosphereBuilder, cache, colliders, geometry, hull, potential, pressure, slender,
-        vlm, wave, wing,
+        SphericalAtmosphereBuilder, cache, colliders, geometry, hull, potential, pressure, shape,
+        slender, vlm, wave, wing,
     };
 }
 

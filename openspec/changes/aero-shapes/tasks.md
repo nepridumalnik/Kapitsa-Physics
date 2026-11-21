@@ -1,8 +1,8 @@
 # Tasks
 
-- [ ] Introduce `CookedShape` as an immutable prepared vessel shape with owner
+- [x] Introduce `CookedShape` as an immutable prepared vessel shape with owner
   slots, independent of `PartId`/`BodyId`.
-- [ ] Add `ShapeId` and a shape registry supporting shared use by several
+- [x] Add `ShapeId` and a shape registry supporting shared use by several
   bodies.
 - [ ] Add `ShapeBinding` mapping `OwnerSlot -> PartId` with per-part transforms.
 - [ ] Generalize the existing cache key from `BodyId` to an opaque shape
