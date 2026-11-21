@@ -160,6 +160,25 @@ impl PhysicsWorld {
         Ok(())
     }
 
+    /// Installs and binds an off-thread result as a single operation.
+    /// The supplied slots must still match the live assembly, including mesh
+    /// identity and transforms. A rejected result leaves the old binding intact.
+    pub fn publish_body_shape(
+        &mut self,
+        body: BodyId,
+        cooked: CookedShape,
+        parts: Vec<PartId>,
+    ) -> Result<ShapeId, crate::Error> {
+        // Registry insertion is private until this exclusive world operation
+        // returns. Roll back the unpublished ID if binding validation fails.
+        let id = self.shapes.insert(cooked)?;
+        if let Err(error) = self.bind_shape(body, id, parts) {
+            self.shapes.remove(id);
+            return Err(error);
+        }
+        Ok(id)
+    }
+
     /// Removes a body's binding, returning it. IDs from another world and
     /// bodies without a binding yield `None`.
     pub fn unbind_shape(&mut self, body: BodyId) -> Option<ShapeBinding> {
@@ -250,6 +269,43 @@ mod tests {
     use crate::{shape::TriangleMesh, transform::Transform};
     use kapitsa_math::Vec3;
     use std::sync::Arc;
+
+    #[test]
+    fn body_publication_preserves_binding_when_mesh_identity_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        let make_mesh = || TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]]);
+        let mesh = Arc::new(make_mesh()?);
+        world.set_part_aerodynamic_mesh_shared(part, Some(Arc::clone(&mesh)))?;
+        let sources = [CookedSource {
+            mesh,
+            local_transform: Transform::identity(),
+            slot: OwnerSlot::new(0),
+        }];
+        let worker = ShapeWorker::new(2)?;
+        let first = worker
+            .submit(sources.to_vec(), assembly_pressure_config(), false)?
+            .recv()??;
+        let id = world.publish_body_shape(body, first, vec![part])?;
+        let old = worker.submit(sources.to_vec(), assembly_pressure_config(), false)?;
+        world.set_part_aerodynamic_mesh(part, Some(make_mesh()?))?;
+        let error = world
+            .publish_body_shape(body, old.recv()??, vec![part])
+            .err()
+            .ok_or("stale mesh accepted")?;
+        assert_eq!(
+            error.downcast_ref::<ShapeRegistryError>(),
+            Some(&ShapeRegistryError::InvalidBinding)
+        );
+        assert_eq!(world.shape_registry().len(), 1);
+        assert_eq!(world.shape_binding(body).map(ShapeBinding::shape), Some(id));
+        Ok(())
+    }
 
     #[test]
     fn completed_worker_result_cannot_overwrite_newer_revision()
