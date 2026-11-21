@@ -1541,6 +1541,39 @@ mod tests {
     }
 
     #[test]
+    fn runtime_deflection_uses_periodic_polar_at_forward_and_reverse_incidence()
+    -> Result<(), crate::Error> {
+        let row = [0.0, -1.0, 0.0, 1.0, 0.0].map(|lift| WingCoefficients { lift, drag: 0.1 });
+        let polar = WingPolar::new(
+            vec![0.5, 2.0, 8.0],
+            vec![-PI, -PI / 2.0, 0.0, PI / 2.0, PI],
+            row.repeat(3),
+        )?;
+        let mut wing = WingSurface::new(
+            FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
+            crate::transform::Transform::identity(),
+            1.0,
+        )?
+        .with_polar(std::sync::Arc::new(polar))
+        .with_periodic_full_angle_polar()?
+        .with_control(WingControl::new(0.0, 0.2, 1.0)?);
+        for mach in [0.5, 2.0, 8.0] {
+            for (angle, sign) in [(0.0, 1.0), (PI, -1.0)] {
+                let neutral = wing.coefficients(angle, mach)?;
+                assert_eq!(neutral.lift, 0.0);
+                for deflection in [-0.1, 0.1] {
+                    wing.set_control_deflection(deflection)?;
+                    let lift = wing.coefficients(angle, mach)?.lift;
+                    assert!((lift - sign * deflection / (PI / 2.0)).abs() < 1e-14);
+                }
+                wing.set_control_deflection(0.0)?;
+                assert_eq!(wing.coefficients(angle, mach)?, neutral);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn runtime_deflection_validation_preserves_previous_value() -> Result<(), crate::Error> {
         let mut control = WingControl::new(0.0, 0.2, 1.0)?;
         control.set_deflection(-0.2)?;
