@@ -1184,6 +1184,8 @@ mod tests {
         let id = world.publish_body_shape(body, first, vec![part])?;
         let old = worker.submit(sources.to_vec(), assembly_pressure_config(), false)?;
         world.set_part_aerodynamic_mesh(part, Some(make_mesh()?))?;
+        let before = *world.body(body).ok_or("missing body")?.state();
+        let revision = world.body_revision;
         let error = world
             .publish_body_shape(body, old.recv()??, vec![part])
             .err()
@@ -1194,6 +1196,8 @@ mod tests {
         );
         assert_eq!(world.shape_registry().len(), 1);
         assert_eq!(world.shape_binding(body).map(ShapeBinding::shape), Some(id));
+        assert_eq!(*world.body(body).ok_or("missing body")?.state(), before);
+        assert_eq!(world.body_revision, revision);
         let (sender, pending) = PendingShape::test_channel();
         world.track_body_shape(body, vec![part], PendingAero::ZeroForce, pending)?;
         sender

@@ -56,3 +56,9 @@ worker. Separately, the oversized-mesh regression checks that a nonblocking
 managed step does not fall back to synchronous preparation, and the isolated
 pending-state check measured zero allocations over 128 checks. These results
 do not cover collider-derived geometry, queue contention, or physical validation.
+
+Focused lifecycle regressions verify recooking after merge and root removal in
+both step paths, exact pressure and motion parity when a pending cook is
+superseded before publication, and rollback of a rejected or cancelled result.
+They do not verify automatic management of newly detached bodies or equivalence
+across arbitrary worker completion times under nonblocking policies.
