@@ -139,6 +139,8 @@ PhysicsMaterialError
 PhysicsMaterial}
 PhysicsSnapshot
 PhysicsSubmitError
+PhysicsSystem
+PhysicsSystemBuilder
 PhysicsWorld
 PhysicsWorld}
 PlanarJoint
