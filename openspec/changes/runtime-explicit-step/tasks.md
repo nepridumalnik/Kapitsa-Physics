@@ -2,7 +2,7 @@
 
 ## 1. Blocking updates and results
 
-- [ ] 1.1 Expose the committed result view without consuming staged results; test compatibility with `simulate` and `fetch_results`.
+- [x] 1.1 Expose the committed result view without consuming staged results; test compatibility with `simulate` and `fetch_results`.
 - [ ] 1.2 Add the sequential `PhysicsSystem` builder and blocking `update`; run a no-Tokio example and test variable durations, committed events and rollback after validation and physics failures.
 
 ## 2. Parallel execution
