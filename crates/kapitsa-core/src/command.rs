@@ -182,6 +182,10 @@ pub enum PhysicsCommand {
     PollBodyShape {
         body: BodyId,
     },
+    /// Cancels a tracked cook without replacing its binding.
+    CancelBodyShape {
+        body: BodyId,
+    },
     /// Adds a material and returns its ID.
     AddMaterial {
         material: PhysicsMaterial,
@@ -688,6 +692,8 @@ impl PhysicsCommandBuffer {
 pub enum PhysicsCommandResult {
     /// Latest background preparation status.
     BodyShapeStatus(crate::world::BodyShapeStatus),
+    /// Whether a tracked cook was cancelled.
+    BodyShapeCancelled(bool),
     /// The command completed without returning a newly allocated ID.
     Done,
     /// A body was inserted.
@@ -1113,6 +1119,7 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::GetClusterPart { .. }
         | PhysicsCommand::QueueBodyShape { .. }
         | PhysicsCommand::PollBodyShape { .. }
+        | PhysicsCommand::CancelBodyShape { .. }
         | PhysicsCommand::GetWeld { .. }
         | PhysicsCommand::AddGravity { .. }
         | PhysicsCommand::UpdateGravity { .. }
@@ -1197,6 +1204,7 @@ fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result
         | PhysicsCommand::GetClusterPart { .. }
         | PhysicsCommand::QueueBodyShape { .. }
         | PhysicsCommand::PollBodyShape { .. }
+        | PhysicsCommand::CancelBodyShape { .. }
         | PhysicsCommand::GetWeld { .. }
         | PhysicsCommand::AddGravity { .. }
         | PhysicsCommand::UpdateGravity { .. }
@@ -1367,6 +1375,9 @@ pub(crate) fn apply_command_inner(
         } => {
             world.queue_body_shape(body, policy, &worker)?;
             PhysicsCommandResult::Done
+        }
+        PhysicsCommand::CancelBodyShape { body } => {
+            PhysicsCommandResult::BodyShapeCancelled(world.cancel_body_shape(body))
         }
         PhysicsCommand::PollBodyShape { body } => {
             world.poll_body_shapes();

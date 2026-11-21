@@ -124,6 +124,17 @@ impl PhysicsClient {
         )
     }
 
+    /// Cancels a tracked background cook without replacing the installed binding.
+    pub async fn cancel_body_shape(&self, body: BodyId) -> Result<bool, Error> {
+        match self
+            .submit(PhysicsCommand::CancelBodyShape { body })
+            .await?
+        {
+            PhysicsCommandResult::BodyShapeCancelled(cancelled) => Ok(cancelled),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
+        }
+    }
+
     /// Publishes available cook results and reads the latest status, even while paused.
     pub async fn poll_body_shape(
         &self,
