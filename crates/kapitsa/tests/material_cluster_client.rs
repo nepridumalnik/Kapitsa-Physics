@@ -504,8 +504,19 @@ async fn part_wings_and_hull_replace_clear_and_follow_queue_while_paused()
         let configured = client.cluster_part(part).await?.ok_or("missing part")?;
         assert_eq!(configured.aerodynamic_wings(), std::slice::from_ref(&wing));
         assert_eq!(configured.aerodynamic_hull(), &[section]);
+        let id = client
+            .part_wing_id(part, 0)
+            .await?
+            .ok_or("missing wing identity")?;
+        client.set_part_wing_deflection(id, -0.1).await?;
+        let mut deflected = wing.clone();
+        deflected.set_control_deflection(-0.1)?;
+        let updated = client.cluster_part(part).await?.ok_or("missing part")?;
+        assert_eq!(updated.aerodynamic_wings(), &[deflected]);
+        assert_eq!(client.part_wing_id(part, 0).await?, Some(id));
         // Owned query snapshots are not modified by subsequent queued edits.
         client.set_part_aerodynamic_wings(part, Vec::new()).await?;
+        assert!(client.set_part_wing_deflection(id, 0.0).await.is_err());
         client.set_part_aerodynamic_hull(part, Vec::new()).await?;
         let cleared = client.cluster_part(part).await?.ok_or("missing part")?;
         assert!(cleared.aerodynamic_wings().is_empty());
