@@ -365,7 +365,10 @@ impl PhysicsWorld {
             let Some(cluster) = self.cluster(body) else {
                 return false;
             };
-            if cluster.welds() != job.welds || cluster.parts().len() != job.parts.len() {
+            if cluster.welds() != job.welds
+                || cluster.parts().len() != job.parts.len()
+                || !self.pending_inputs_match(body, job)
+            {
                 let error = crate::Error::from(ShapeRegistryError::StaleBinding);
                 if let Some(completion) = job.completion.take() {
                     let _ = completion.send(Err(error.clone()));
