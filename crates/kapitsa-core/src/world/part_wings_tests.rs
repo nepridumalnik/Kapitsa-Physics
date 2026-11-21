@@ -150,6 +150,64 @@ fn advance(world: &mut PhysicsWorld, sharded: bool) -> Result<(), crate::Error> 
 }
 
 #[test]
+fn runtime_wing_loads_match_in_both_step_paths() -> Result<(), Box<dyn std::error::Error>> {
+    use std::{f64::consts::PI, sync::Arc};
+    let row = [0.0, -1.0, 0.0, 1.0, 0.0].map(|lift| WingCoefficients { lift, drag: 0.1 });
+    let polar = Arc::new(WingPolar::new(
+        vec![0.25, 9.0],
+        vec![-PI, -PI / 2.0, 0.0, PI / 2.0, PI],
+        row.repeat(2),
+    )?);
+    for mach in [0.5, 2.0, 8.0] {
+        for direction in [-1.0, 1.0] {
+            let mut expected = Vec::new();
+            for sharded in [false, true] {
+                let mut world = PhysicsWorld::new();
+                world.set_atmosphere(test_atmosphere(AtmosphericState::new(
+                    1.0,
+                    Vec3::X * (-340.0 * mach * direction),
+                )?));
+                let pose = Transform::identity();
+                let body = world.add_body(RigidBody::new_dynamic(
+                    pose,
+                    MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?,
+                )?)?;
+                let part = world.enable_cluster(body)?;
+                let surface = wing(Transform::new(Vec3::X, Quat::IDENTITY)?)?
+                    .with_polar(Arc::clone(&polar))
+                    .with_periodic_full_angle_polar()?
+                    .with_control(WingControl::new(0.0, 0.2, 1.0)?);
+                world.set_part_aerodynamic_wings(part, vec![surface])?;
+                let id = world.part_wing_id(part, 0).ok_or("missing wing")?;
+                let mut loads = Vec::new();
+                for deflection in [0.0, -0.1, 0.1, 0.0] {
+                    world.edit_body(body, |motion| {
+                        motion.set_transform(pose)?;
+                        motion.set_linear_velocity(Vec3::ZERO)?;
+                        motion.set_angular_velocity(Vec3::ZERO)
+                    })?;
+                    world.set_part_wing_deflection(id, deflection)?;
+                    advance(&mut world, sharded)?;
+                    let load = world.part_wing_wrenches().first().ok_or("missing load")?;
+                    assert_eq!(load.wing, id);
+                    let force_z = 0.5 * (340.0 * mach).powi(2) * deflection / (PI / 2.0);
+                    assert!((load.wrench.force.z - force_z).abs() < 1e-9 * (1.0 + force_z.abs()));
+                    assert_eq!(load.wrench.moment, Vec3::X.cross(load.wrench.force));
+                    loads.push(load.wrench);
+                }
+                assert_eq!(loads[0], loads[3]);
+                if sharded {
+                    assert_eq!(loads, expected);
+                } else {
+                    expected = loads;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn glider_ailerons_bank_and_turn_in_free_flight() -> Result<(), Box<dyn std::error::Error>> {
     const DT: f64 = 0.005;
     const STEPS: usize = 200;
