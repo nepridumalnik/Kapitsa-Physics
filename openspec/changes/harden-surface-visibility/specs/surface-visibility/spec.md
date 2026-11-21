@@ -332,6 +332,8 @@ to zero SHALL return `PrecisionLoss`.
 ### Requirement: Preserve representable numeric intersections
 
 Crossing fractions SHALL use the smaller-to-larger absolute distance ratio.
+The smaller fraction SHALL apply fused ratio and division residual corrections
+and a correction for rounding `1 + ratio`, as recorded in `a633369`.
 Finite coordinate differences SHALL use fused multiply-add for interpolation.
 Unrepresentable results SHALL return an error.
 
@@ -352,6 +354,27 @@ Unrepresentable results SHALL return an error.
 - **AND** a ratio that underflows to zero returns `PrecisionLoss`
 - **AND** this is a synthetic regression assertion, not test execution
   evidence or independent physical validation
+
+#### Scenario: Smaller crossing fraction uses bounded residual correction
+
+- **WHEN** `r = small/large`, `d = 1 + r` and `f = r/d` are computed from
+  strictly opposite-signed finite distances' absolute magnitudes
+- **THEN** the smaller fraction uses `f + ((s + q) - f*e)/d`, where
+  `e = r - (d - 1)`, `q = (-r).mul_add(large, small)/large` and
+  `s = (-f).mul_add(d, r)`
+- **AND** correction quantities are bounded; fused residuals avoid separately
+  rounding potentially underflowing residual products, without forming the
+  distance sum; the larger endpoint-order branch retains `1/(1 + r)`
+
+#### Scenario: Synthetic crossing fraction corrects a subnormal rounding boundary
+
+- **WHEN** `crossing_fraction_corrects_ratio_at_rounding_boundary` in `a633369`
+  uses `small = f64::from_bits(1)`, `large = f64::MIN_POSITIVE * 2.0` and
+  signed distances `(small, -large)`
+- **THEN** the crossing fraction is `2.0_f64.powi(-53).next_down()`, rather
+  than the uncorrected `2^-53`
+- **AND** this is a synthetic regression assertion, not test execution evidence
+  or independent physical validation
 
 #### Scenario: Endpoint coordinate subtraction overflows
 
@@ -374,15 +397,18 @@ Unrepresentable results SHALL return an error.
 
 #### Scenario: Crossing arithmetic retains binary64 limits
 
-- **WHEN** crossings use fused multiply-add for finite coordinate differences
+- **WHEN** crossings use fused residual fraction correction and fused
+  multiply-add for finite coordinate differences
 - **THEN** coordinate subtraction, the smaller-to-larger ratio, `1 + ratio`,
-  reciprocal, endpoint-order fraction and constructed point still round to
-  binary64, and a fraction can still round to one
+  residual correction, reciprocal, endpoint-order fraction and constructed
+  point still round to binary64, and a fraction can still round to one
 - **AND** a smaller edge ratio rounding to zero remains `PrecisionLoss`, while
   a non-finite constructed point remains `ArithmeticOverflow`
 - **AND** a final intersection coordinate may round to zero, as in the
   subnormal regression; exact affine distance evaluation does not make
   constructed intersection coordinates exact
+- **AND** fused residual correction does not guarantee universally correctly
+  rounded crossing fractions, exact geometry or a global numeric error bound
 
 ### Requirement: Check area consistency per source partition
 

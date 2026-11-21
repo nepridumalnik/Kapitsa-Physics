@@ -155,3 +155,16 @@
   fractions and intersection coordinates, possible fraction rounding to one,
   and non-finite-point `ArithmeticOverflow`; do not claim exact geometry or a
   global numeric error bound from fused multiply-add.
+- [x] Record `a633369`: correct the smaller crossing fraction using fused ratio
+  and division residuals and the rounded denominator's error, with bounded
+  correction quantities and no overflowing distance sum or separately rounded
+  residual product; retain `1/(1 + ratio)` for the larger endpoint-order branch.
+- [x] Document `crossing_fraction_corrects_ratio_at_rounding_boundary`: smallest
+  subnormal `f64::from_bits(1)` and opposite distance
+  `-(f64::MIN_POSITIVE * 2.0)` yield `2.0_f64.powi(-53).next_down()`, not the
+  uncorrected `2^-53`; record a synthetic assertion only, not test execution
+  evidence or independent physical validation.
+- [x] Retain binary64 rounding of the residual correction, no universal
+  correct-rounding guarantee, possible fraction rounding to one, zero smaller
+  fraction `PrecisionLoss` and non-finite-point `ArithmeticOverflow`; do not
+  claim exact geometry or a global numeric error bound.

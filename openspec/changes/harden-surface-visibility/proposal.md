@@ -15,7 +15,8 @@ fallback, `d5624ae` for exact projection from original vertex coordinates, and
 `8607c83` for precharged exact evaluation of uncertain affine distances, and
 `efedd1d` for reversible power-of-two normalization that preserves stored
 shadow boundaries and windward values, and `c603ae5` for fused multiply-add
-crossing interpolation with finite coordinate differences.
+crossing interpolation with finite coordinate differences, and `a633369` for
+fused residual correction of crossing fractions near binary rounding boundaries.
 
 ## Scope
 
@@ -127,6 +128,20 @@ This change covers:
   arithmetic; crossing fractions use the smaller-to-larger absolute distance
   ratio, then reconstruct the endpoint-order result without forming an
   overflowing distance sum;
+- applying `a633369` fused residual correction to the smaller fraction: with
+  `r = small/large`, `d = 1 + r` and `f = r/d`, compute
+  `e = r - (d - 1)`, `q = (-r).mul_add(large, small)/large` and
+  `s = (-f).mul_add(d, r)`, then use `f + ((s + q) - f*e)/d`;
+  these bounded correction quantities reduce ratio, sum and division rounding
+  error without forming an overflowing distance sum or a separately rounded,
+  potentially underflowing residual product; the larger endpoint-order branch
+  retains `1/(1 + r)`;
+- recording `a633369` synthetic regression
+  `crossing_fraction_corrects_ratio_at_rounding_boundary`: for
+  `small = f64::from_bits(1)` and `large = f64::MIN_POSITIVE * 2.0`,
+  `crossing_fraction(small, -large)` equals `2.0_f64.powi(-53).next_down()`
+  rather than `2^-53` from the uncorrected fraction; this is not test execution
+  evidence or independent physical validation;
 - using `difference.mul_add(fraction, near)` for each finite coordinate
   difference `far - near`, rounding the product and addition together so a
   subnormal product residual can contribute before final binary64 rounding;
@@ -144,8 +159,9 @@ This change covers:
   test execution evidence or independent physical validation;
 - retaining binary64 rounding of coordinate differences, crossing fractions
   and constructed intersections, including possible fraction rounding to one;
-  the ratio, `1 + ratio`, reciprocal and final fraction remain binary64
-  operations; smaller-ratio underflow still returns `PrecisionLoss` and
+  the ratio, `1 + ratio`, residual correction, reciprocal and final fraction
+  remain binary64 operations, with no universal correct-rounding guarantee;
+  a smaller fraction rounding to zero still returns `PrecisionLoss` and
   non-finite constructed points still return `ArithmeticOverflow`; fused
   multiply-add does not make geometry exact or provide a global numeric error
   bound;
