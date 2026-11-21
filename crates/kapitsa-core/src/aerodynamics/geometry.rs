@@ -157,8 +157,10 @@ fn surface_triangle_count(instances: &[GeometryInstance<'_>]) -> Result<usize, c
     })
 }
 
+const MAX_SURFACE_WORK: usize = 100_000_000;
+
 fn check_surface_work(work: Option<usize>, max_work: usize) -> Result<(), crate::Error> {
-    if max_work == 0 || work.is_none_or(|w| w > max_work.min(100_000_000)) {
+    if max_work == 0 || work.is_none_or(|w| w > max_work.min(MAX_SURFACE_WORK)) {
         return Err(crate::Error::from(GeometryError::WorkBudgetExceeded));
     }
     Ok(())
@@ -179,8 +181,8 @@ const SURFACE_TRIANGLE_WORK: usize = 4;
 fn grid_build_work_estimate(entries: usize, cells: usize, scans: usize) -> Option<usize> {
     // Initialize both buffers and scan counts to construct prefix offsets.
     const CELL_PASSES: usize = 3;
-    sort_work_estimate(entries)?
-        .checked_add(entries)? // Copy sorted entries into the final index.
+    entries
+        .checked_mul(3)? // Count, initialize, and populate entries.
         .checked_add(cells.checked_mul(CELL_PASSES)?)?
         .checked_add(1)?
         .checked_add(scans)
@@ -269,8 +271,8 @@ impl TriangleGrid {
         if triangles.is_empty() {
             return Err(crate::Error::from(GeometryError::EmptyGeometry));
         }
-        // Bounds, entry counting and entry construction each scan the input.
-        const TRIANGLE_SCAN_WORK: usize = 3;
+        // Bounds, preflight, bucket counting and bucket population scan the input.
+        const TRIANGLE_SCAN_WORK: usize = 4;
         let scan_work = triangles
             .len()
             .checked_mul(TRIANGLE_SCAN_WORK)
@@ -308,8 +310,7 @@ impl TriangleGrid {
             }
             Ok(values.map(|value| (value.floor().max(0.0) as usize).min(target.saturating_sub(1))))
         };
-        let mut entry_count = 0usize;
-        for triangle in triangles {
+        let triangle_bounds = |triangle: &SurfaceTriangle| -> Result<_, crate::Error> {
             let lower = cell(
                 triangle
                     .vertices
@@ -322,6 +323,11 @@ impl TriangleGrid {
                     .iter()
                     .fold(Vec3::splat(f64::NEG_INFINITY), |v, &p| v.max(p)),
             )?;
+            Ok((lower, upper))
+        };
+        let mut entry_count = 0usize;
+        for triangle in triangles {
+            let (lower, upper) = triangle_bounds(triangle)?;
             let spans = [
                 upper[0].saturating_sub(lower[0]).saturating_add(1),
                 upper[1].saturating_sub(lower[1]).saturating_add(1),
@@ -343,59 +349,41 @@ impl TriangleGrid {
         let build_work = grid_build_work_estimate(entry_count, cell_count, scan_work)
             .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         check_surface_work(Some(build_work), max_work)?;
-        let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(entry_count)
-            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
-        let mut counts = allocated(cell_count, 0usize)?;
-        for (triangle_index, triangle) in triangles.iter().enumerate() {
-            let lower = cell(
-                triangle
-                    .vertices
-                    .iter()
-                    .fold(Vec3::splat(f64::INFINITY), |v, &p| v.min(p)),
-            )?;
-            let upper = cell(
-                triangle
-                    .vertices
-                    .iter()
-                    .fold(Vec3::splat(f64::NEG_INFINITY), |v, &p| v.max(p)),
-            )?;
-            for z in lower[2]..=upper[2] {
-                for y in lower[1]..=upper[1] {
-                    for x in lower[0]..=upper[0] {
-                        let i = index([x, y, z], dimensions);
-                        counts[i] = counts[i]
-                            .checked_add(1)
-                            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
-                        checked_push(&mut entries, (i, triangle_index))?;
-                    }
-                }
+        let mut cursors = allocated(cell_count, 0usize)?;
+        let occupied_cells = |triangle: &SurfaceTriangle| -> Result<_, crate::Error> {
+            let (lower, upper) = triangle_bounds(triangle)?;
+            Ok((lower[2]..=upper[2]).flat_map(move |z| {
+                (lower[1]..=upper[1]).flat_map(move |y| {
+                    (lower[0]..=upper[0]).map(move |x| index([x, y, z], dimensions))
+                })
+            }))
+        };
+        for triangle in triangles {
+            for cell in occupied_cells(triangle)? {
+                cursors[cell] += 1;
             }
         }
         let mut offsets = allocated(cell_count + 1, 0usize)?;
-        for (i, count) in counts.into_iter().enumerate() {
-            offsets[i + 1] = offsets[i]
-                .checked_add(count)
-                .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
+        for (cell, cursor) in cursors.iter_mut().enumerate() {
+            // Preflight bounds the sum of all bucket counts.
+            offsets[cell + 1] = offsets[cell] + *cursor;
+            *cursor = offsets[cell];
         }
-        let mut sort_work = build_work;
-        budgeted_sort(&mut entries, &mut sort_work, max_work, Ord::cmp)?;
-        let mut indexed_triangles = Vec::new();
-        indexed_triangles
-            .try_reserve_exact(entries.len())
-            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
-        for (_, triangle) in entries {
-            checked_push(&mut indexed_triangles, triangle)?;
+        let mut indexed_triangles = allocated(entry_count, 0usize)?;
+        // Insertion in input order preserves the canonical order within a bucket.
+        for (triangle_index, triangle) in triangles.iter().enumerate() {
+            for cell in occupied_cells(triangle)? {
+                indexed_triangles[cursors[cell]] = triangle_index;
+                cursors[cell] += 1;
+            }
         }
-        let triangles = indexed_triangles;
         Ok(Self {
             origin: min,
             cell_size,
             dimensions,
             offsets,
-            triangles,
-            build_work: sort_work,
+            triangles: indexed_triangles,
+            build_work,
         })
     }
 
@@ -659,10 +647,90 @@ fn triangle_grid_bounds(
     )
 }
 
+fn flood_voxels(
+    shell: &[bool],
+    visited: &mut [bool],
+    dimensions: [usize; 3],
+    queue: &mut Vec<usize>,
+) {
+    let mut head = 0;
+    while head < queue.len() {
+        let p = coordinates(queue[head], dimensions);
+        head += 1;
+        for axis in 0..3 {
+            for positive in [false, true] {
+                if let Some(i) = neighbor(p, axis, positive, dimensions)
+                    && !shell[i]
+                    && !visited[i]
+                {
+                    visited[i] = true;
+                    queue.push(i);
+                }
+            }
+        }
+    }
+}
+
+fn has_nonzero_winding(instance: &GeometryInstance<'_>, point: Vec3) -> Result<bool, crate::Error> {
+    // Jacobson et al. (2013), section 4.1, equation (2), evaluated with unit rays.
+    // Away from an oriented closed surface the sum is an integer number of turns.
+    const MAX_WINDING_ERROR: f64 = 0.125;
+    let unit_ray = |index: usize| -> Result<Vec3, crate::Error> {
+        let vertex = instance
+            .local_transform
+            .transform_point(instance.mesh.vertices()[index]);
+        let ray = vertex - point;
+        let length = ray
+            .checked_length()
+            .filter(|length| *length > 0.0)
+            .ok_or(GeometryError::PrecisionLoss)?;
+        let unit = ray / length;
+        if !unit.is_finite() {
+            return Err(GeometryError::PrecisionLoss.into());
+        }
+        Ok(unit)
+    };
+    let mut solid_angle = 0.0;
+    for &[a, b, c] in instance.mesh.triangles() {
+        let (a, b, c) = (unit_ray(a)?, unit_ray(b)?, unit_ray(c)?);
+        let numerator = a.dot(b.cross(c));
+        let denominator = 1.0 + a.dot(b) + b.dot(c) + c.dot(a);
+        if numerator == 0.0 && denominator <= 0.0 {
+            return Err(GeometryError::PrecisionLoss.into());
+        }
+        solid_angle += 2.0 * numerator.atan2(denominator);
+    }
+    let winding = solid_angle / (4.0 * std::f64::consts::PI);
+    let integral = winding.round();
+    if !winding.is_finite() || (winding - integral).abs() > MAX_WINDING_ERROR {
+        return Err(GeometryError::PrecisionLoss.into());
+    }
+    Ok(integral != 0.0)
+}
+
 impl PreparedGeometry {
     pub fn prepare(
         instances: &[GeometryInstance<'_>],
         config: GeometryConfig,
+    ) -> Result<Self, crate::Error> {
+        Self::prepare_inner(instances, config, false)
+    }
+
+    /// Preserves resolved cavities in closed oriented meshes. The walls of a
+    /// cavity must have winding opposite to the enclosing shell in the same
+    /// instance. Cells touched by triangles remain conservatively occupied.
+    /// The region traversal and solid-angle evaluations count toward `config.max_work`.
+    pub fn prepare_with_oriented_cavities(
+        instances: &[GeometryInstance<'_>],
+        config: GeometryConfig,
+    ) -> Result<Self, crate::Error> {
+        Self::prepare_inner(instances, config, true)
+    }
+
+    fn prepare_inner(
+        instances: &[GeometryInstance<'_>],
+        config: GeometryConfig,
+        oriented_cavities: bool,
     ) -> Result<Self, crate::Error> {
         let h = config.cell_size;
         if !h.is_finite()
@@ -763,6 +831,16 @@ impl PreparedGeometry {
             .and_then(|n| n.checked_add(preprocessing_work))
             .and_then(|n| n.checked_add(triangle_count.saturating_mul(10)))
             .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
+        if oriented_cavities {
+            // At most one additional visit, seed check, six neighbor checks
+            // and one occupancy write per cell across enclosed regions.
+            const REGION_WORK_PER_CELL: usize = 9;
+            work = count
+                .checked_mul(instances.len())
+                .and_then(|n| n.checked_mul(REGION_WORK_PER_CELL))
+                .and_then(|n| work.checked_add(n))
+                .ok_or(GeometryError::WorkBudgetExceeded)?;
+        }
         for instance in instances {
             for &[a, b, c] in instance.mesh.triangles() {
                 let triangle = [a, b, c].map(|i| {
@@ -844,18 +922,28 @@ impl PreparedGeometry {
                         queue.push(i);
                     }
                 }
-                let mut head = 0;
-                while head < queue.len() {
-                    let p = coordinates(queue[head], dimensions);
-                    head += 1;
-                    for axis in 0..3 {
-                        for positive in [false, true] {
-                            if let Some(i) = neighbor(p, axis, positive, dimensions)
-                                && !shell[i]
-                                && !exterior[i]
-                            {
-                                exterior[i] = true;
-                                queue.push(i);
+                flood_voxels(&shell, &mut exterior, dimensions, &mut queue);
+                if oriented_cavities {
+                    for i in 0..count {
+                        if exterior[i] || shell[i] {
+                            continue;
+                        }
+                        work = work
+                            .checked_add(instance.mesh.triangles().len())
+                            .filter(|&next| next <= config.max_work)
+                            .ok_or(GeometryError::WorkBudgetExceeded)?;
+                        // Adjacent non-surface cells share a path that cannot
+                        // cross a triangle, so winding is invariant in the region.
+                        let p = coordinates(i, dimensions);
+                        let center = origin + vector(p.map(|v| (v as f64 + 0.5) * h));
+                        let filled = has_nonzero_winding(instance, center)?;
+                        queue.clear();
+                        exterior[i] = true;
+                        queue.push(i);
+                        flood_voxels(&shell, &mut exterior, dimensions, &mut queue);
+                        if filled {
+                            for &cell in &queue {
+                                shell[cell] = true;
                             }
                         }
                     }
@@ -942,6 +1030,13 @@ impl PreparedGeometry {
                 .and_then(|n| n.checked_add(instances.len())),
             max_work,
         )?;
+        Self::collect_surface_triangles(instances, total)
+    }
+
+    fn collect_surface_triangles(
+        instances: &[GeometryInstance<'_>],
+        total: usize,
+    ) -> Result<Vec<SurfaceTriangle>, crate::Error> {
         let mut triangles = Vec::new();
         triangles
             .try_reserve_exact(total)
@@ -1045,8 +1140,8 @@ impl PreparedGeometry {
         max_work: usize,
         flow: impl Fn(Vec3) -> Result<Vec3, crate::Error>,
     ) -> Result<PreparedSurfacePatches, crate::Error> {
-        // Counting, selecting a reference and constructing relative instances
-        // all visit every instance, even when its mesh has no triangles.
+        // Counting, selecting a reference, constructing relative instances
+        // and collecting triangles each visit every instance.
         check_surface_work(instances.len().checked_mul(4), max_work)?;
         let total = surface_triangle_count(instances)?;
         let preprocessing = sort_work_estimate(total)
@@ -1111,15 +1206,16 @@ impl PreparedGeometry {
                 ..*instance
             });
         }
-        let mut patches = self.surface_patches_in_frame(&relative, max_work, work, |point| {
-            let point = reference.transform_point(point);
-            if !point.is_finite() {
-                return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
-            }
-            inverse_rotation
-                .rotate_vector(flow(point)?)
-                .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))
-        })?;
+        let mut patches =
+            self.surface_patches_in_frame(&relative, total, max_work, work, |point| {
+                let point = reference.transform_point(point);
+                if !point.is_finite() {
+                    return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
+                }
+                inverse_rotation
+                    .rotate_vector(flow(point)?)
+                    .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))
+            })?;
         for patch in &mut patches.patches {
             patch.vertices = patch.vertices.map(|point| reference.transform_point(point));
             patch.center = reference.transform_point(patch.center);
@@ -1137,6 +1233,7 @@ impl PreparedGeometry {
     fn surface_patches_in_frame(
         &self,
         instances: &[GeometryInstance<'_>],
+        total: usize,
         max_work: usize,
         mut work: usize,
         flow: impl Fn(Vec3) -> Result<Vec3, crate::Error>,
@@ -1151,7 +1248,10 @@ impl PreparedGeometry {
         // Reserve the outer frame's vertex, center and normal transformations.
         const PATCH_FRAME_WORK: usize = 1;
 
-        let mut triangles = Self::surface_triangles(instances, max_work)?;
+        // Grid operations must receive the remainder of the same hard budget
+        // that is used to charge their work after they return.
+        let max_work = max_work.min(MAX_SURFACE_WORK);
+        let mut triangles = Self::collect_surface_triangles(instances, total)?;
         // Exact canonical vertex triples avoid centroid/area aliasing and
         // many-to-one epsilon matching. Winding remains in the source normal.
         for triangle in &mut triangles {
@@ -1191,7 +1291,9 @@ impl PreparedGeometry {
             let Some(initial) = visibility::windward_triangle(triangle.normal, velocities)? else {
                 continue;
             };
-            let initial_fraction = visibility::polygon_fraction(&initial)?;
+            let initial_fraction = visibility::polygon_fraction(&initial, |amount| {
+                charge_surface_work(&mut work, amount, max_work)
+            })?;
             if initial_fraction == 0.0 {
                 return Err(crate::Error::from(GeometryError::PrecisionLoss));
             }
@@ -1241,6 +1343,10 @@ impl PreparedGeometry {
                 .checked_add(query_work)
                 .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
             check_surface_work(Some(work), max_work)?;
+            let partition_start_work = work;
+            let mut exact_work = 0;
+            let mut next = Vec::new();
+            let mut distances = Vec::new();
             for j in candidates {
                 if i == j {
                     continue;
@@ -1252,7 +1358,12 @@ impl PreparedGeometry {
                     .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                 check_surface_work(Some(work), max_work)?;
                 let blocker = &triangles[j];
-                let Some(shadow) = visibility::Shadow::new(triangle, blocker, i, j, upstream)?
+                let Some(shadow) =
+                    visibility::Shadow::new(triangle, blocker, i, j, upstream, |amount| {
+                        charge_surface_work(&mut work, amount, max_work)?;
+                        exact_work += amount;
+                        Ok(())
+                    })?
                 else {
                     continue;
                 };
@@ -1262,53 +1373,69 @@ impl PreparedGeometry {
                     {
                         continue;
                     }
-                    let mut next = Vec::new();
-                    for polygon in pieces {
+                    for polygon in pieces.drain(..) {
                         let polygon_work = polygon
                             .len()
                             .checked_mul(CLIP_VERTEX_WORK)
                             .and_then(|n| n.checked_add(POLYGON_VISIT_WORK))
                             .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                         charge_surface_work(&mut work, polygon_work, max_work)?;
-                        let mut distances = Vec::new();
+                        distances.clear();
                         distances
                             .try_reserve_exact(polygon.len())
                             .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
+                        let crosses = |a: f64, b: f64| (a > 0.0 && b < 0.0) || (a < 0.0 && b > 0.0);
+                        let mut positive_count = 0;
+                        let mut negative_count = 0;
+                        let mut crossings = 0;
+                        let mut previous = 0.0;
                         for point in &polygon {
-                            let distance = visibility::distance(coefficients, *point)?;
+                            let distance = visibility::distance(coefficients, *point, |amount| {
+                                charge_surface_work(&mut work, amount, max_work)?;
+                                exact_work += amount;
+                                Ok(())
+                            })?;
+                            positive_count += usize::from(distance > 0.0);
+                            negative_count += usize::from(distance < 0.0);
+                            crossings += usize::from(crosses(previous, distance));
+                            previous = distance;
                             distances.push(distance);
                         }
-                        if !distances.iter().all(|d| d.is_finite()) {
-                            return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
-                        }
-                        if !distances.iter().any(|d| *d > 0.0)
-                            || !distances.iter().any(|d| *d < 0.0)
-                        {
+                        if positive_count == 0 || negative_count == 0 {
                             checked_push(&mut next, polygon)?;
                             continue;
                         }
+                        crossings += usize::from(crosses(previous, distances[0]));
+                        // The precharged vertex count bounds both reservations:
+                        // each side keeps at most n vertices and adds at most n crossings.
                         let mut positive = Vec::new();
                         let mut negative = Vec::new();
+                        positive
+                            .try_reserve_exact(polygon.len() - negative_count + crossings)
+                            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
+                        negative
+                            .try_reserve_exact(polygon.len() - positive_count + crossings)
+                            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
                         for k in 0..polygon.len() {
                             let n = (k + 1) % polygon.len();
                             let (d, e) = (distances[k], distances[n]);
                             if d >= 0.0 {
-                                checked_push(&mut positive, polygon[k])?;
+                                positive.push(polygon[k]);
                             }
                             if d <= 0.0 {
-                                checked_push(&mut negative, polygon[k])?;
+                                negative.push(polygon[k]);
                             }
-                            if (d > 0.0 && e < 0.0) || (d < 0.0 && e > 0.0) {
+                            if crosses(d, e) {
                                 let point =
                                     visibility::crossing_point(polygon[k], polygon[n], d, e)?;
-                                checked_push(&mut positive, point)?;
-                                checked_push(&mut negative, point)?;
+                                positive.push(point);
+                                negative.push(point);
                             }
                         }
                         checked_push(&mut next, positive)?;
                         checked_push(&mut next, negative)?;
                     }
-                    pieces = next;
+                    std::mem::swap(&mut pieces, &mut next);
                 }
                 checked_push(&mut shadows, shadow)?;
             }
@@ -1323,7 +1450,11 @@ impl PreparedGeometry {
                         .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                     check_surface_work(Some(work), max_work)?;
                     let coordinates = [polygon[0], polygon[k], polygon[k + 1]];
-                    let fraction = visibility::triangle_fraction(coordinates)?;
+                    let fraction = visibility::triangle_fraction(coordinates, |amount| {
+                        charge_surface_work(&mut work, amount, max_work)?;
+                        exact_work += amount;
+                        Ok(())
+                    })?;
                     partition_fraction.add(fraction);
                     let area = triangle.area * fraction;
                     let [a, b, c] = triangle.vertices;
@@ -1351,7 +1482,11 @@ impl PreparedGeometry {
                             .checked_add(1)
                             .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                         check_surface_work(Some(work), max_work)?;
-                        if shadow.covers(centroid)? {
+                        if shadow.covers(centroid, |amount| {
+                            charge_surface_work(&mut work, amount, max_work)?;
+                            exact_work += amount;
+                            Ok(())
+                        })? {
                             blocked = true;
                             break;
                         }
@@ -1372,10 +1507,11 @@ impl PreparedGeometry {
                 }
             }
             // Splitting must conserve the source's unit barycentric area.
-            // Heuristic consistency tolerance at the global charged-work scale.
-            // Unrelated preprocessing and previous sources contribute to work;
-            // this is not a proven numerical bound for the current partition.
-            let roundoff = work as f64 * f64::EPSILON;
+            // Heuristic consistency tolerance based on this source partition.
+            // Exact evaluation does not accumulate floating-point roundoff.
+            // The initial triangle contributes one unit even before clipping.
+            let partition_work = work - partition_start_work - exact_work;
+            let roundoff = (partition_work as f64 + 1.0) * f64::EPSILON;
             let allowance = roundoff / (1.0 - roundoff);
             let partition_fraction = partition_fraction.value();
             if !partition_fraction.is_finite()

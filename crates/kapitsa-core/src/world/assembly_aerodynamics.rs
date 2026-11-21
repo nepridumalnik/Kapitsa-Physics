@@ -452,6 +452,11 @@ pub(super) fn configured(
     })
 }
 
+pub(super) struct AssemblyEnvironment {
+    pub atmosphere: Atmosphere,
+    pub oriented_cavities: bool,
+}
+
 pub(super) fn prepare(
     body_id: BodyId,
     entry: &BodyEntry,
@@ -459,8 +464,9 @@ pub(super) fn prepare(
     geometry: Option<&HashMap<PartId, PartGeometry>>,
     colliders: &DensePool<super::ColliderEntry>,
     caches: &mut Option<HashMap<BodyId, AssemblyAerodynamics>>,
-    atmosphere: Atmosphere,
+    environment: AssemblyEnvironment,
 ) -> Result<Option<PreparedAssembly>, Error> {
+    let atmosphere = environment.atmosphere;
     let error = || StepError::Aerodynamics {
         body_id,
         cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow),
@@ -739,6 +745,12 @@ pub(super) fn prepare(
         wave_cache: PreparedGeometryCache::default(),
         wing_cache: Vec::new(),
     };
+    candidate
+        .cache
+        .set_oriented_cavities(environment.oriented_cavities);
+    candidate
+        .wave_cache
+        .set_oriented_cavities(environment.oriented_cavities);
     let prepared = evaluate(
         body_id,
         entry,
@@ -1008,6 +1020,37 @@ fn evaluate_pressure(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn assembly_rebuilds_occupancy_after_cavity_policy_switch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{aerodynamics::AtmosphericState, mass::MassProperties, rigid_body::RigidBody};
+        use kapitsa_math::Mat3;
+
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::X * -2_000.0,
+        )?));
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        let part = world.enable_cluster(body)?;
+        world.set_part_aerodynamic_mesh(
+            part,
+            Some(super::super::aerodynamics_tests::hollow_box_mesh()?),
+        )?;
+        for enabled in [false, true, false] {
+            world.set_assembly_mesh_oriented_cavities(enabled);
+            world.step(1e-8)?;
+            let occupancy = world
+                .assembly_aerodynamics
+                .as_ref()
+                .and_then(|caches| caches.get(&body))
+                .and_then(|cached| cached.cache.get())
+                .ok_or("assembly occupancy")?;
+            assert_eq!(occupancy.occupied_at(Vec3::ZERO)?, !enabled);
+        }
+        Ok(())
+    }
     use super::*;
     use crate::{
         aerodynamics::AtmosphericState,
@@ -1978,7 +2021,10 @@ mod tests {
                 world.part_aerodynamic_geometry.as_ref(),
                 &world.colliders,
                 &mut world.assembly_aerodynamics,
-                world.atmosphere,
+                AssemblyEnvironment {
+                    atmosphere: world.atmosphere,
+                    oriented_cavities: false,
+                },
             )?
             .ok_or("assembly")?;
             let patches = prepared.patches.ok_or("pressure patches")?;
@@ -2535,24 +2581,33 @@ mod tests {
             let before = world.body(id).ok_or("body")?.motion();
             assert!(step(&mut world).is_err());
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
-            let unsupported = world.add_part_collider(
+            let capsule = world.add_part_collider(
                 part,
                 Collider::new(
                     Shape::Capsule(Capsule::new(-Vec3::Z, Vec3::Z, 0.5)?),
                     Transform::identity(),
                 ),
             )?;
+            world.set_collider_tessellation(
+                id,
+                crate::aerodynamics::ColliderTessellation::new(12, 6, 1)?,
+            )?;
             assert_eq!(
                 step(&mut world),
                 Err(Error::from(StepError::Aerodynamics {
                     body_id: id,
                     cause: crate::Error::from(
-                        crate::aerodynamics::AerodynamicsError::UnsupportedModel
+                        crate::aerodynamics::AerodynamicsError::TessellationBudgetExceeded
                     )
                 }))
             );
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
-            world.remove_part_collider(unsupported)?;
+            world.set_collider_tessellation(
+                id,
+                crate::aerodynamics::ColliderTessellation::new(12, 6, 1024)?,
+            )?;
+            step(&mut world)?;
+            world.remove_part_collider(capsule)?;
             world.set_part_aerodynamic_mesh(part, Some(plate()?))?;
             assert!(!world.part_uses_aerodynamic_colliders(part));
             step(&mut world)?;
@@ -2770,7 +2825,10 @@ mod tests {
                     world.part_aerodynamic_geometry.as_ref(),
                     &world.colliders,
                     &mut world.assembly_aerodynamics,
-                    world.atmosphere,
+                    AssemblyEnvironment {
+                        atmosphere: world.atmosphere,
+                        oriented_cavities: false,
+                    },
                 )?
                 .ok_or("prepared assembly")?
                 .patches

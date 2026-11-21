@@ -28,8 +28,9 @@ pub mod aerodynamics {
     pub use kapitsa_core::aerodynamics::{
         AerodynamicForce, AerodynamicProperties, AerodynamicSurface, AerodynamicTarget,
         Aerodynamics, AerodynamicsError, AerodynamicsTask, Atmosphere, AtmosphericState,
-        ColliderTessellation, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder,
-        cache, colliders, geometry, hull, pressure, slender, wave, wing,
+        ColliderTessellation, DensityProfile, MeshPressureModel, SphericalAtmosphere,
+        SphericalAtmosphereBuilder, cache, colliders, geometry, hull, potential, pressure, slender,
+        vlm, wave, wing,
     };
 }
 

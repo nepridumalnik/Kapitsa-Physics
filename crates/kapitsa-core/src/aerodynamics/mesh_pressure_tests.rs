@@ -62,6 +62,54 @@ fn close(actual: Vec3, expected: Vec3) {
 }
 
 #[test]
+fn prepared_modified_newtonian_matches_patch_and_owner_models()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]])?;
+    let patches = prepare(&mesh, Vec3::X);
+    assert_eq!(patches.len(), 1);
+    let mut input = flow();
+    input.sound_speed = 340.0;
+    input.linear_velocity = Vec3::X * 100.0;
+    let total = evaluate_prepared_mesh_modified_newtonian(&patches, input)?;
+    let only = patches.iter().next().ok_or("patch")?;
+    let patch = PressurePatch::new(only.center, only.normal, only.area)?;
+    let expected = patch.evaluate_modified_newtonian(input)?;
+    close(total.force, expected.force);
+    close(total.moment, expected.moment);
+    assert!(total.force.x < 0.0);
+
+    let by_owner = evaluate_prepared_mesh_by_owner_with_model(
+        &patches,
+        input,
+        MeshPressureModel::ModifiedNewtonian,
+    )?;
+    assert_eq!(by_owner.len(), 1);
+    assert_eq!(by_owner[0].0, GeometryOwner::Body);
+    close(by_owner[0].1.force, total.force);
+    close(by_owner[0].1.moment, total.moment);
+
+    let mut workspace = OwnerPressureWorkspace::new(&[GeometryOwner::Body]).ok_or("owners")?;
+    workspace.set_pressure_model(MeshPressureModel::ModifiedNewtonian);
+    workspace.prepare(&patches, input)?;
+    let staged = workspace.staged_total()?.ok_or("staged")?;
+    close(staged.force, total.force);
+    close(staged.moment, total.moment);
+
+    let mut hypersonic = input;
+    hypersonic.sound_speed = 10.0;
+    assert_eq!(
+        evaluate_prepared_mesh_modified_newtonian(&patches, hypersonic),
+        Err(crate::Error::from(PressureError::UnsupportedMach))
+    );
+    // The default model still rejects this subsonic prepared set.
+    assert_eq!(
+        evaluate_prepared_mesh(&patches, input),
+        Err(crate::Error::from(PressureError::UnsupportedMach))
+    );
+    Ok(())
+}
+
+#[test]
 fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::{mass::MassProperties, rigid_body::RigidBody, world::PhysicsWorld};
@@ -584,6 +632,118 @@ fn prepared_cube_has_opposing_drag_and_symmetric_com_moment() {
     let nested_result = evaluate_prepared_mesh(&prepare(&nested, Vec3::X), state).unwrap();
     close(nested_result.force, result.force);
     close(nested_result.moment, result.moment);
+}
+
+#[test]
+fn empirical_base_pressure_loads_rear_patches_and_rejects_missing_base() {
+    let mesh = TriangleMesh::new(
+        vec![
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::ONE,
+            Vec3::new(0.0, 1.0, 1.0),
+        ],
+        vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 7, 6],
+            [3, 6, 2],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ],
+    )
+    .unwrap();
+    let rear = prepare(&mesh, -Vec3::X);
+    assert_eq!(rear.len(), 2);
+    assert!(rear.iter().all(|patch| patch.normal.x < 0.0));
+    let state = PressureFlow {
+        center_of_mass: Vec3::splat(0.5),
+        linear_velocity: Vec3::X * 300.0,
+        ..flow()
+    };
+    let base = EmpiricalBasePressure::new(1.0).unwrap();
+    let surface = evaluate_prepared_mesh_modified_newtonian(&rear, state).unwrap();
+    assert_eq!(surface.force, Vec3::ZERO);
+    let total = evaluate_prepared_mesh_with_empirical_base(
+        &rear,
+        state,
+        MeshPressureModel::ModifiedNewtonian,
+        base,
+    )
+    .unwrap();
+    let magnitude = 0.5 * 300.0 * 300.0 * 0.097;
+    close(total.force, -Vec3::X * magnitude);
+    close(total.moment, Vec3::ZERO);
+    let closed = closed_mesh_pressure_patches(&mesh).unwrap();
+    let axial = evaluate_empirical_base_patches(&closed, state, base).unwrap();
+    close(axial.force, -Vec3::X * magnitude);
+    close(axial.moment, Vec3::ZERO);
+
+    let relieved = evaluate_prepared_mesh_with_empirical_base(
+        &rear,
+        state,
+        MeshPressureModel::ModifiedNewtonian,
+        EmpiricalBasePressure::new(0.5).unwrap(),
+    )
+    .unwrap();
+    assert!(relieved.force.x > total.force.x);
+    assert!(relieved.force.x < 0.0);
+
+    let front = prepare(&mesh, Vec3::X);
+    assert_eq!(
+        evaluate_prepared_mesh_with_empirical_base(
+            &front,
+            state,
+            MeshPressureModel::ModifiedNewtonian,
+            base,
+        ),
+        Err(crate::Error::from(PressureError::UnsupportedGeometry))
+    );
+    assert_eq!(
+        evaluate_prepared_mesh_with_empirical_base(
+            &rear,
+            PressureFlow {
+                linear_velocity: Vec3::X * 50.0,
+                ..state
+            },
+            MeshPressureModel::ModifiedNewtonian,
+            base,
+        ),
+        Err(crate::Error::from(PressureError::UnsupportedMach))
+    );
+    assert_eq!(
+        evaluate_prepared_mesh_with_empirical_base(
+            &rear,
+            PressureFlow {
+                linear_velocity: Vec3::ZERO,
+                ..state
+            },
+            MeshPressureModel::ModifiedNewtonian,
+            base,
+        )
+        .unwrap()
+        .force,
+        Vec3::ZERO
+    );
+    assert_eq!(
+        evaluate_prepared_mesh_with_empirical_base(
+            &rear,
+            state,
+            MeshPressureModel::PotentialFlow,
+            base,
+        ),
+        Err(crate::Error::from(PressureError::UnsupportedGeometry))
+    );
 }
 
 #[test]

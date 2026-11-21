@@ -9,7 +9,7 @@ mod epa;
 mod error;
 mod event;
 mod gjk;
-mod height_field;
+pub(crate) mod height_field;
 mod island;
 mod level_set;
 mod manifold;

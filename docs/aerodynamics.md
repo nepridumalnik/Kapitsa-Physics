@@ -38,17 +38,35 @@ Overlaps count once; the lowest `GeometryOwner` wins attribution ties, independe
 
 `max_cells` and `max_work` are mandatory budgets, with hard ceilings of 1,048,576 cells and 100,000,000 work units. Preparation bounds triangle/box tests, input vertex scans and per-instance cell scans before allocating the grid; edge closure sorting adds `O(triangles log triangles)` work. Triangle/box tests are restricted to each triangle's conservative grid-index bounds; per-instance occupancy and flood-fill passes still traverse the grid. The scalar baseline is measured in [the aerodynamic benchmark report](../benchmarks/aerodynamics.md). Allocation failures and invalid/unrepresentable input are explicit errors. This preparation primitive supplies no SIMD or background cache publication; world force integration and collider conversion are described below. World movement and center-of-mass edits do not change the prepared local geometry; construction edits require an explicit new preparation.
 
+`PreparedGeometry::prepare_with_oriented_cavities` offers cavity-aware occupancy
+for closed meshes. Oppositely oriented inner walls must belong to the same
+instance as the enclosing shell. The method sums [signed triangle solid
+angles](https://users.cs.utah.edu/~ladislav/jacobson13robust/jacobson13robust.pdf)
+once per six-connected region enclosed by the voxel shell, then fills regions
+with nonzero winding number. Surface cells remain occupied. The work budget
+reserves the region traversal before allocation and charges each winding
+evaluation before testing its source triangles.
+The existing `prepare` entry point and automatic world preparation default to
+solid fill. `PhysicsWorld::set_body_mesh_oriented_cavities(true)` enables the
+alternative for primary `Mesh` and `Colliders` geometry on non-cluster bodies.
+Changing the rule rebuilds prepared occupancy on the next step that uses it.
+`PhysicsWorld::set_assembly_mesh_oriented_cavities(true)` enables the same rule
+for assembly geometry used by pressure, wave drag and wing shielding. The rule
+is applied to each source instance before composing the assembly's union.
+`Simulation::builder().oriented_aerodynamic_cavities(true)` enables both
+settings at startup on Tokio and Rayon.
+
 References for geometric concepts: [Voxel](https://en.wikipedia.org/wiki/Voxel), [Hyperplane separation theorem — separating axis theorem](https://en.wikipedia.org/wiki/Hyperplane_separation_theorem), [Flood fill](https://en.wikipedia.org/wiki/Flood_fill). No FAR implementation code is used.
 
 ## World Mesh and Colliders integration
 
-Non-cluster dynamic bodies support `Aerodynamics::Mesh` and `Aerodynamics::Colliders` through `PreparedGeometryCache`, direction-dependent exposed physical patches, and the pressure evaluator. The current pressure policy requires Mach >= 5 and samples primary atmosphere at the COM. An optional atmospheric sound-speed profile supplies local values; otherwise `PhysicsWorld::set_mesh_sound_speed` and `SimulationBuilder::mesh_sound_speed` configure the uniform fallback in m/s. The fallback defaults to 340 m/s and is not inferred from density. Both Tokio and Rayon builders apply it before service start. Additional explicit surfaces sample their own positions even when the COM is outside the atmosphere. Existing cluster bodies use explicit per-part geometry configuration. Converting a body with Mesh or Colliders into a cluster transfers its primary geometry model to the root part.
+Non-cluster dynamic bodies support `Aerodynamics::Mesh` and `Aerodynamics::Colliders` through `PreparedGeometryCache`, direction-dependent exposed physical patches, and the pressure evaluator. The default pressure policy is unmodified Newtonian impact pressure and requires Mach >= 5; `PhysicsWorld::set_mesh_pressure_model` and `SimulationBuilder::mesh_pressure_model` can explicitly select the documented modified Newtonian compression model for `0 <= Mach <= 5`. Primary atmosphere is sampled at the COM. An optional atmospheric sound-speed profile supplies local values; otherwise `PhysicsWorld::set_mesh_sound_speed` and `SimulationBuilder::mesh_sound_speed` configure the uniform fallback in m/s. The fallback defaults to 340 m/s and is not inferred from density. Both Tokio and Rayon builders apply these settings before service start. Additional explicit surfaces sample their own positions even when the COM is outside the atmosphere. Existing cluster bodies use explicit per-part geometry configuration. Converting a body with Mesh or Colliders into a cluster transfers its primary geometry model to the root part.
 
 Each geometry-bearing primary configuration has a private shared identity token. Replacing a model or the whole `RigidBody` changes identity; world motion, COM edits and edits to other bodies do not. Prepared world entries compare identity before use and discard both the cache and collider-derived mesh on mismatch. The token remains alive in the cached entry, preventing allocator-address ABA. Collider topology and tessellation mutations retain their explicit per-body invalidation. Global motion `body_revision` is no longer used as geometry identity.
 
-Collider geometry is derived from actual attached surfaces in body-local coordinates, including each collider's local rigid transform. Supported shapes are finite `Cuboid` (12 outward triangles), `Sphere` (latitude/longitude tessellation), `Cylinder` (endpoint axis with planar caps), `Convex` (indexed faces), `Triangle`, and `TriangleMesh` (source winding). Sensors are included, just like solid colliders. The world collision API independently restricts dynamic collider attachment to its supported convex shapes; conversion does not relax that restriction. Plane, HeightField, LevelSet, SkinnedTriangleMesh, Capsule, tapered shapes and any other unsupported shape return `UnsupportedModel`, with no AABB fallback. Empty collider sets also return `UnsupportedModel` in air.
+Collider geometry is derived from actual attached surfaces in body-local coordinates, including each collider's local rigid transform. Supported shapes are finite `Cuboid` (12 outward triangles), `Sphere` (latitude/longitude tessellation), `Cylinder` and `TaperedCylinder` (endpoint axis with planar caps), `Capsule` (a cylindrical barrel and hemispherical end caps), `TaperedCapsule` (the convex hull of two endpoint spheres joined along their common tangent), `Convex` (indexed faces), `Triangle`, `TriangleMesh` and `SkinnedTriangleMesh` (source winding and current committed vertices), `HeightField` (two collision triangles per cell with open-surface semantics), and `LevelSet` (piecewise-linear zero isosurface). Sensors are included, just like solid colliders. The world collision API independently restricts dynamic collider attachment to its supported convex shapes; conversion does not relax that restriction. Plane and any other unsupported shape return `UnsupportedModel`, with no AABB fallback. Empty collider sets also return `UnsupportedModel` in air.
 
-`ColliderTessellation::new(radial_segments, sphere_rings, max_triangles)` validates 3..=128 radial segments, 3..=128 sphere rings (including poles), and 1..=65,536 aggregate triangles per body. Defaults are 16 segments, 8 rings, and 16,384 triangles. Budget exhaustion returns `TessellationBudgetExceeded` before emitting an over-budget shape. Referenced source faces, rather than unreferenced vertex arrays, are copied; allocation failures and unrepresentable transformed triangles are errors. `PhysicsWorld::set_collider_tessellation` changes a body's settings and invalidates preparation. Collider insertion, removal and mutable access invalidate that body's derived geometry/cache; motion and world pose do not. The pressure exposure is regenerated for each step's upstream direction (from each patch toward the oncoming air); fluid velocity is the opposite direction. Collider-derived triangle seams use explicit 1e-10 positional welding for closure detection and `SurfaceOnly` for open geometry. Existing voxel budgets (1,048,576 cells, 100,000,000 work units), 0.125 m cells and 0.01 m exposure epsilon still apply and may reject large or complex bodies independently of the tessellation budget.
+`ColliderTessellation::new(radial_segments, sphere_rings, max_triangles)` validates 3..=128 radial segments, 3..=128 sphere rings (including poles), and 1..=65,536 aggregate triangles per body. Defaults are 16 segments, 8 rings, and 16,384 triangles. A capsule uses `sphere_rings / 2` latitude intervals per cap, from the pole to the rim where the cap meets the side. Its triangle count is `4 * radial_segments * (sphere_rings / 2)`. Level-set tessellation treats negative samples as inside and splits each cell into six tetrahedra. Its piecewise-linear surface can differ from the trilinear collision surface. Level-set extraction caps the cumulative input at 65,536 grid cells per body and counts emitted triangles before allocating output. Cells with no sign boundary consume only the cell budget. Budget exhaustion returns `TessellationBudgetExceeded` before emitting an over-budget shape. Referenced source faces, rather than unreferenced vertex arrays, are copied; allocation failures and unrepresentable transformed triangles are errors. `PhysicsWorld::set_collider_tessellation` changes a body's settings and invalidates preparation. Collider insertion, removal, mutable access and committed skin pose updates invalidate that body's derived geometry/cache; motion and world pose do not. The pressure exposure is regenerated for each step's upstream direction (from each patch toward the oncoming air); fluid velocity is the opposite direction. Collider-derived triangle seams use explicit 1e-10 positional welding for closure detection and `SurfaceOnly` for open geometry. Existing voxel budgets (1,048,576 cells, 100,000,000 work units), 0.125 m cells and 0.01 m exposure epsilon still apply and may reject large or complex bodies independently of the tessellation budget.
 
 This is a faceted, scalar hypersonic approximation, not an analytic sphere/cylinder fluid solution. Resolution affects forces as well as geometry. Overlapping colliders are prepared together; duplicate surfaces and occlusion use the same conservative occupancy rules as Mesh. No wing, SIMD or transonic model is introduced.
 
@@ -62,7 +80,7 @@ One body-wide `ColliderTessellation` applies to collider parts, including its ag
 
 A preparation entry compares instance membership, mesh identity and part-local transforms. Changed unions are prepared in temporary entries and published only on success. Failed preparation does not apply partial forces. Collider transforms are already body-local after conversion and are not applied twice. When collider sources are present, the existing 1e-10 positional welding tolerance is used for closure checks across all instances; it does not move pressure vertices, change source normals or offset shadow rays. Geometry failures retain their `GeometryError` through `AerodynamicsError::Geometry` and its error source.
 
-Part pressure currently retains Mach >= 5, COM atmosphere sampling and centroid rotational-flow quadrature. Vacuum skips preparation. Tests cover ordinary/sharded paths, mixed Mesh/Colliders assemblies, merge/split, overlap ownership, triangle budgets, configuration replacement, preparation errors, cleanup, and runtime commands on Tokio/Rayon. General physical equivalence to FAR is not established; the explicit subsonic hull and wing models below do not supply transonic hull physics.
+Part pressure retains COM atmosphere sampling and centroid rotational-flow quadrature; the world-selected Mesh/Colliders closure applies to primary and part geometry, with the default Newtonian Mach >= 5 policy and the opt-in modified Newtonian `0 <= Mach <= 5` model. Vacuum skips preparation. Tests cover ordinary/sharded paths, mixed Mesh/Colliders assemblies, merge/split, overlap ownership, triangle budgets, configuration replacement, preparation errors, cleanup, and runtime commands on Tokio/Rayon. General physical equivalence to FAR is not established; the explicit subsonic hull and wing models below do not supply transonic hull physics.
 
 ## Conventions
 
@@ -122,9 +140,10 @@ No borrowed world references or mutable shared configuration cross the queue.
 The setters do not change physical models, infer coefficients, exclude overlapping
 loads or alter topology ownership.
 
-The part-owned, data-driven Mach and runtime API extensions are **unverified**:
-source inspection and formatting only; their regression tests and workspace
-compilation were not run, at the user's request.
+The part-owned, data-driven Mach and runtime API extensions are covered by core
+and client regression tests, including ordered command replacement and
+stale/foreign part rejection. Those tests verify API behavior, not physical
+accuracy.
 
 For world axis `a`, split relative velocity into `u_axial = a (v · a)` and
 `u_cross = v - u_axial`. Each component contributes
@@ -172,7 +191,8 @@ incidence, force-sign and full-speed reference-pressure convention; a signed
 planar lift table cannot be used unchanged. Regression tests cover incidence,
 domain handling and interpolation, including numerical extremes; these are checks
 of the implementation, not independent physical validation. No automatic lift or
-predictive transonic closure is supplied by this hull table. The separate Newtonian
+predictive transonic closure is supplied by that normal-force table; the separate
+opt-in predictive transonic estimate is described below. The separate Newtonian
 pressure and wing models have their own documented applicability limits. The same [drag equation](https://en.wikipedia.org/wiki/Drag_equation),
 [Mach number](https://en.wikipedia.org/wiki/Mach_number), and [angle of attack](https://en.wikipedia.org/wiki/Angle_of_attack)
 references define quantities, not coefficient data. Supply measured or
@@ -185,17 +205,88 @@ data: [drag coefficient](https://en.wikipedia.org/wiki/Drag_coefficient),
 [transonic](https://en.wikipedia.org/wiki/Transonic).
 
 Optional `SkinFriction::new` requires explicit positive
-finite dynamic viscosity, `BoundaryLayer::Laminar` or `Turbulent`, and positive
-finite inclusive Reynolds bounds. It uses `Re_L = rho |v · a| L / mu` and the
+finite fallback dynamic viscosity, `BoundaryLayer::Laminar` or `Turbulent`, and
+positive finite inclusive Reynolds bounds. If configured, the atmosphere's
+dynamic viscosity at the section's sampling point overrides the fallback.
+The model uses `Re_L = rho |v · a| L / mu` and the
 mean flat-plate coefficients derived in [Skin friction](#skin-friction):
 `Cf = 1.328 / sqrt(Re_L)` or `0.072 / Re_L^0.2`. Friction opposes axial flow
 only; length is per-section development length, not accumulated automatically.
-No transition threshold or mixed-regime closure is inferred. Zero axial speed
+`SkinFriction::transitioned_flat_plate` is a separate Prandtl–Schlichting
+correlation for a smooth plate at zero incidence with transition near
+`Re = 500,000`. It accepts `500,000 < Re < 100,000,000` and total Mach ≤ 0.3.
+See [NASA/TP-2006-213486, section 1.5](https://ntrs.nasa.gov/api/citations/20060053240/downloads/20060053240.pdf).
+The transition point is prescribed by the correlation. The transitioned plate
+rejects crossflow beyond the rounding error of an axial projection.
+For the other friction models, zero axial speed
 skips friction and its Reynolds check. Omitting friction is inviscid. These
 flat-plate correlations are incompressible only: an enabled wetted friction load
 above total Mach 0.3 returns `UnsupportedSkinFrictionMach`, even with an explicit
-Mach Cd curve and zero axial speed. No compressible viscosity correlation is
-available; viscosity alone cannot enable one. Vacuum and fully disabled loads
+Mach Cd curve and zero axial speed. For smooth sections with an attached, fully
+turbulent boundary layer, opt into `SkinFriction::compressible_turbulent`.
+It uses [the corrected Schlichting correlation, equation (51)](https://ntrs.nasa.gov/api/citations/20000069005/downloads/20000069005.pdf)
+with axial Mach, a total Mach limit of 0.95, and caller-supplied inclusive Re
+bounds within 1–100 million. These are implementation limits. The model
+does not infer transition, pressure gradients or surface roughness.
+
+`SkinFriction::rough_turbulent(dynamic_viscosity, sand_grain_roughness,
+min_reynolds, max_reynolds)` is a fully rough Prandtl–Schlichting mean
+flat-plate model. With `L` the section development length and `ks` the
+equivalent sand-grain roughness in metres,
+`Cf = [1.89 + 1.62 log10(L/ks)]^-2.5`, following White, *Fluid Mechanics*,
+7th ed., equation (7.48b). The accepted domain is `100 <= L/ks <= 1e6` and
+total Mach ≤ 0.3; outside the roughness ratio it returns
+`UnsupportedRoughness`. Reynolds number is checked against the caller's
+inclusive bounds but does not enter the fully rough coefficient. `ks` is a
+hydraulic equivalent sand-grain scale determined from roughness data, not a
+geometric height. The model applies only to a fully turbulent, hydraulically
+fully rough boundary layer: it does not blend the smooth or transitionally
+rough regimes, infer transition, predict pressure gradients, shock-boundary-
+layer interaction or real-gas properties, and is not experimentally validated
+here.
+
+`SkinFriction::high_speed_laminar` is a separate Eckert reference-temperature
+model for attached laminar flat-plate flow from low subsonic through hypersonic
+Mach numbers. It assumes air with `gamma = 1.4`, `R = 287.05 J/(kg K)`, a
+recovery factor `r = sqrt(Pr) = sqrt(0.72)` and Sutherland viscosity with
+`S = 110.4 K`. The edge temperature follows from the supplied sound speed under
+constant pressure, so this is not a temperature or real-gas model. The caller
+supplies `Tw / Taw` in `(0, 10]`; one selects the adiabatic wall. The reference
+temperature follows [Eckert's air relation, NASA CR-1966-12405](https://ntrs.nasa.gov/api/citations/19660012405/downloads/19660012405.pdf):
+`T* / Te = 0.5 + 0.5 Tw / Te + 0.22 (Tr / Te - 1)`.
+The mean coefficient is `Cf = 1.328 C / sqrt(Re_L)`, where
+`C = sqrt((rho*/rho_e)(mu*/mu_e))`, `rho*/rho_e = Te/T*` and Sutherland supplies
+`mu*/mu_e`. It accepts total Mach ≤ 10 and caller-selected inclusive Re bounds
+within 10 thousand to 100 million. These are implementation limits. The model
+does not infer transition, roughness, pressure gradients, shock-boundary-layer
+interaction, wall heat transfer or real-gas properties. Passing through Mach 1
+is a property of the correlation, not validation against transonic shock data.
+The caller must establish attached laminar flow.
+
+`SkinFriction::high_speed_turbulent` is the corresponding van Driest II
+transformation with the Kármán–Schoenherr incompressible mean coefficient,
+following [NASA TN D-6945, equations 1–15](https://ntrs.nasa.gov/api/citations/19730001588/downloads/19730001588.pdf).
+It uses the same air properties, `r = 0.88`, Sutherland viscosity and
+`Tw / Taw` input as the laminar model. The transformed Reynolds number follows
+the report's `Fx = Ftheta Fc` length-Reynolds approximation, and
+`Cf = CF_bar / Fc`; the scalar Kármán–Schoenherr solve uses bounded bisection.
+It accepts total Mach ≤ 5 and caller-selected inclusive Re bounds within
+1–100 million. The same excluded effects apply, and strongly cooled walls,
+separation and shock-boundary-layer interaction are outside its validated
+range. The five-Mach limit is an engineering bound for this implementation,
+not a claim that the correlation stops being defined above it. Neither
+high-speed model supplies transition, roughness or real-gas closure.
+
+For a diagnostic comparison with the local shear measurements in
+[NACA TN 3486, table I](https://ntrs.nasa.gov/api/citations/19930084308/downloads/19930084308.pdf),
+differentiate `x Cf_mean` at fixed Mach and constant freestream properties.
+The resulting local coefficient overpredicts the three measured points at
+Mach 0.65, 0.75 and 0.85 by 6.03%, 14.25% and 11.11%, respectively. The table
+uses Reynolds number based on distance from the trip. Its Mach 0.97 point
+has a supersonic region near the leading edge, outside the model assumptions.
+These data do not establish an extension of the mean-friction model across Mach 1.
+
+Vacuum and fully disabled loads
 still skip these domain checks.
 
 Finite kinematics and positive finite sound speed are validated even in vacuum
@@ -207,10 +298,44 @@ pressure or Reynolds numerators need not fit when the complete result does;
 truly nonfinite loads still fail rather than being clamped or discarded.
 
 The empirical sectional resistance alone is **not potential-flow normal force or
-lift**, predictive transonic continuation, area-rule wave drag, interference,
-shielding, separation prediction or FAR equivalence. Geometry/voxel preparation does not
-infer these empirical hull coefficients or automatically generate these resistance sections. Explicit
+lift**, area-rule wave drag, interference, shielding, separation prediction or
+FAR equivalence. Geometry/voxel preparation does not infer these empirical hull
+coefficients or automatically generate these resistance sections. Explicit
 wings are separate; callers must avoid counting a physical contribution twice.
+
+### Predictive transonic hull drag rise
+
+`HullSection::with_transonic_drag_rise(technology_factor, equivalent_length)`
+adds an opt-in equivalent-section transonic increment. `equivalent_length` is
+the physical section/body length, not the friction development length from
+`HullSection::new`. The critical Mach is estimated from the
+section's axial area and development length with the zero-lift
+[Korn equation](https://archive.aoe.vt.edu/mason/Mason_f/ConfigAeroTransonics.pdf),
+section 7.5.2:
+`t/c = 2 sqrt(A_axial / pi) / L`, where `A_axial` must be the physical section
+cross-sectional area rather than an arbitrary reference area; `Mdd = kappa - t/c`, and
+`Mcrit = Mdd - (0.1/80)^(1/3)`. The drag rise follows Lock's empirical shape,
+`dCd = 20 (M - Mcrit)^4`, for `Mcrit < M <= 1.05`. Between Mach 1.05 and 1.2 a
+C1 cubic handoff decays the increment to zero; above Mach 1.2 it contributes
+nothing, leaving the separate supersonic wave model to take over.
+
+The increment is referenced to `A_axial` and acts opposite axial flow:
+`F = -0.5 rho |u_axial|^2 A_axial dCd` along the axial direction. It uses axial
+Mach and axial speed; pure crossflow produces no transonic increment. The
+technology factor is the Korn section factor, typically 0.87 for a conventional
+NACA 6-series section or 0.95 for a supercritical section. It must be finite and
+in `[0.5, 1]`. Geometry producing `Mcrit <= 0` or `Mcrit >= 1`, zero axial
+area, or an invalid section length returns `InvalidTransonicGeometry`.
+
+This is an equivalent airfoil-section correlation applied to a hull section,
+not a body-of-revolution transonic small-disturbance solver. It does not model
+lift-dependent critical Mach, sweep, area-rule interference, separation,
+shock-boundary-layer interaction, roughness, real-gas effects or an
+experimentally validated peak drag. The cubic handoff is an explicit engineering
+boundary, not measured data. Do not combine it with a separate wave-drag curve
+or caller Mach curve over the same interval without checking double counting.
+Predicted `Mcrit` and the increment are geometry-derived estimates, not
+independent validation.
 
 ### Steady slender-body normal loads
 
@@ -265,30 +390,267 @@ This is a hypersonic impact approximation. It must **not** be represented as FAR
 
 Modified Newtonian theory replaces `2` with a stagnation pressure coefficient; it requires appropriate gas and Mach data. Do not infer those from density alone.
 
+### Modified Newtonian compression below Mach 5
+
+`MeshPressureModel::ModifiedNewtonian` is an explicit opt-in closure for
+`0 <= Mach <= 5`. Select it with `PhysicsWorld::set_mesh_pressure_model` or
+`SimulationBuilder::mesh_pressure_model`; the default remains the unmodified
+Newtonian model above. It keeps the same prepared exposed windward patches and
+uses
+`Cp = Cp_max(M) max(0, n · v_hat)²`, with force
+`F = -0.5 rho |v|² Cp A n` and moment about the COM. Leeward patches carry zero
+excess pressure. This is a compression-only impact model, not a potential-flow
+panel solution.
+
+For calorically perfect air with `gamma = 1.4`, `Cp_max(M)` is the stagnation
+pressure coefficient. Below Mach 1 it follows isentropic stagnation,
+`Cp_max = ((1 + 0.2 M²)^3.5 - 1) / (0.7 M²)`, with the limit one at `M = 0`.
+From Mach 1 through 5 it uses the Rayleigh pitot value behind a normal shock:
+`p2/p1 = (2 gamma M² - (gamma - 1)) / (gamma + 1)`,
+`M2² = ((gamma - 1) M² + 2) / (2 gamma M² - (gamma - 1))`, and
+`Cp_max = ((p2/p1) (1 + 0.2 M2²)^3.5 - 1) / (0.7 M²)`. The branches agree at
+Mach 1 (`Cp_max = 1.275613...`). At Mach 5 the modified value is
+`1.808770...`, while the unmodified default uses `2`; the handoff is a
+coefficient step, not a blended closure. Select one model for a run and do not
+treat Mach 5 as a continuous accuracy boundary.
+
+The model assumes steady uniform flow, attached compression surfaces,
+calorically perfect air and negligible real-gas, rarefaction or viscous effects.
+It does not supply attached-flow suction, a potential-flow lift distribution,
+wake or base flow, friction, interference, shock-boundary-layer interaction or
+experimental accuracy. Above Mach 5 a finite flow returns
+`PressureError::UnsupportedMach` and the world step rolls back atomically.
+Vacuum, zero-area patches and zero relative speed return zero loads after
+motion and sound-speed validation; invalid geometry, motion, sound speed and
+unrepresentable arithmetic are explicit errors.
+
+### Bounded potential-flow panel model
+
+`MeshPressureModel::PotentialFlow` is an explicit opt-in incompressible
+source-panel model for a closed, isolated primary `Mesh` or `Colliders` body.
+It assigns one constant-strength source panel to each triangle, solves the
+no-penetration system with dense Gaussian elimination, and evaluates
+`Cp = 1 - |v_t|² / |V_i|²` from the local tangential surface velocity. The
+panel-local flow is `V_i = V + omega × (x_i - x_COM)`, and the local dynamic
+pressure is `0.5 rho |V_i|²`. This is a quasi-steady rigid-body rotation
+approximation: the freestream gradient across a panel and unsteady added-mass
+terms are not resolved. Force is `-q_i Cp A n` with moment about the COM. This
+supplies attached pressure and suction from the geometry itself, including
+non-lifting lateral force on asymmetric bodies.
+
+The explicit domain is:
+
+- local panel Mach ≤ 0.2 and steady incompressible flow with quasi-steady
+  rigid-body rotation;
+- one closed, outward-wound triangle mesh with at most 256 triangles;
+- no cluster/part assembly, no overlapping or internal surfaces, no wind
+  gradient or separate wake;
+- no Kutta condition, circulation, boundary layer, separation, roughness or
+  base pressure.
+
+The panel system is rebuilt for each evaluation with `O(N³)` solve and `O(N²)`
+scratch storage; the panel budget is deliberate. An open, reversed, disconnected
+or oversized mesh returns `InvalidPatch` or `WorkBudgetExceeded`; local Mach
+above 0.2 returns `UnsupportedMach`; nonfinite motion returns `InvalidMotion`;
+unsupported geometry returns `UnsupportedGeometry`. Cluster/part geometry
+returns `UnsupportedModel`.
+Allocation and singular-system failures are explicit `ArithmeticOverflow`
+errors, never partial loads. Per-owner pressure diagnostics are not staged for
+this model. The sphere net-force regression is a model consistency check, not
+experimental validation. For lifting wings use `WingPolar` or `FiniteWing`;
+this panel model has no wake or Kutta condition.
+
+### Kutta lifting-line for closed thin wing meshes
+
+`MeshPressureModel::KuttaLifting` bridges a closed thin wing mesh to the
+finite-wing lifting-line primitive. It measures span along body-local `+Y`,
+chord along `+X`, thickness along `+Z`, and projected planform area from the
+mesh triangles. The quarter-chord point becomes the load application point;
+planform aspect ratio is `span² / area`; the lifting-line slope, induced drag,
+zero-lift angle and attached-flow limit are the standard `FiniteWing` values
+with efficiency 0.8 and zero profile drag. The trailing-vortex wake and Kutta
+condition are those implied by the lifting line.
+
+The geometry domain is strict: one closed, outward-wound, uncambered thin wing
+with `span >= chord`, `thickness <= 0.15 span`, Mach <= 0.3 and the usual
+attached-flow incidence limit. Non-closed geometry returns `InvalidPatch`,
+non-wing-like bounds return `UnsupportedGeometry`, and Mach/incidence limits
+return the `FiniteWing` flow error. This is not a three-dimensional Kutta panel
+method: camber, sweep, taper, tip relief, finite thickness, separated wakes,
+control surfaces and spanwise load detail are not resolved. The existing COM
+atmosphere sample is used. Per-owner pressure diagnostics are not staged. Use
+`WingPolar` for measured or CFD lifting data.
+
+### Vortex-lattice wing model
+
+`MeshPressureModel::VortexLattice` implements a bounded three-dimensional
+horseshoe-vortex lattice on a closed thin wing mesh. A 3 chordwise by 6 spanwise
+lattice is extracted from the mesh: local leading and trailing edges capture
+sweep and taper, sampled mean height approximates camber, and finite span
+endpoints give tip relief. Each panel has a bound quarter-chord leg and two
+flat trailing legs to a distant downstream station. Circulation solves the
+no-penetration condition at three-quarter-chord control points, so the wake
+imposes the Kutta condition. Panel forces use Kutta–Joukowski with the local
+freestream plus induced velocity, and moments are about the COM.
+
+The explicit domain is a closed, outward-wound, isolated thin wing with
+`span >= chord`, `thickness <= 0.15 span`, Mach <= 0.3 and small attached
+incidence. Non-closed geometry returns `InvalidPatch`, non-wing bounds return
+`UnsupportedGeometry`, Mach returns `UnsupportedMach`, and singular systems or
+allocation failure return `ArithmeticOverflow`. This remains an engineering
+lattice, not a validated general lifting-surface solver: it omits finite
+thickness, boundary layers, separation, wake roll-up, viscosity, interference,
+control surfaces, compressibility above the incompressible domain and
+experimental validation. The COM atmosphere sample is used and per-owner
+pressure diagnostics are not staged. Use `WingPolar` for measured or CFD loads.
+
 ### Implemented patch pressure evaluator
 
-`kapitsa::aerodynamics::pressure::PressurePatch` implements the unmodified Newtonian equation above for caller-selected physical surface patches. `PressureFlow` supplies an explicit sound speed, the atmosphere sampled at the patch, the body's rigid transform, body-local COM, and world-space linear/angular velocities. The evaluator computes point velocity `v_COM + omega × r`, subtracts wind, and returns world-space `PressureWrench { force, moment }` about the COM. Patch centers are body-origin-relative, not COM-relative; changing COM does not rebuild patches. Normals are normalized at construction. Evaluation allocates nothing and does not mutate the body.
+`kapitsa::aerodynamics::pressure::PressurePatch` implements the unmodified Newtonian equation above for caller-selected physical surface patches; `evaluate_modified_newtonian` selects the opt-in compression closure described above. `PressureFlow` supplies an explicit sound speed, the atmosphere sampled at the patch, the body's rigid transform, body-local COM, and world-space linear/angular velocities. The evaluator computes point velocity `v_COM + omega × r`, subtracts wind, and returns world-space `PressureWrench { force, moment }` about the COM. Patch centers are body-origin-relative, not COM-relative; changing COM does not rebuild patches. Normals are normalized at construction. Evaluation allocates nothing and does not mutate the body.
 
-For nonzero density, patch area and relative speed, Mach below 5 returns `UnsupportedMach`. This threshold is a declared engineering policy, not a universal accuracy boundary derived from the source. Vacuum, zero-area patches and zero relative speed return zero loads, after validating motion and sound speed. Invalid input and unrepresentable arithmetic are explicit errors.
+For nonzero density, patch area and relative speed, the default unmodified model returns `UnsupportedMach` below Mach 5; the opt-in modified model returns it above Mach 5. These thresholds are declared engineering policies, not universal accuracy boundaries derived from the source. Vacuum, zero-area patches and zero relative speed return zero loads, after validating motion and sound speed. Invalid input and unrepresentable arithmetic are explicit errors.
 
 `PreparedGeometry::surface_triangles(instances, max_work)` transforms source triangles while preserving physical normals. `exposed_surface_patches` partitions windward triangles along the projected edges and depth planes of candidate blockers, then tests the resulting polygon triangles upstream. Coplanar overlap is assigned once, in canonical owner/vertex order. Fully visible source triangles retain their original centroid sampling. Partially visible polygons are triangulated for area and first-moment integration under uniform pressure.
 
-The shadow construction uses adaptive orientation predicates from the MIT/Apache-2.0 `robust` crate. Clipping is performed in the source triangle's affine domain, with an area-partition consistency check. Its tolerance is heuristic and depends on accumulated global work, including unrelated preprocessing and earlier triangles; it is not a proven error bound for the current partition. Unsupported predicate ranges and inconsistent partitions return `PrecisionLoss`. Constructed intersections still use floating-point arithmetic; this is not an exact computational-geometry kernel. `epsilon` remains an API compatibility parameter and never offsets rays or ignores nearby blockers. The work budget checks a preprocessing estimate, instance preparation, grid construction, sorting comparisons and swaps, visited grid cells and entries, candidate shadow construction, clipping polygon and vertex visits, partition output and final shadow tests. Exceeding it rejects the result, rather than returning partial loads. Vector growth uses fallible reservation. Grid sorting entries and the final index coexist during copying; their element counts are budgeted, but the budget does not bound allocator overhead or exact bytes. Work units are accounting weights, not a bound on processor instructions or elapsed time. A complete bound for every intermediate operation still requires audit before this preparation can be accepted as production-complete.
+The shadow construction uses adaptive orientation predicates from the MIT/Apache-2.0 `robust` crate. Clipping is performed in the source triangle's affine domain, with an area-partition consistency check. Its heuristic tolerance uses work charged for the current source partition, starting after the candidate query, plus one unit for the initial triangle. It does not depend on prior triangles or global preprocessing and is not a proven error bound. Unsupported predicate ranges and inconsistent partitions return `PrecisionLoss`. Crossing ratios use the smaller-to-larger distance ratio and fused residual corrections for either endpoint order. A common power-of-two scale preserves the residual before division when representable without losing the smaller magnitude. The correction does not guarantee correctly rounded fractions: a rational-reference regression records a remaining one-ULP difference for widely separated normal distances. Endpoint interpolation avoids overflowing coordinate differences when the intersection remains representable. Finite coordinate differences use fused multiply-add for intersection interpolation, preserving subnormal contributions through the addition. Constructed intersections still use floating-point arithmetic; this is not an exact computational-geometry kernel. `epsilon` remains an API compatibility parameter and never offsets rays or ignores nearby blockers. The work budget checks a preprocessing estimate, instance preparation, grid construction, sorting comparisons and swaps, visited grid cells and entries, candidate shadow construction, clipping polygon and vertex visits, partition output and final shadow tests. Exceeding it rejects the result, rather than returning partial loads. Vector growth uses fallible reservation. The two polygon lists and vertex-distance scratch buffer reuse their allocations across clipping planes within each source partition. The grid preflights entry counts and fills the final index in triangle order using per-cell counts and prefix offsets. Grid construction is linear in source triangles, cells and triangle-to-cell entries. The budget bounds logical element counts and excludes allocator overhead. Work units are accounting weights, not a bound on processor instructions or elapsed time. The table below gives bounds on logical storage requests and the work that precedes them.
 
-Affine shadow-plane distance evaluation uses compensated products and sums to
-reduce cancellation near a boundary. This corrects one previously demonstrated
-cases but does not guarantee the exact sign: residual calculations are rounded
-and extreme values may underflow. Adaptive orientation predicates alone do not
-guarantee correct clipping classification or intersection construction.
+Adaptive orientation predicates scale each coordinate axis independently by
+a power of two. Orientation comparisons within a frame share one positive
+determinant factor. Barycentric areas undo the product of the two in-plane
+scales. The existing exponent-span bound applies within each axis, so large
+differences between axis scales alone do not reject a thin triangle.
+For flow along a coordinate axis, the projected edge tests omit the upstream
+coordinate. It has no contribution to the edge determinants. Depth is
+computed independently. For a blocker in a coordinate-aligned plane, depth
+uses the signed separation along that plane's normal axis. The common
+projected-area factor cancels in normalization. Other planes use the
+three-dimensional orientation predicate. If a direction, depth, or projected
+edge frame exceeds its exponent span, preparation charges the exact fallback
+before computing the affected determinants. If direction rescaling overflows
+or produces a subnormal component, the fallback uses the original direction.
+Each determinant sums signed products of binary64
+significands in fixed 99-word accumulators, without heap allocation.
+The three exact results share a power-of-two scale and round to binary64
+with ties to even. A nonzero coefficient that rounds to zero returns
+`PrecisionLoss`. The extra integer work does not widen the area consistency
+tolerance. Direction and edge-reference checks use the exact sign without
+conversion. Edge coefficients share a scaling factor independent of the
+reference determinant. The exact projection expands the determinant using
+the original vertices and direction so rounded differences do not enter
+the fallback. Overflowing intermediate differences and differences that
+equal one operand despite the other being nonzero also select this path.
+The fast projection continues to use floating-point edge vectors for other
+differences. For direction and edge-reference determinants, the adaptive path compares
+the magnitude against 32 machine epsilons times the sum of absolute triple
+products in the scaled frame. Inside that margin, a nonzero subtraction
+residual in a participating product selects exact projection. For an uncertain edge coefficient in an accepted frame, only
+that determinant is recomputed. Its rounded result uses the same binary
+scale as the other coefficients before normalization. An edge without an
+accepted reference or frame still computes all three coefficients
+together. Direction rescaling uses a power of two.
+An overflowing axial depth separation selects the general depth predicate.
+
+Shadow-plane coefficients and windward values are normalized by a power of
+two. Reversing the scaling must recover every input coefficient exactly;
+otherwise preparation returns `PrecisionLoss`. This preserves the represented
+half-space while keeping coefficients bounded.
+
+Windward and partition triangle areas use the same exact accumulator when
+the adaptive 2D frame exceeds its span. The result is the barycentric area
+fraction rounded at its absolute scale. This preserves representable
+subnormal fractions. A nonzero fraction that rounds to zero returns
+`PrecisionLoss`. The exact calculation is charged before evaluation.
+
+Visibility preprocessing counts source triangles once and reuses that count
+when collecting the transformed triangles. The grid receives the portion of
+the shared 100,000,000-unit maximum that remains after preprocessing. Each
+query receives the remainder after earlier queries and partitions. Peak
+temporary storage includes the prepared source triangles and grid, candidate
+marks and the current candidate list, two successive polygon lists, distances
+for the largest polygon seen in the current partition, and the accumulated
+output. Those element counts are constrained by preparation, query, and
+clipping charges. For each clipping plane and polygon with `n` vertices, the
+charge of `1 + 16*n` precedes scratch growth and distance evaluation. The
+distance pass counts strict signs and crossed edges, including the closing
+edge. A split reserves each output for its retained vertices and crossings.
+At most `4*n` vertex slots are requested across both outputs, and the distance
+buffer requests at most `n` slots. A polygon confined to one side is moved
+without allocating a new vertex buffer.
+
+### Visibility work and storage audit
+
+Let `W = min(max_patch_work, 100,000,000)` for world preparation, or the
+equivalent cap on the explicit work argument for direct queries. These are
+upper bounds on logical elements. Geometric vector growth can retain more
+capacity than its current length. Existing caches, input meshes, allocator
+overhead and elapsed time are outside this per-preparation accounting.
+
+| Stage | Check before work or allocation | Logical storage bound |
+| --- | --- | --- |
+| Relative instances and canonical source triangles | Preflight reserves four units per instance and at least 32 per triangle. Canonical sorting also charges individual comparisons and swaps. | At most `W/4` relative instances and `W/32` source triangles. |
+| Grid and candidates | Grid preflight checks `4*T + 3*C + 3*E + 1` for triangles, cells and entries. Each query charges bucket visits and index visits before inspecting or adding results. | `2*C + E + 1` index-sized elements at grid construction peak, at most `T` marks and `T` distinct candidates per query. |
+| Source polygons and shadows | Source work covers initial clipping and flow samples. Candidate work precedes shadow construction. The exact fallback charges each determinant before evaluation. | Up to four initial vertices per source, at most `W/64` shadow records. Exact accumulators use fixed stack storage. |
+| Partition cuts | Each polygon visit charges `1 + 16*n` before evaluating distances or allocating a split. | At most `4*n` output vertex slots requested per cut and `n` distance slots. Across cuts, split vertex requests total at most `W/4`, excluding the initial polygons. |
+| Patch emission and output transform | Fan triangles, centroid shadow tests and full-patch replacement are charged before their respective work. Frame conversion is reserved for the full output before returning it. | At most `W/16 + W/48` logical patch entries, counting fan emissions and at most one replacement per source. |
+
+The exact work charge bounds carry propagation with an amortized count.
+Intermediate carries clear all-ones limbs, which only payload or terminating
+carry writes can create. Projected determinants use at most 18 terms and
+charge 1,224 units. Other determinants use at most 24 terms and charge 1,368
+units. Both charges include fixed-size scans and initialization.
+
+The wide projected-edge regression needs 15,070 units, including twelve
+exact determinants. It returns the same complete output at the minimum
+budget as at the hard cap and returns `WorkBudgetExceeded` one unit below.
+Separate regressions cover ordinary clipping, multiple shadows and the final
+frame conversion boundary.
+
+Affine shadow-plane distance evaluation uses compensated products and sums.
+When cancellation is comparable to the rounding of those corrections, or an
+intermediate product can underflow in its low bits, preparation precharges
+912 units and evaluates the five signed terms exactly. Intermediate overflow
+also selects this path. The result rounds once at its original scale.
+A nonzero distance rounding to zero remains a precision error. This applies
+to the stored coefficients and vertices. Constructed intersection coordinates
+still round to binary64.
 
 Even an exact equality of the total partition area and the original area is
 only a necessary consistency check: overlap and missing coverage can cancel.
 A regression with a duplicated half-triangle and a missing half demonstrates
 this limitation. Proving a partition requires additional geometric invariants.
 
-`kapitsa::aerodynamics::pressure::evaluate_prepared_mesh(&PreparedSurfacePatches, PressureFlow)` evaluates each prepared physical patch through `PressurePatch` and returns the checked sum of world-space force and COM moment. It allocates nothing, mutates nothing and returns an error (not a partial wrench) if any patch evaluation or accumulation fails. A single explicit atmospheric state and sound speed are used for the whole set; no atmosphere sampling or per-owner load distribution occurs. Empty sets return zero after motion and sound-speed validation. The existing patch force convention and Mach >= 5 policy are preserved, without a new pressure closure.
+`kapitsa::aerodynamics::pressure::evaluate_prepared_mesh(&PreparedSurfacePatches, PressureFlow)` evaluates each prepared physical patch through `PressurePatch` and returns the checked sum of world-space force and COM moment. It allocates nothing, mutates nothing and returns an error (not a partial wrench) if any patch evaluation or accumulation fails. A single explicit atmospheric state and sound speed are used for the whole set; no atmosphere sampling or per-owner load distribution occurs. Empty sets return zero after motion and sound-speed validation. `evaluate_prepared_mesh` preserves the default unmodified Newtonian Mach >= 5 policy; `evaluate_prepared_mesh_modified_newtonian` applies the documented `0 <= Mach <= 5` compression closure to the same exposed patches. Model-selectable owner and workspace variants use the same closure so staged diagnostics match applied loads.
 
 For explicitly selected base surfaces, `BasePressure::new(cp, min_mach, max_mach)` and `evaluate_prepared_base` provide a separate constant-Cp load primitive. `cp` is nonpositive excess pressure relative to freestream divided by dynamic pressure; the inclusive Mach range and the coefficient must be supplied from data appropriate to the geometry and flow. Force is `-q * cp * area * outward_normal`, with moment about the COM. A patch pointing into its local body-relative velocity is rejected, including under rotation; this necessary orientation check does not identify a base or prove it is exposed. The caller must select actual base surfaces: reversing the visibility direction is not a general wake or base-surface classifier. Nonempty configurations supplied directly through `RigidBody::set_base_pressure_patches` are rejected by world steps; use the index-based APIs below for simulation. The low-level `PressurePatch::evaluate_base` remains available independently. Indexed loads use the same COM atmosphere as mesh impact pressure. Replacing the primary aerodynamic model clears the configuration. Cluster conversion rejects a nonempty configuration before changing topology; cluster bodies and non-Mesh/Colliders models with configured patches return `UnsupportedModel` in air. This approximation does not model wake interaction and is not experimentally validated. It does not change the existing Newtonian impact-pressure policy.
+
+`EmpiricalBasePressure::new(base_area_ratio)` and
+`evaluate_prepared_mesh_with_empirical_base` / `evaluate_empirical_base_patches`
+add an opt-in bounded turbulent-base load without caller-selected base
+triangles. `base_area_ratio` is base area over the body's maximum
+cross-sectional area in `(0, 1]`. The coefficient is
+`Cp_b = -(-Cp_cyl(M)) k(M, a_b)`, where `-Cp_cyl` is Love's cylindrical
+base-pressure data (MIL-HDBK-762 Fig. 5-139, after NACA TN 3819) and `k` is
+MIL-HDBK-762 Fig. 5-141's base-pressure relief ratio
+`p_bt/p = p_cyl/(0.442 + 0.558 a_b)`, clamped to `[0, 1]`. The tabulated
+domain is Mach 2.5–5; Mach 1–2.5 holds both correlations at their Mach 2.5
+values. Outside Mach 1–5 the model returns `UnsupportedMach`. A rear patch is
+treated as base area only when its outward normal is within 10 degrees of the
+body-motion direction; geometry with no such patch returns
+`UnsupportedGeometry`. The load is `-Cp_b q A` on each selected patch, with a
+moment about the COM. Zero COM relative speed contributes no base load.
+
+`PhysicsWorld::set_mesh_empirical_base_pressure(Some(model))` applies this
+add-on to a closed primary `Mesh` or `Colliders` body with the `Newtonian` or
+`ModifiedNewtonian` surface closure, without a cluster, parts assembly or
+sphere substitute. World preparation uses `closed_mesh_pressure_patches` for
+the base triangles, so an open mesh is rejected. This path does not perform a
+separate downstream visibility check: rear-facing internal or cavity surfaces
+of a non-convex mesh may be included, and the caller must provide a simple
+closed body. Base classification and pressure use the COM translation;
+rotation does not reclassify or vary the base load. The model does not resolve
+an unsteady wake, vortex shedding, base-flow turbulence, roughness, surface
+temperature or experimental validation. Explicitly selected `BasePressure`
+patches remain the way to supply measured or geometry-specific data.
 
 For `Colliders` bodies, adding or removing a collider, requesting `collider_mut`, or changing collider tessellation clears the base patches, even if a mutable borrow makes no change. Reapplying identical tessellation settings leaves them intact. Configure patches after collider edits. These operations do not clear patches attached to an independent `Mesh` model. This invalidation does not establish that newly supplied patches are physically exposed or match the collider geometry.
 
@@ -355,6 +717,57 @@ for the world loads described above; it does not replace `Simple` lift or infer
 wings from meshes. The finite-span slope relation is the classical lifting-line
 approximation, not a FAR code port.
 
+`FiniteWing::with_flat_plate_post_stall(blend_angle)` adds a bounded
+separated-flow extension. The existing `max_attached_angle` is the
+caller-selected stall onset. Over `blend_angle` beyond it, the attached
+coefficients are smoothly blended to the flat-plate forms
+`CL = 2 sin(alpha) cos(alpha) AR/(AR + 2)` and
+`CD = profile_drag + 2 sin²(alpha)`, and those forms hold through
+`|alpha| = pi/2`. `blend_angle` must be finite, positive and at most
+`pi/2 - max_attached_angle`; larger incidence returns `UnsupportedFlow`.
+
+This is an engineering post-stall approximation, not a prediction of stall
+onset, maximum lift, hysteresis, dynamic stall, separated-wake geometry,
+control-surface stall or roughness. It does not add a pitching-moment model.
+The flat-plate limit is not a validated substitute for a measured post-stall
+polar; use `WingPolar` when such data are available.
+
+`FiniteWing::with_predicted_stall_onset(cl_max, blend_angle)` replaces the
+caller-selected attached limit with the intersection of the finite-wing
+attached lift curve and a caller-supplied `CL_max`. The estimate is
+`alpha_zero + CL_max / (dCL/dalpha)`, where the slope includes aspect ratio,
+span efficiency, zero-lift/camber angle and the configured compressibility
+model. `FiniteWing::predicted_stall_angle(cl_max, mach)` exposes the same
+calculation. The predicted angle must be finite, inside `(-pi/2, pi/2)`, and
+`|angle| + blend_angle <= pi/2`; otherwise construction or evaluation returns
+`InvalidParameters`/`UnsupportedFlow`. `CL_max` must be positive and finite and
+is supplied by the caller from measured or justified data. This is a
+lift-curve-intersection engineering estimate, not a CFD stall-onset prediction,
+a camber-dependent maximum-lift model or an experimental validation.
+
+`FiniteWing::with_oye_dynamic_stall(chord, time_constant_scale)` adds a
+rate-dependent separation-lag model following the Øye/Bergami formulation
+described in the [QBlade dynamic-stall documentation](https://docs.qblade.org/src/theory/aerodynamics/dynamic_stall/OYE_stall.html).
+The caller evaluates `FiniteWing::coefficients_dynamic(alpha, mach, V, dt,
+state)` with a caller-owned `DynamicStallState`. The static attached lift
+`CL_att` is the linear lift extrapolation and `CL_st` is the configured
+static polar. The static separation is
+`f_st = clamp((2 sqrt(CL_st / CL_att) - 1)^2, 0, 1)`, with
+`CL_sep = (CL_st - f_st CL_att) / (1 - f_st)` regularized near `f_st = 1`.
+The state evolves as `df/dt = (f_st - f) / tau` with
+`f_new = f_st + (f_old - f_st) exp(-dt / tau)` and
+`tau = time_constant_scale * chord / (2 V)`. Dynamic lift is
+`f CL_att + (1 - f) CL_sep`; drag uses the Bergami correction
+`CD_st + (CD_st - CD_0)[0.5(sqrt(f_st) - sqrt(f)) - 0.25(f - f_st)]`.
+
+The model requires the flat-plate post-stall branch and positive finite
+`chord`, `V` and `dt`, with state in `[0, 1]`. Missing configuration, invalid
+time/speed/state, nonfinite coefficients or negative drag are explicit errors.
+This is a reduced-order separation-lag model: it does not resolve a leading-edge
+vortex, pitching moment, dynamic-stall onset hysteresis of the vortex lift,
+wake memory, roughness or experimental validation. It is not a
+Beddoes–Leishman solver.
+
 `FiniteWing::with_subsonic_compressibility(max_mach)` optionally uses a
 Prandtl-Glauert lifting-line approximation, with slope
 `2 pi / (sqrt(1 - M^2) + 2/(e AR))`. The caller must choose a maximum Mach
@@ -371,8 +784,27 @@ It uses a piecewise correction through Mach 1 and replaces the optional
 Prandtl-Glauert lifting-line approximation. Both parameters must be selected
 for the intended configuration; the model does not infer shock onset or stall.
 Its Mach limit, the attached-flow limit and any drag-rise correlation's domain
-remain independent. The supersonic branch is an engineering approximation, not
-a validated general supersonic wing model.
+remain independent. The NDARC supersonic branch is an engineering approximation,
+not a validated general supersonic wing model.
+
+`FiniteWing::with_supersonic_linear_theory(min_mach, max_mach)` adds a separate
+linearized supersonic finite-wing approximation. It uses Ackeret's section
+slope `4 / sqrt(M² - 1)` and an explicit finite-span engineering factor
+`AR / (AR + 2)`, so the slope approaches the two-dimensional value as aspect
+ratio grows and is reduced at low aspect ratio. Lift is
+`CL = slope (alpha - alpha_zero)`; drag is
+`CD = profile_drag + |CL alpha|`, the attached flat-plate wave-drag term.
+Span efficiency is not used in this supersonic lift slope because it is a
+subsonic induced-drag parameter.
+
+The domain is `1.2 <= min_mach <= Mach <= max_mach <= 5`, with the configured
+attached-flow angle limit. This is an engineering lifting-surface approximation,
+not a general supersonic solver: it does not model thickness, camber, sweep,
+tip relief, shock detachment, shock-boundary-layer interaction, separation or
+real-gas effects. It is incompatible with the transonic drag-rise builders;
+combining them returns `InvalidParameters`. Use a caller-supplied `WingPolar`
+when measured or CFD coefficients are available. The finite-span factor is a
+bounded approximation, not an independent experimental validation.
 
 `FiniteWing::with_drag_rise(critical_mach, scale)` optionally adds the empirical
 compressibility drag increment described in [NASA TP-2015-218751, section 8-8](https://rotorcraft.arc.nasa.gov/Publications/files/Johnson_NASA%20TP-2015-218751-app3.pdf).
@@ -447,8 +879,10 @@ or poststall lift reduction is represented only if the caller supplies such
 values. Table support is not prediction of those phenomena. There is no default
 poststall dataset. A `WingPolar` lookup regression uses section data from Ladson,
 NASA TM-4074, table IX, at Mach 0.15 and Reynolds number 5.95 million; it tests
-interpolation only, not their applicability to a finite wing. Its duplicated
-second Mach row satisfies the API's grid requirement and is not measured data.
+interpolation only, not their applicability to a finite wing.
+`WingPolar::at_mach` accepts one measured Mach row and interpolates its angles.
+Any other Mach number returns `UnsupportedFlow`, including its adjacent
+representable values. `WingPolar::new` still requires two or more Mach rows.
 
 `surface.with_control(WingControl::new(deflection, max_deflection, effectiveness)?)`
 adds `effectiveness * deflection` to physical AoA for coefficient lookup only.
@@ -506,6 +940,183 @@ For linearized two-dimensional subsonic flow, the Prandtl–Glauert correction i
 Reference: [Prandtl–Glauert transformation](https://en.wikipedia.org/wiki/Prandtl%E2%80%93Glauert_transformation).
 
 It is not a transonic model: the singularity at Mach 1 is a breakdown of the approximation, not a physical infinite load. Clamping the denominator or interpolating around Mach 1 creates an engineering approximation that must be documented and validated separately. It does not reproduce FAR's area-distribution-based wave-drag model.
+
+### Incompressible drag on an isolated sphere
+
+`sphere_drag::incompressible_drag_coefficient(Re)` implements [Brown and
+Lawler (2003), equation (19)](https://doi.org/10.1061/%28ASCE%290733-9372%282003%29129%3A3%28222%29).
+It uses diameter-based `0 < Re < 200,000` and returns a coefficient referenced
+to frontal area. The caller establishes incompressible continuum conditions.
+The correlation tends to `24/Re` in creeping flow and excludes the drag crisis.
+`sphere_drag::incompressible_drag_force` evaluates the corresponding force at
+the sphere center from diameter, density, dynamic viscosity and body-minus-fluid
+velocity. It factors out the Stokes force to avoid squaring very small speeds.
+`Aerodynamics::IncompressibleSphere` uses that force during stepping for a
+nonrotating, non-cluster body with the sphere centered on its center of mass.
+It samples density, wind and sound speed at the center of mass and uses the
+world sound-speed fallback when the atmosphere supplies none. Diameter and
+fallback dynamic viscosity are set explicitly. A spherical atmosphere can
+supply dynamic viscosity in Pa·s via `dynamic_viscosity_profile(reference, top)`.
+It interpolates linearly from the reference radius to the outer radius. All
+sphere drag variants prefer that local sample when configured. The
+incompressible variant rejects Mach above 0.2.
+The separate `sphere_drag::continuum_drag_force` uses the continuum component
+of [Singh et al.](https://arxiv.org/abs/2012.04813v1), equations 5–13 and 23–26.
+It derives Mach and diameter Reynolds number from local flow inputs and applies
+the frontal-area coefficient for Mach 0.3–2, Re 300–10,000 and Kn < 0.01.
+`Aerodynamics::ContinuumSphere` applies this force during stepping with the
+same sampling and geometry assumptions as `IncompressibleSphere`. The two
+variants are selected explicitly and keep their separate Mach domains.
+
+At Mach 0.3 the finer-grid results of [Nagata et al. (2020), table 3](https://doi.org/10.1017/jfm.2020.629)
+give the following comparison for an isolated adiabatic sphere. The
+incompressible values here are diagnostic evaluations outside the world
+model's Mach limit, and the two DNS grids do not establish a full uncertainty.
+
+| Diameter Re | DNS drag coefficient | Brown–Lawler | Singh et al. | Loth et al. |
+| ---: | ---: | ---: | ---: | ---: |
+| 300 | 0.6644 | 0.677132 | 0.678455 | 0.690182 |
+| 500 | 0.5679 | 0.565924 | 0.576417 | 0.575479 |
+| 750 | 0.5085 | 0.499938 | 0.516344 | 0.506351 |
+
+The compressible coefficient exceeds the incompressible coefficient by
+0.20–3.28% across these points. At Mach 2 the compressible model underpredicts
+the same study's finer-grid drag by 8.26–9.36% at these Reynolds numbers.
+The Loth correlation differs from DNS by −0.42% to +3.88% at Mach 0.3 and
+underpredicts by 7.19–13.87% at Mach 2. The wider Mach domain therefore does
+not establish better agreement across these cases. Table 3 starts at Mach 0.3
+and does not establish a transition law between the world models.
+
+`sphere_drag::compression_dominated_particle_drag_coefficient` is a separate
+frontal-area coefficient for isolated spherical particles. It implements the
+compression-dominated precritical branch of [Loth et al. (2021), equations
+6–8](https://doi.org/10.2514/1.J060153), transcribed from [Palmer and Sahai
+(2023), equations 19–22](https://ntrs.nasa.gov/api/citations/20220018430/downloads/AIAA_2023_Palmer_Drag_Model_Paper_v2.pdf).
+Its domain is Mach 0.25–10 and diameter-based `45 < Re < 200,000`. At the fit's
+internal breakpoints the lower-Mach expression takes precedence.
+`Aerodynamics::CompressionDominatedParticle` applies the corresponding force
+during stepping, with the same atmosphere sampling and particle geometry
+assumptions as the other sphere variants. The rarefaction branch remains
+outside this model's domain.
+
+`sphere_drag::slip_corrected_particle_drag_coefficient` evaluates low-speed
+drag for an isolated sphere in air using Schiller–Naumann drag with the
+Clift–Gauvin slip correction. It uses [Palmer and Sahai (2023), equations
+13–14](https://ntrs.nasa.gov/api/citations/20220018430/downloads/AIAA_2023_Palmer_Drag_Model_Paper_v2.pdf).
+The implementation accepts `0 < Mach ≤ 0.2`, `0 < Re ≤ 45` and `Kn ≤ 0.1`,
+where Re and Kn use particle diameter. These limits restrict the approximation
+to low-speed continuum and slip flow. The slip factor tends to unity as Kn
+tends to zero. `Aerodynamics::SlipCorrectedParticle` applies this drag at
+the center of mass during stepping. It uses the same atmospheric sampling,
+viscosity policy and nonrotating sphere assumptions as the other sphere
+variants. Selecting the variant is explicit.
+
+`sphere_drag::creeping_particle_drag_ratio` gives the ratio to Stokes drag
+from [the Maxwell–Epstein interpolation, equations (2.1) and (2.7) and
+section 2.2](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/correction-tensor-for-approximating-drag-on-slowmoving-particles-of-arbitrary-shape-and-knudsen-number/24A36A6C4A6CB3301E18A6A596756095).
+It spans continuum, transitional and free-molecular conditions for slowly
+translating spheres with diffuse molecular reflection. Its Knudsen number
+uses particle **radius**, so it is twice the diameter-based value used by
+the preceding particle correlations. `Aerodynamics::CreepingParticle` applies
+the corrected Stokes force during stepping, up to Mach 0.05 and diameter
+Reynolds number 0.1. These limits are implementation policy for approximating
+creeping flow. The model derives radius-based Kn from the sampled atmosphere
+and configured particle diameter and viscosity.
+
+`sphere_drag::free_molecular_particle_drag_coefficient` evaluates the isolated
+sphere correlation in [Loth et al., equation (13)](https://doi.org/10.2514/1.J060153).
+It assumes diffuse reflection, equal gas and particle temperatures, and
+diameter-based Kn ≥ 10. Its argument is relative speed divided by the gas's
+most probable molecular speed. A low-speed series avoids cancellation and
+recovers the Epstein limit. The coefficient tends to 2 at large speed ratio.
+`Aerodynamics::FreeMolecularParticle` applies this force during stepping for a
+nonrotating sphere centered on its center of mass. It derives the molecular
+speed from local sound speed assuming air with `gamma = 1.4`, and derives Kn
+from local density and configured or sampled dynamic viscosity.
+
+`sphere_drag::transitional_particle_drag_coefficient` covers `0.1 ≤ Kn ≤ 10`,
+`0 < Re ≤ 45`, and `0 < Mach ≤ 10` for the same isolated-sphere assumptions.
+It blends the slip and Reynolds-corrected molecular terms using [Palmer and
+Sahai, equations 13–18](https://ntrs.nasa.gov/api/citations/20220018430/downloads/AIAA_2023_Palmer_Drag_Model_Paper_v2.pdf).
+The molecular term uses the original Loth et al. equation (13). The empirical
+Mach branches are discontinuous at Mach 1. The lower-Mach branch supplies the
+value at the breakpoint. `Aerodynamics::TransitionalParticle` applies this
+coefficient during stepping with the local atmospheric state and viscosity.
+
+`Aerodynamics::LothParticle` selects the transitional branch through Re = 45
+and the compression-dominated branch above Re = 45. Both retain their Mach
+and Kn limits. For example, Mach 0.22 at Re = 100 remains unsupported. At
+Mach 4 the coefficient is approximately 1.67448 at Re = 45 and 1.65904 just
+above it. The switch preserves this empirical difference.
+
+## Implemented range coverage
+
+Coverage is per explicitly selected model, not an automatic regime selector.
+Crossing a boundary in the table returns an error or requires caller data; the
+engine does not blend models to hide a domain limit.
+
+| Model | Implemented domain | Not supplied |
+| --- | --- | --- |
+| Hull constant Cd | total Mach ≤ 0.3 | predictive transonic/supersonic coefficients |
+| Hull `MachCurve` / `NormalForceCurve` | caller inclusive Mach/incidence table | data and their uncertainty |
+| Hull predictive transonic rise | `Mcrit` from section area/length, rise through Mach 1.2 | body-of-revolution validation, lift/sweep, separation |
+| Slender-body normal load | Mach ≤ 0.3, small incidence, steady aligned flow | separation, wave drag, rotational derivatives |
+| Slender wave drag | Mach > 1, axis aligned, caller area slopes | predictive transonic closure |
+| `FiniteWing` default | Mach ≤ 0.3, attached flow | stall, separation |
+| Flat-plate post-stall | caller stall angle + blend, through ±π/2 | wake geometry, validated post-stall polar |
+| Predicted stall onset | caller `CL_max`, AR/efficiency/camber/compressibility slope | CFD-derived `CL_max`, experimental validation |
+| Øye dynamic stall | caller chord/V/dt/state, post-stall polar, rate-dependent separation | vortex lift, pitch moment, wake memory, validation |
+| Prandtl–Glauert wing | caller maximum below Mach 1 | shock onset, wave drag |
+| NDARC wing lift/drag rise | caller maximum; ratio ≤ 1.1 or explicit plateau | general high-supersonic wing model |
+| Supersonic wing linear theory | 1.2 ≤ Mach ≤ min(caller max, 5), attached small incidence | thickness, camber, sweep, tip relief, shock detachment |
+| `WingPolar` | caller Mach/AoA grid only | interpolation outside the table |
+| Mesh/Colliders unmodified Newtonian | Mach ≥ 5 | subsonic/transonic pressure; use modified model |
+| Mesh/Colliders modified Newtonian | Mach 0–5 | attached potential lift, wake, base flow, friction |
+| Mesh/Colliders potential panel | local Mach ≤ 0.2, closed isolated mesh ≤ 256 triangles, quasi-steady rotation | unsteady added mass, wind gradient, separation, base flow |
+| Mesh/Colliders Kutta lifting | closed thin wing, span ≥ chord, thickness ≤ 0.15 span, Mach ≤ 0.3 | camber, sweep, taper, tip relief, general 3D Kutta wake |
+| Mesh/Colliders vortex lattice | closed thin wing, 3×6 lattice, Mach ≤ 0.3 | finite thickness, separation, wake roll-up, control surfaces, validation |
+| Base pressure (explicit) | caller Cp, inclusive Mach range and selected patches | wake interaction, exposure inference |
+| Empirical base pressure | Mach 1–5 (2.5–5 tabulated), closed primary Mesh/Colliders, caller base-area ratio, 10° rear-normal cone | subsonic base physics, unsteady/cavity wake, rotation, validation |
+| Incompressible friction | Mach ≤ 0.3 | compressibility, transition above 0.3 |
+| Transitioned flat plate | 500,000 < Re < 100,000,000, Mach ≤ 0.3 | prescribed transition only |
+| Compressible turbulent friction | Mach ≤ 0.95, 1M ≤ Re ≤ 100M | shock interaction, roughness |
+| Fully rough turbulent friction | 100 ≤ L/ks ≤ 1e6, Mach ≤ 0.3, caller Re bounds | transitionally rough regime, pressure gradients, shock interaction, validation |
+| High-speed laminar friction | Mach ≤ 10, 10k ≤ Re ≤ 100M | transition, real gas, roughness |
+| High-speed turbulent friction | Mach ≤ 5, 1M ≤ Re ≤ 100M | strong cooling, shock interaction |
+| Incompressible sphere | Mach ≤ 0.2, Re < 200,000 | drag crisis |
+| Continuum sphere | Mach 0.3–2, Re 300–10,000, Kn < 0.01 | rarefied flow |
+| Compression-dominated particle | Mach 0.25–10, 45 < Re < 200,000 | rarefaction branch |
+| Slip-corrected particle | Mach ≤ 0.2, Re ≤ 45, Kn ≤ 0.1 | higher Kn or Re |
+| Creeping particle | Mach ≤ 0.05, Re ≤ 0.1 | higher Mach or Re |
+| Free-molecular particle | diameter Kn ≥ 10 | transitional Kn |
+| Transitional particle | 0.1 ≤ Kn ≤ 10, Re ≤ 45, Mach ≤ 10 | other Kn/Re |
+| `LothParticle` selector | transitional Re ≤ 45, compression Re > 45 | gaps such as Mach 0.22, Re 100 |
+
+Finite-thickness and multi-surface Kutta wake flow with wake roll-up and
+control surfaces for Mesh/Colliders, unsteady added-mass and rotating-wake
+effects, validated geometry/CFD stall onset and measured `CL_max`,
+vortex-lift dynamic stall and validated hysteresis,
+wake/shielding physics beyond geometric occlusion, unsteady or validated
+base-flow interaction, transitionally rough and validated roughness
+behavior, high-speed transition, real-gas properties, a validated
+body-of-revolution transonic solver and a validated general supersonic
+lifting-surface solution with thickness, sweep, tip relief and shock
+detachment remain outside the implemented models. The predictive hull
+transonic row is an equivalent-section Korn/Lock estimate, not a validated
+transonic body solution; the supersonic wing row is a bounded
+Ackeret/finite-span estimate. The modified Newtonian Mesh/Colliders closure
+supplies compression pressure only, while the potential panel is bounded to
+closed isolated meshes without wake/circulation. Callers must not treat the
+table as evidence of accuracy outside each cited correlation's tested
+conditions.
+
+The friction rows are separate opt-ins, not a stitched continuous closure.
+Coefficient values can step where the incompressible, high-subsonic and
+high-speed correlations overlap; choose one model consistent with the cited
+range instead of blending them. The Mach-dependent friction variants use axial
+Mach in their correlation and total local Mach for the domain check, so
+crossflow can make a flow unsupported even when the axial component alone
+would be inside the correlation's range.
 
 ## Skin friction
 

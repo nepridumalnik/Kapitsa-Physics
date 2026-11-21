@@ -40,16 +40,13 @@ pub(crate) fn query_triangles(
 
     for row in first_row..=last_row {
         for column in first_column..=last_column {
-            let v00 = field_vertex(field, row, column, spacing)?;
-            let v10 = field_vertex(field, row, column + 1, spacing)?;
-            let v01 = field_vertex(field, row + 1, column, spacing)?;
-            let v11 = field_vertex(field, row + 1, column + 1, spacing)?;
+            let [first, second] = cell_triangles(field, row, column)?;
             let cell = row
                 .checked_mul(cell_columns)
                 .and_then(|index| index.checked_add(column))
                 .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
-            append_if_intersects(output, local_bounds, [v00, v10, v11], cell, 0)?;
-            append_if_intersects(output, local_bounds, [v00, v11, v01], cell, 1)?;
+            append_if_intersects(output, local_bounds, first, cell, 0)?;
+            append_if_intersects(output, local_bounds, second, cell, 1)?;
         }
     }
     Ok(())
@@ -85,6 +82,19 @@ fn cell_range(
     let first = (scaled_min.floor() as usize).saturating_sub(1);
     let last = (scaled_max.floor() as usize).min(last_cell);
     Some((first.min(last), last))
+}
+
+pub(crate) fn cell_triangles(
+    field: &HeightField,
+    row: usize,
+    column: usize,
+) -> Result<[[Vec3; 3]; 2], crate::Error> {
+    let spacing = field.grid_spacing();
+    let v00 = field_vertex(field, row, column, spacing)?;
+    let v10 = field_vertex(field, row, column + 1, spacing)?;
+    let v01 = field_vertex(field, row + 1, column, spacing)?;
+    let v11 = field_vertex(field, row + 1, column + 1, spacing)?;
+    Ok([[v00, v10, v11], [v00, v11, v01]])
 }
 
 fn field_vertex(

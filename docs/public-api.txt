@@ -122,6 +122,7 @@ MassProperties
 MassTransfer
 Mat3
 MaterialId
+MeshPressureModel
 OverlapHit
 PartId
 PhysicsBatchResult
@@ -199,8 +200,10 @@ cache
 colliders
 geometry
 hull
+potential
 pressure
 slender
+vlm
 wave
 wing
 { AddChunkBatchError

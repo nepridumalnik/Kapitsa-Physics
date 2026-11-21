@@ -69,6 +69,52 @@ fn config(h: f64) -> GeometryConfig {
         max_patch_work: 100_000,
     }
 }
+
+#[test]
+fn oriented_voxelization_preserves_a_sealed_hollow_cavity() -> Result<(), crate::Error> {
+    let shell = cube();
+    let vertices = shell
+        .vertices()
+        .iter()
+        .copied()
+        .chain(
+            shell
+                .vertices()
+                .iter()
+                .map(|v| Vec3::splat(0.25) + *v * 0.5),
+        )
+        .collect();
+    let faces = shell
+        .triangles()
+        .iter()
+        .copied()
+        .chain(
+            shell
+                .triangles()
+                .iter()
+                .map(|&[a, b, c]| [a + 8, c + 8, b + 8]),
+        )
+        .collect();
+    let mesh = TriangleMesh::new(vertices, faces)?;
+    let inputs = [instance(&mesh, Vec3::ZERO)];
+    let settings = config(0.0625);
+    let hollow = PreparedGeometry::prepare_with_oriented_cavities(&inputs, settings)?;
+    let solid = PreparedGeometry::prepare(&inputs, settings)?;
+    let center = Vec3::splat(0.5);
+    assert!(!hollow.occupied_at(center)?);
+    assert!(solid.occupied_at(center)?);
+    assert!(hollow.occupied_at(Vec3::new(0.125, 0.5, 0.5))?);
+    assert!(hollow.volume() < solid.volume());
+    let bounded = GeometryConfig {
+        max_work: 180_000,
+        ..settings
+    };
+    assert_eq!(
+        PreparedGeometry::prepare_with_oriented_cavities(&inputs, bounded)?,
+        hollow
+    );
+    Ok(())
+}
 fn instance(mesh: &TriangleMesh, offset: Vec3) -> GeometryInstance<'_> {
     GeometryInstance {
         mesh,
@@ -351,11 +397,11 @@ fn candidate_mark_allocation_requires_work_budget_up_front() {
 }
 
 #[test]
-fn grid_build_estimate_reserves_cell_buffers_prefix_scan_and_index_copy() {
+fn grid_build_estimate_reserves_cell_buffers_prefix_scan_and_index_entries() {
     const ENTRIES: usize = 4;
     const CELLS: usize = 3;
     const SCANS: usize = 6;
-    let expected = sort_work_estimate(ENTRIES).unwrap() + ENTRIES + 3 * CELLS + 1 + SCANS;
+    let expected = 3 * ENTRIES + 3 * CELLS + 1 + SCANS;
     assert_eq!(
         grid_build_work_estimate(ENTRIES, CELLS, SCANS),
         Some(expected)
@@ -366,22 +412,29 @@ fn grid_build_estimate_reserves_cell_buffers_prefix_scan_and_index_copy() {
 }
 
 #[test]
-fn triangle_grid_index_ranges_cover_each_triangle_cell_entry() {
+fn triangle_grid_scatter_preserves_bucket_membership_and_order() -> Result<(), crate::Error> {
     let triangles = [
-        visibility_triangle(Vec3::ZERO, Vec3::Y, Vec3::Z),
-        visibility_triangle(Vec3::X, Vec3::X + Vec3::Y, Vec3::X + Vec3::Z),
+        visibility_triangle(Vec3::ZERO, Vec3::Y * 0.5, Vec3::Z * 0.5),
+        visibility_triangle(Vec3::ZERO, Vec3::new(2.0, 0.0, 2.0), Vec3::Y * 2.0),
+        visibility_triangle(
+            Vec3::new(2.0, 1.5, 1.5),
+            Vec3::new(2.0, 2.0, 1.5),
+            Vec3::new(2.0, 1.5, 2.0),
+        ),
     ];
-    let grid = TriangleGrid::build(&triangles, 10_000).unwrap();
-    assert_eq!(grid.offsets.first(), Some(&0));
-    assert_eq!(grid.offsets.last(), Some(&grid.triangles.len()));
-    for range in grid.offsets.windows(2) {
-        assert!(range[0] <= range[1]);
-        let entries = &grid.triangles[range[0]..range[1]];
-        assert!(entries.windows(2).all(|pair| pair[0] <= pair[1]));
-        assert!(entries.iter().all(|&index| index < triangles.len()));
-    }
-    assert!(grid.triangles.contains(&0));
-    assert!(grid.triangles.contains(&1));
+    // Four triangle scans, three passes per grid cell and entry, and the
+    // extra prefix offset. The middle triangle's AABB spans all eight cells.
+    const WORK: usize = 4 * 3 + 3 * 8 + 3 * 10 + 1;
+    let grid = TriangleGrid::build(&triangles, WORK)?;
+    assert_eq!(grid.build_work, WORK);
+    assert_eq!(grid.dimensions, [2, 2, 2]);
+    assert_eq!(grid.offsets, [0, 2, 3, 4, 5, 6, 7, 8, 10]);
+    assert_eq!(grid.triangles, [0, 1, 1, 1, 1, 1, 1, 1, 1, 2]);
+    assert!(matches!(
+        TriangleGrid::build(&triangles, WORK - 1),
+        Err(error) if error.downcast_ref::<GeometryError>() == Some(&GeometryError::WorkBudgetExceeded)
+    ));
+    Ok(())
 }
 
 #[test]
@@ -1036,7 +1089,7 @@ fn unshadowed_patch_replacement_has_budget_boundary() {
         }
     }
     // Includes one unit for replacing the partition and one for frame conversion.
-    const REQUIRED_WORK: usize = 116;
+    const REQUIRED_WORK: usize = 117;
     assert_eq!(high, REQUIRED_WORK);
     assert_eq!(
         evaluate(low),
@@ -1108,6 +1161,61 @@ fn partially_clipped_patches_respect_exact_budget_boundary() {
         Err(error) if error.downcast_ref::<GeometryError>() == Some(&GeometryError::WorkBudgetExceeded)
     ));
     assert_eq!(evaluate(high).unwrap().as_slice(), expected.as_slice());
+}
+
+#[test]
+fn wide_shadow_projection_obeys_end_to_end_budget() -> Result<(), crate::Error> {
+    const EPSILON: f64 = 0.01;
+    let x = -2.0_f64.powi(-500);
+    let mesh = TriangleMesh::new(
+        vec![
+            Vec3::ZERO,
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::new(x, 0.25, 0.25),
+            Vec3::new(x, 0.50, 0.25),
+            Vec3::new(x, 0.25, 0.50),
+        ],
+        vec![[0, 1, 2], [3, 4, 5]],
+    )?;
+    let instances = [instance(&mesh, Vec3::ZERO)];
+    let geometry = surface_geometry(&instances);
+    let evaluate =
+        |budget| geometry.exposed_surface_patches(&instances, Vec3::X + Vec3::Y, EPSILON, budget);
+    let (mut lower, mut upper) = (0, MAX_SURFACE_WORK);
+    let expected = evaluate(upper)?;
+    assert_eq!(expected.len(), 1);
+    assert_eq!(expected.iter().map(|patch| patch.area).sum::<f64>(), 0.5);
+    while upper - lower > 1 {
+        let mid = lower + (upper - lower) / 2;
+        match evaluate(mid) {
+            Ok(patches) => {
+                assert_eq!(patches, expected);
+                upper = mid;
+            }
+            Err(error)
+                if error.downcast_ref::<GeometryError>()
+                    == Some(&GeometryError::WorkBudgetExceeded) =>
+            {
+                lower = mid;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    assert_eq!(evaluate(upper)?, expected);
+    assert_eq!(
+        evaluate(upper - 1),
+        Err(GeometryError::WorkBudgetExceeded.into())
+    );
+    // Three edge planes each charge a reference sign and three coefficients.
+    const EXACT_DETERMINANTS: usize = 12;
+    const WORK_PER_DETERMINANT: usize = 1_224;
+    const ORDINARY_WORK: usize = 382;
+    assert_eq!(
+        upper,
+        EXACT_DETERMINANTS * WORK_PER_DETERMINANT + ORDINARY_WORK
+    );
+    Ok(())
 }
 
 #[test]

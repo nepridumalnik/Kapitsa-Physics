@@ -1,7 +1,16 @@
 //! Finite-wing loads with an analytic attached-flow primitive or explicit polar.
 //!
 //! `FiniteWing` uses lifting-line slope a = a0 / (1 + a0 / (pi e AR)) and
-//! CDi = CL² / (pi e AR), without stall or compressibility continuation.
+//! CDi = CL² / (pi e AR), without stall. Optional explicit closures include
+//! Prandtl-Glauert subsonic compressibility, NDARC transonic corrections and a
+//! bounded Ackeret `4/sqrt(M²−1)` supersonic finite-wing estimate. The
+//! supersonic model uses `AR/(AR+2)` as an engineering finite-span factor and
+//! does not model thickness, sweep, tip relief or shock detachment. An optional
+//! flat-plate post-stall blend extends the attached limit through `±pi/2`; it
+//! uses a caller-selected stall onset; an optional `CL_max`/geometry
+//! lift-curve intersection can replace it. An optional stateful Øye/Bergami
+//! separation lag adds rate-dependent hysteresis but not a leading-edge vortex
+//! or pitching-moment state.
 //! `WingSurface` optionally replaces that closure with caller-supplied TOTAL
 //! CL/CD data and a quasi-steady control incidence shift. No wing interference.
 //! Coefficients refer to planform area; angles are in radians.
@@ -27,6 +36,7 @@ use std::{f64::consts::PI, sync::Arc};
 /// Values are Mach-major (`mach_index * angles.len() + angle_index`).
 /// CD already includes induced and profile drag; these are not 2D section data.
 /// Bilinear interpolation is supported only inside the closed supplied domain.
+/// A single Mach row permits angle interpolation at that Mach value only.
 /// No stall or transonic behavior is inferred beyond the supplied data.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WingPolar {
@@ -41,13 +51,36 @@ impl WingPolar {
         angles: Vec<f64>,
         coefficients: Vec<WingCoefficients>,
     ) -> Result<Self, crate::Error> {
+        if mach.len() < 2 {
+            return Err(WingError::InvalidParameters.into());
+        }
+        Self::from_rows(mach, angles, coefficients)
+    }
+
+    /// Creates a polar measured at a single nonnegative Mach number. Angles
+    /// are in radians and must contain at least two increasing knots. Lookup
+    /// at any other Mach number returns [`WingError::UnsupportedFlow`].
+    pub fn at_mach(
+        mach: f64,
+        angles: Vec<f64>,
+        coefficients: Vec<WingCoefficients>,
+    ) -> Result<Self, crate::Error> {
+        Self::from_rows(vec![mach], angles, coefficients)
+    }
+
+    fn from_rows(
+        mach: Vec<f64>,
+        angles: Vec<f64>,
+        coefficients: Vec<WingCoefficients>,
+    ) -> Result<Self, crate::Error> {
         let valid_axis = |axis: &[f64]| {
-            axis.len() >= 2
+            !axis.is_empty()
                 && axis.iter().all(|v| v.is_finite())
                 && axis.windows(2).all(|pair| pair[0] < pair[1])
         };
         if !valid_axis(&mach)
             || mach[0] < 0.0
+            || angles.len() < 2
             || !valid_axis(&angles)
             || mach.len().checked_mul(angles.len()) != Some(coefficients.len())
             || coefficients
@@ -71,6 +104,9 @@ impl WingPolar {
             if value < axis[0] || value > axis[axis.len() - 1] {
                 return Err(crate::Error::from(WingError::UnsupportedFlow));
             }
+            if axis.len() == 1 {
+                return Ok((0, 0.0));
+            }
             let index = axis
                 .partition_point(|knot| *knot <= value)
                 .saturating_sub(1)
@@ -93,6 +129,7 @@ impl WingPolar {
             drag: x.drag * (1.0 - t) + y.drag * t,
         };
         let n = self.angles.len();
+        let next_m = (m + 1).min(self.mach.len() - 1);
         let result = mix(
             mix(
                 self.coefficients[m * n + a],
@@ -100,8 +137,8 @@ impl WingPolar {
                 at,
             ),
             mix(
-                self.coefficients[(m + 1) * n + a],
-                self.coefficients[(m + 1) * n + a + 1],
+                self.coefficients[next_m * n + a],
+                self.coefficients[next_m * n + a + 1],
                 at,
             ),
             mt,
@@ -186,6 +223,48 @@ pub struct FiniteWing {
     max_attached_angle: f64,
     compressibility: Compressibility,
     drag_rise: Option<DragRise>,
+    post_stall: Option<PostStall>,
+    dynamic_stall: Option<DynamicStall>,
+    predicted_stall_cl_max: Option<f64>,
+}
+
+/// Caller chord and separation-lag scale for the Øye dynamic-stall model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DynamicStall {
+    chord: f64,
+    time_constant_scale: f64,
+}
+
+/// Mutable rate-dependent separation state for [`FiniteWing::coefficients_dynamic`].
+///
+/// `separation` is the attached-flow fraction `f`: one is fully attached and
+/// zero is fully separated. It is updated by the caller's time step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DynamicStallState {
+    separation: f64,
+}
+
+impl DynamicStallState {
+    /// Starts fully attached.
+    pub fn new() -> Self {
+        Self { separation: 1.0 }
+    }
+
+    pub fn separation(self) -> f64 {
+        self.separation
+    }
+}
+
+impl Default for DynamicStallState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Explicit flat-plate post-stall blend width beyond the attached limit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PostStall {
+    blend_angle: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -193,6 +272,7 @@ enum Compressibility {
     Incompressible,
     Subsonic { max_mach: f64 },
     Ndarc { divergence_mach: f64, max_mach: f64 },
+    Supersonic { min_mach: f64, max_mach: f64 },
 }
 
 /// Explicit parameters for an empirical wing compressibility drag increment.
@@ -620,7 +700,116 @@ impl FiniteWing {
             max_attached_angle,
             compressibility: Compressibility::Incompressible,
             drag_rise: None,
+            post_stall: None,
+            dynamic_stall: None,
+            predicted_stall_cl_max: None,
         })
+    }
+
+    /// Adds a bounded flat-plate post-stall extension beyond the attached limit.
+    ///
+    /// The existing `max_attached_angle` is the caller-selected stall onset.
+    /// Over `blend_angle` beyond it, attached lift/drag are blended smoothly to
+    /// the separated flat-plate forms `CL = 2 sin(alpha) cos(alpha) AR/(AR+2)`
+    /// and `CD = profile_drag + 2 sin²(alpha)`. Beyond the blend, those forms
+    /// hold up to `±pi/2`; larger incidence returns `UnsupportedFlow`.
+    ///
+    /// `blend_angle` must be finite, positive and at most
+    /// `pi/2 - max_attached_angle`. This is an
+    /// engineering post-stall approximation, not a prediction of stall onset,
+    /// hysteresis, dynamic stall, separated-wake geometry or roughness effects.
+    /// It does not add a pitching-moment model or a control-surface stall model.
+    pub fn with_flat_plate_post_stall(mut self, blend_angle: f64) -> Result<Self, crate::Error> {
+        if !blend_angle.is_finite()
+            || blend_angle <= 0.0
+            || self.max_attached_angle + blend_angle > PI / 2.0
+        {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        self.predicted_stall_cl_max = None;
+        self.post_stall = Some(PostStall { blend_angle });
+        Ok(self)
+    }
+
+    /// Replaces the caller-selected stall onset with a `CL_max` intersection
+    /// of the finite-wing attached lift curve.
+    ///
+    /// `cl_max` is the caller's measured or otherwise justified maximum lift
+    /// coefficient. The predicted angle is
+    /// `alpha_zero + cl_max / (dCL/dalpha)`, where the slope includes aspect
+    /// ratio, efficiency, zero-lift angle and the configured compressibility
+    /// model. The result must be finite, inside `[-pi/2, pi/2]`, and fit with
+    /// the flat-plate blend before `pi/2`. This is an engineering
+    /// lift-curve-intersection estimate, not a CFD or aerodynamic stall-onset
+    /// prediction; the caller owns `CL_max` and its validity.
+    pub fn with_predicted_stall_onset(
+        mut self,
+        cl_max: f64,
+        blend_angle: f64,
+    ) -> Result<Self, crate::Error> {
+        if !cl_max.is_finite() || cl_max <= 0.0 {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        self = self.with_flat_plate_post_stall(blend_angle)?;
+        self.predicted_stall_cl_max = Some(cl_max);
+        let angle = self.predicted_stall_angle(cl_max, 0.0)?;
+        if angle.abs() + blend_angle > PI / 2.0 {
+            self.predicted_stall_cl_max = None;
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        Ok(self)
+    }
+
+    /// Predicts the stall angle from a caller-supplied `CL_max` and current
+    /// Mach. See [`Self::with_predicted_stall_onset`] for assumptions.
+    pub fn predicted_stall_angle(&self, cl_max: f64, mach: f64) -> Result<f64, crate::Error> {
+        if !cl_max.is_finite() || cl_max <= 0.0 || !mach.is_finite() || mach < 0.0 {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        let slope = self.attached_lift(1.0, mach)?;
+        if !slope.is_finite() || slope <= 0.0 {
+            return Err(crate::Error::from(WingError::ArithmeticOverflow));
+        }
+        let angle = self.zero_lift_angle + cl_max / slope;
+        if !angle.is_finite() || angle <= -PI / 2.0 || angle >= PI / 2.0 {
+            return Err(crate::Error::from(WingError::UnsupportedFlow));
+        }
+        Ok(angle)
+    }
+
+    fn stall_angle(&self, mach: f64) -> Result<f64, crate::Error> {
+        match self.predicted_stall_cl_max {
+            Some(cl_max) => self.predicted_stall_angle(cl_max, mach),
+            None => Ok(self.max_attached_angle),
+        }
+    }
+
+    /// Enables the Øye/Bergami rate-dependent separation model.
+    ///
+    /// `chord` is the section chord in metres and `time_constant_scale` is the
+    /// dimensionless Øye constant (typically about 8). The caller must also
+    /// enable [`Self::with_flat_plate_post_stall`] so a static separated polar
+    /// exists. Dynamic coefficients are evaluated with
+    /// [`Self::coefficients_dynamic`] and a caller-owned
+    /// [`DynamicStallState`]; this builder alone does not make the stateless
+    /// [`Self::coefficients`] rate-dependent.
+    pub fn with_oye_dynamic_stall(
+        mut self,
+        chord: f64,
+        time_constant_scale: f64,
+    ) -> Result<Self, crate::Error> {
+        if !chord.is_finite()
+            || chord <= 0.0
+            || !time_constant_scale.is_finite()
+            || time_constant_scale <= 0.0
+        {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        self.dynamic_stall = Some(DynamicStall {
+            chord,
+            time_constant_scale,
+        });
+        Ok(self)
     }
 
     /// Enables a subsonic Prandtl-Glauert lifting-line approximation.
@@ -666,6 +855,45 @@ impl FiniteWing {
         Ok(self)
     }
 
+    /// Enables a linearized supersonic finite-wing approximation for
+    /// `1.2 <= Mach <= max_mach <= 5`.
+    ///
+    /// The section lift slope is Ackeret's `4 / sqrt(M² - 1)`. A finite-span
+    /// engineering factor `AR / (AR + 2)` reduces that slope for low aspect
+    /// ratios; it approaches the two-dimensional value as `AR` grows and is not
+    /// a general supersonic lifting-surface solution. Lift is
+    /// `CL = slope (alpha - alpha_zero)` and drag is
+    /// `CD = profile_drag + |CL alpha|`; the latter is the attached flat-plate
+    /// wave-drag term, not separated flow or viscous drag. Span efficiency is
+    /// not used by this supersonic lift slope because it is a subsonic
+    /// induced-drag parameter.
+    ///
+    /// The caller must establish a thin, uncambered or consistently tabulated
+    /// section, attached small-incidence flow, supersonic leading and trailing
+    /// edges, and a moderate supersonic Mach in the linear-theory range. This
+    /// model does not predict thickness, camber, sweep, tip relief, shock
+    /// detachment, shock-boundary-layer interaction, separation or real-gas
+    /// effects. It is incompatible with the transonic drag-rise builders.
+    pub fn with_supersonic_linear_theory(
+        mut self,
+        min_mach: f64,
+        max_mach: f64,
+    ) -> Result<Self, crate::Error> {
+        const MIN_SUPERSONIC_MACH: f64 = 1.2;
+        const MAX_SUPERSONIC_MACH: f64 = 5.0;
+        if !min_mach.is_finite()
+            || !max_mach.is_finite()
+            || min_mach < MIN_SUPERSONIC_MACH
+            || max_mach < min_mach
+            || max_mach > MAX_SUPERSONIC_MACH
+            || self.drag_rise.is_some()
+        {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        self.compressibility = Compressibility::Supersonic { min_mach, max_mach };
+        Ok(self)
+    }
+
     /// Adds the empirical NDARC compressibility drag increment.
     ///
     /// `critical_mach` is dimensionless, finite, and in (0, 1); `scale` is a
@@ -682,6 +910,7 @@ impl FiniteWing {
             || critical_mach >= 1.0
             || !scale.is_finite()
             || scale < 0.0
+            || matches!(self.compressibility, Compressibility::Supersonic { .. })
         {
             return Err(crate::Error::from(WingError::InvalidParameters));
         }
@@ -756,26 +985,46 @@ impl FiniteWing {
             return Err(crate::Error::from(WingError::InvalidFlow));
         }
         let alpha = angle_of_attack - self.zero_lift_angle;
-        let max_mach = match self.compressibility {
-            Compressibility::Incompressible => 0.3,
+        let (min_mach, max_mach) = match self.compressibility {
+            Compressibility::Incompressible => (0.0, 0.3),
             Compressibility::Subsonic { max_mach } | Compressibility::Ndarc { max_mach, .. } => {
-                max_mach
+                (0.0, max_mach)
             }
+            Compressibility::Supersonic { min_mach, max_mach } => (min_mach, max_mach),
         };
-        if mach > max_mach || alpha.abs() > self.max_attached_angle {
+        let post_stall_limit = if self.post_stall.is_some() {
+            PI / 2.0
+        } else {
+            self.max_attached_angle
+        };
+        if mach < min_mach || mach > max_mach || alpha.abs() > post_stall_limit {
             return Err(crate::Error::from(WingError::UnsupportedFlow));
         }
+        let stall_angle = self.stall_angle(mach)?;
+        if self
+            .post_stall
+            .is_some_and(|post| stall_angle.abs() + post.blend_angle > PI / 2.0)
+        {
+            return Err(crate::Error::from(WingError::UnsupportedFlow));
+        }
+        let alpha_attached = alpha.clamp(-stall_angle, stall_angle);
         let effective_aspect = self.efficiency * self.aspect_ratio;
         let beta = match self.compressibility {
             Compressibility::Subsonic { .. } => (1.0 - mach * mach).sqrt(),
+            Compressibility::Supersonic { .. } => (mach * mach - 1.0).sqrt(),
             _ => 1.0,
         };
         // Algebraically equivalent form without overflowing pi*e*AR, or
         // underflowing the slope by first dividing 2*pi by a tiny denominator.
-        let slope = if effective_aspect >= 2.0 {
-            2.0 * PI / (beta + 2.0 / effective_aspect)
-        } else {
-            PI * effective_aspect / (1.0 + beta * effective_aspect / 2.0)
+        // The supersonic branch uses Ackeret's section slope with an explicit
+        // finite-span engineering factor, not the subsonic lifting-line form.
+        let slope = match self.compressibility {
+            Compressibility::Supersonic { .. } => {
+                let finite_span = self.aspect_ratio / (self.aspect_ratio + 2.0);
+                4.0 / beta * finite_span
+            }
+            _ if effective_aspect >= 2.0 => 2.0 * PI / (beta + 2.0 / effective_aspect),
+            _ => PI * effective_aspect / (1.0 + beta * effective_aspect / 2.0),
         };
         let lift_factor = match self.compressibility {
             Compressibility::Ndarc {
@@ -794,39 +1043,167 @@ impl FiniteWing {
             }
             _ => 1.0,
         };
-        let lift = (slope * alpha) * lift_factor;
+        let mut lift = (slope * alpha_attached) * lift_factor;
         if effective_aspect == 0.0 || !lift.is_finite() {
             return Err(crate::Error::from(WingError::ArithmeticOverflow));
         }
-        let drag_rise = if let Some(model) = self.drag_rise {
-            let critical_mach = if model.lift_sensitivity != 0.0 {
-                if !(0.0..=1.0).contains(&lift) {
-                    return Err(crate::Error::from(WingError::UnsupportedFlow));
-                }
-                let correction = lift * (0.03 + lift * (0.19 + lift * 0.78));
-                model.critical_mach - model.lift_sensitivity * correction
-            } else {
-                model.critical_mach
-            };
-            if !critical_mach.is_finite() || critical_mach <= 0.0 {
-                return Err(crate::Error::from(WingError::ArithmeticOverflow));
+        let mut drag = match self.compressibility {
+            Compressibility::Supersonic { .. } => self.profile_drag + (lift * alpha_attached).abs(),
+            _ => {
+                let drag_rise = if let Some(model) = self.drag_rise {
+                    let critical_mach = if model.lift_sensitivity != 0.0 {
+                        if !(0.0..=1.0).contains(&lift) {
+                            return Err(crate::Error::from(WingError::UnsupportedFlow));
+                        }
+                        let correction = lift * (0.03 + lift * (0.19 + lift * 0.78));
+                        model.critical_mach - model.lift_sensitivity * correction
+                    } else {
+                        model.critical_mach
+                    };
+                    if !critical_mach.is_finite() || critical_mach <= 0.0 {
+                        return Err(crate::Error::from(WingError::ArithmeticOverflow));
+                    }
+                    let ratio = mach / critical_mach;
+                    if ratio > 1.1 && !model.hold_above_limit {
+                        return Err(crate::Error::from(WingError::UnsupportedFlow));
+                    }
+                    let x = (ratio.min(1.1) - 0.7).max(0.0);
+                    let x2 = x * x;
+                    let x4 = x2 * x2;
+                    model.scale * (6.5 * x2 + 28.0 * x4 + 2870.0 * x4 * x4)
+                } else {
+                    0.0
+                };
+                self.profile_drag + (lift / effective_aspect) * (lift / PI) + drag_rise
             }
-            let ratio = mach / critical_mach;
-            if ratio > 1.1 && !model.hold_above_limit {
-                return Err(crate::Error::from(WingError::UnsupportedFlow));
-            }
-            let x = (ratio.min(1.1) - 0.7).max(0.0);
-            let x2 = x * x;
-            let x4 = x2 * x2;
-            model.scale * (6.5 * x2 + 28.0 * x4 + 2870.0 * x4 * x4)
-        } else {
-            0.0
         };
-        let drag = self.profile_drag + (lift / effective_aspect) * (lift / PI) + drag_rise;
+        if let Some(post_stall) = self.post_stall
+            && alpha.abs() > stall_angle
+        {
+            let blend = ((alpha.abs() - stall_angle) / post_stall.blend_angle).clamp(0.0, 1.0);
+            let blend = blend * blend * (3.0 - 2.0 * blend);
+            let finite_span = self.aspect_ratio / (self.aspect_ratio + 2.0);
+            let flat_lift = 2.0 * alpha.sin() * alpha.cos() * finite_span;
+            let flat_drag = self.profile_drag + 2.0 * alpha.sin().powi(2);
+            lift = (1.0 - blend) * lift + blend * flat_lift;
+            drag = (1.0 - blend) * drag + blend * flat_drag;
+        }
         if effective_aspect == 0.0 || !lift.is_finite() || !drag.is_finite() {
             return Err(crate::Error::from(WingError::ArithmeticOverflow));
         }
         Ok(WingCoefficients { lift, drag })
+    }
+
+    /// Evaluates the Øye/Bergami rate-dependent separation state.
+    ///
+    /// `relative_speed` is the section-relative speed in m/s and `dt` is the
+    /// positive integration step in seconds. The static attached polar is the
+    /// linear lift extrapolation; the static separated polar is derived from
+    /// [`Self::coefficients`] and the configured flat-plate post-stall branch.
+    /// `state` is updated only after a successful evaluation. This is a
+    /// reduced-order separation-lag model, not a Beddoes–Leishman vortex or
+    /// pitching-moment model. Invalid time/speed/state, missing post-stall or
+    /// dynamic-stall configuration, nonfinite coefficients and negative drag
+    /// are explicit errors.
+    pub fn coefficients_dynamic(
+        &self,
+        angle_of_attack: f64,
+        mach: f64,
+        relative_speed: f64,
+        dt: f64,
+        state: &mut DynamicStallState,
+    ) -> Result<WingCoefficients, crate::Error> {
+        let dynamic = self
+            .dynamic_stall
+            .ok_or_else(|| crate::Error::from(WingError::InvalidParameters))?;
+        if self.post_stall.is_none() {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        if !relative_speed.is_finite()
+            || relative_speed <= 0.0
+            || !dt.is_finite()
+            || dt <= 0.0
+            || !state.separation.is_finite()
+            || !(0.0..=1.0).contains(&state.separation)
+        {
+            return Err(crate::Error::from(WingError::InvalidParameters));
+        }
+        let static_coefficients = self.coefficients(angle_of_attack, mach)?;
+        let alpha = angle_of_attack - self.zero_lift_angle;
+        let attached = self.attached_lift(alpha, mach)?;
+        let ratio = static_coefficients.lift / attached;
+        let static_separation = if attached.abs() < 1e-12 {
+            1.0
+        } else if ratio > 0.0 {
+            let value = 2.0 * ratio.sqrt() - 1.0;
+            (value * value).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let separated_lift = if 1.0 - static_separation > 1e-9 {
+            (static_coefficients.lift - static_separation * attached) / (1.0 - static_separation)
+        } else {
+            static_coefficients.lift
+        };
+        let tau = dynamic.time_constant_scale * dynamic.chord / (2.0 * relative_speed);
+        if !tau.is_finite() || tau <= 0.0 {
+            return Err(crate::Error::from(WingError::ArithmeticOverflow));
+        }
+        let decay = (-dt / tau).exp();
+        if !decay.is_finite() {
+            return Err(crate::Error::from(WingError::ArithmeticOverflow));
+        }
+        let separation =
+            (static_separation + (state.separation - static_separation) * decay).clamp(0.0, 1.0);
+        let lift = separation * attached + (1.0 - separation) * separated_lift;
+        let zero_drag = self.coefficients(0.0, mach)?.drag;
+        let increment = (static_coefficients.drag - zero_drag)
+            * (0.5 * (static_separation.sqrt() - separation.sqrt())
+                - 0.25 * (separation - static_separation));
+        let drag = static_coefficients.drag + increment;
+        if !lift.is_finite() || !drag.is_finite() || drag < 0.0 {
+            return Err(crate::Error::from(WingError::ArithmeticOverflow));
+        }
+        state.separation = separation;
+        Ok(WingCoefficients { lift, drag })
+    }
+
+    fn attached_lift(self, alpha: f64, mach: f64) -> Result<f64, crate::Error> {
+        let effective_aspect = self.efficiency * self.aspect_ratio;
+        let beta = match self.compressibility {
+            Compressibility::Subsonic { .. } => (1.0 - mach * mach).sqrt(),
+            Compressibility::Supersonic { .. } => (mach * mach - 1.0).sqrt(),
+            _ => 1.0,
+        };
+        let slope = match self.compressibility {
+            Compressibility::Supersonic { .. } => {
+                let finite_span = self.aspect_ratio / (self.aspect_ratio + 2.0);
+                4.0 / beta * finite_span
+            }
+            _ if effective_aspect >= 2.0 => 2.0 * PI / (beta + 2.0 / effective_aspect),
+            _ => PI * effective_aspect / (1.0 + beta * effective_aspect / 2.0),
+        };
+        let lift_factor = match self.compressibility {
+            Compressibility::Ndarc {
+                divergence_mach, ..
+            } if mach < divergence_mach => 1.0 / (1.0 - mach * mach).sqrt(),
+            Compressibility::Ndarc {
+                divergence_mach, ..
+            } if mach < 1.0 => {
+                let decay = (1.0 - mach)
+                    / ((1.0 - divergence_mach) * (1.0 - divergence_mach * divergence_mach).sqrt());
+                if mach <= divergence_mach + 0.1 {
+                    decay
+                } else {
+                    decay + (mach - divergence_mach - 0.1) / (0.9 - divergence_mach)
+                }
+            }
+            _ => 1.0,
+        };
+        let lift = slope * alpha * lift_factor;
+        lift.is_finite()
+            .then_some(lift)
+            .ok_or_else(|| crate::Error::from(WingError::ArithmeticOverflow))
     }
 }
 
@@ -1036,12 +1413,10 @@ mod tests {
                 drag: 0.27292,
             },
         ];
-        // WingPolar requires two Mach knots. The second, duplicated row is a
-        // structural fixture only: it supplies no evidence at another Mach.
-        let polar = WingPolar::new(
-            vec![0.15, 0.16],
+        let polar = WingPolar::at_mach(
+            0.15,
             degrees.iter().map(|a| a.to_radians()).collect(),
-            measured.iter().chain(measured.iter()).copied().collect(),
+            measured.to_vec(),
         )?;
         for (angle, expected) in degrees.into_iter().zip(measured) {
             let actual = polar.coefficients(angle.to_radians(), 0.15)?;
@@ -1062,6 +1437,10 @@ mod tests {
         );
         assert_eq!(
             polar.coefficients(17.13_f64.to_radians(), 0.14),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
+        assert_eq!(
+            polar.coefficients(17.13_f64.to_radians(), 0.15_f64.next_up()),
             Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         Ok(())
@@ -1258,6 +1637,197 @@ mod tests {
             model.coefficients(0.0, 1.21),
             Err(crate::Error::from(WingError::UnsupportedFlow))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn flat_plate_post_stall_blends_and_bounds_incidence() -> Result<(), crate::Error> {
+        let base = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?;
+        let model = base.with_flat_plate_post_stall(0.2)?;
+        assert_eq!(model.coefficients(0.3, 0.1)?, base.coefficients(0.3, 0.1)?);
+        let left = model.coefficients(0.3, 0.1)?;
+        let right = model.coefficients(0.3001, 0.1)?;
+        assert!((left.lift - right.lift).abs() < 1e-3);
+        assert!((left.drag - right.drag).abs() < 1e-3);
+        let separated = model.coefficients(PI / 4.0, 0.1)?;
+        let expected_lift = 2.0 * (PI / 4.0).sin() * (PI / 4.0).cos() * 0.8;
+        assert!((separated.lift - expected_lift).abs() < 1e-12);
+        assert!((separated.drag - (0.02 + 1.0)).abs() < 1e-12);
+        let normal = model.coefficients(PI / 2.0, 0.1)?;
+        assert!(normal.lift.abs() < 1e-12);
+        assert!((normal.drag - 2.02).abs() < 1e-12);
+        let negative = model.coefficients(-PI / 4.0, 0.1)?;
+        assert!((negative.lift + expected_lift).abs() < 1e-12);
+        assert!((negative.drag - separated.drag).abs() < 1e-12);
+        assert_eq!(
+            model.coefficients(PI / 2.0 + 0.01, 0.1),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
+        assert_eq!(
+            base.coefficients(0.31, 0.1),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
+        for blend in [0.0, -1.0, PI / 2.0 + 0.01, f64::NAN] {
+            assert!(
+                base.with_flat_plate_post_stall(blend).is_err(),
+                "accepted blend={blend}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn predicted_stall_onset_uses_cl_max_and_geometry() -> Result<(), crate::Error> {
+        let model =
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?.with_predicted_stall_onset(1.2, 0.2)?;
+        let slope = 2.0 * PI / (1.0 + 2.0 / (0.8 * 8.0));
+        let expected = 1.2 / slope;
+        let predicted = model.predicted_stall_angle(1.2, 0.0)?;
+        assert!((predicted - expected).abs() < 1e-12);
+        assert!((model.predicted_stall_angle(1.2, 0.0)? - predicted).abs() < 1e-12);
+        assert!(model.coefficients(predicted - 0.01, 0.1)?.lift > 0.0);
+        let higher_ar =
+            FiniteWing::new(12.0, 0.8, 0.02, 0.0, 0.3)?.with_predicted_stall_onset(1.2, 0.2)?;
+        assert!(higher_ar.predicted_stall_angle(1.2, 0.0)? < predicted);
+        let higher_cl =
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?.with_predicted_stall_onset(1.5, 0.2)?;
+        assert!(higher_cl.predicted_stall_angle(1.5, 0.0)? > predicted);
+        let dynamic = model.with_oye_dynamic_stall(1.0, 8.0)?;
+        let mut state = DynamicStallState::default();
+        let static_post = dynamic.coefficients(predicted + 0.1, 0.1)?;
+        let dynamic_post =
+            dynamic.coefficients_dynamic(predicted + 0.1, 0.1, 20.0, 0.01, &mut state)?;
+        assert!(dynamic_post.lift > static_post.lift);
+        assert!(state.separation() < 1.0);
+        for cl_max in [0.0, -1.0, f64::NAN] {
+            assert!(
+                FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?
+                    .with_predicted_stall_onset(cl_max, 0.2)
+                    .is_err()
+            );
+        }
+        assert!(
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?
+                .with_predicted_stall_onset(1.2, 0.0)
+                .is_err()
+        );
+        assert!(
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?
+                .with_predicted_stall_onset(1e6, 0.2)
+                .is_err()
+        );
+        assert_eq!(
+            model.predicted_stall_angle(1.2, f64::NAN),
+            Err(crate::Error::from(WingError::InvalidParameters))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oye_dynamic_stall_has_rate_dependent_hysteresis() -> Result<(), crate::Error> {
+        let model = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?
+            .with_flat_plate_post_stall(0.3)?
+            .with_oye_dynamic_stall(1.0, 8.0)?;
+        let mut state = DynamicStallState::default();
+        let attached = model.coefficients_dynamic(0.2, 0.1, 20.0, 0.01, &mut state)?;
+        let static_attached = model.coefficients(0.2, 0.1)?;
+        assert!((attached.lift - static_attached.lift).abs() < 1e-12);
+        assert!((attached.drag - static_attached.drag).abs() < 1e-12);
+
+        let static_stalled = model.coefficients(0.5, 0.1)?;
+        let mut pitch_up = DynamicStallState::default();
+        let up = model.coefficients_dynamic(0.5, 0.1, 20.0, 0.01, &mut pitch_up)?;
+        assert!(up.lift > static_stalled.lift);
+        assert!(pitch_up.separation() > 0.0 && pitch_up.separation() < 1.0);
+
+        let mut pitch_down = DynamicStallState { separation: 0.0 };
+        let down = model.coefficients_dynamic(0.5, 0.1, 20.0, 0.01, &mut pitch_down)?;
+        assert!(down.lift < up.lift);
+        assert!(pitch_down.separation() > 0.0);
+
+        assert_eq!(
+            model.coefficients_dynamic(0.5, 0.1, 20.0, 0.0, &mut pitch_up),
+            Err(crate::Error::from(WingError::InvalidParameters))
+        );
+        assert_eq!(
+            model.coefficients_dynamic(0.5, 0.1, 0.0, 0.01, &mut pitch_up),
+            Err(crate::Error::from(WingError::InvalidParameters))
+        );
+        assert_eq!(
+            model.coefficients_dynamic(
+                0.5,
+                0.1,
+                20.0,
+                0.01,
+                &mut DynamicStallState { separation: 2.0 }
+            ),
+            Err(crate::Error::from(WingError::InvalidParameters))
+        );
+        assert!(
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?
+                .with_flat_plate_post_stall(0.3)?
+                .coefficients_dynamic(0.5, 0.1, 20.0, 0.01, &mut state)
+                .is_err()
+        );
+        assert!(model.with_oye_dynamic_stall(0.0, 8.0).is_err());
+        assert!(model.with_oye_dynamic_stall(1.0, 0.0).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn supersonic_linear_wing_uses_ackeret_and_explicit_domain() -> Result<(), crate::Error> {
+        let model =
+            FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.4)?.with_supersonic_linear_theory(1.2, 3.0)?;
+        let alpha = 0.1;
+        let mach: f64 = 2.0;
+        let beta = (mach * mach - 1.0).sqrt();
+        let expected_lift = 4.0 / beta * (4.0 / 6.0) * alpha;
+        let coefficients = model.coefficients(alpha, mach)?;
+        assert!((coefficients.lift - expected_lift).abs() < 1e-12);
+        assert!((coefficients.drag - (0.02 + expected_lift * alpha)).abs() < 1e-12);
+        assert!(coefficients.drag > 0.0);
+        // Ackeret's two-dimensional limit is approached as AR grows.
+        let high_ar = FiniteWing::new(100.0, 1.0, 0.0, 0.0, 0.4)?
+            .with_supersonic_linear_theory(1.2, 3.0)?
+            .coefficients(alpha, mach)?;
+        let two_dimensional = 4.0 / beta * alpha;
+        assert!(high_ar.lift < two_dimensional);
+        assert!((high_ar.lift / two_dimensional - 100.0 / 102.0).abs() < 1e-12);
+        // Negative incidence produces negative lift and positive drag.
+        let negative = model.coefficients(-alpha, mach)?;
+        assert!(negative.lift < 0.0);
+        assert!((negative.drag - coefficients.drag).abs() < 1e-12);
+        // Explicit supersonic domain.
+        assert_eq!(
+            model.coefficients(alpha, 1.1),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
+        assert_eq!(
+            model.coefficients(alpha, 3.1),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
+        // Transonic drag-rise builders cannot be combined with this model.
+        assert!(model.with_drag_rise(0.8, 0.001).is_err());
+        assert!(
+            FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.4)?
+                .with_drag_rise(0.8, 0.001)?
+                .with_supersonic_linear_theory(1.2, 3.0)
+                .is_err()
+        );
+        for (min, max) in [
+            (1.1, 3.0),
+            (1.2, 0.0),
+            (1.2, 6.0),
+            (f64::NAN, 3.0),
+            (1.2, f64::NAN),
+        ] {
+            assert!(
+                FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.4)?
+                    .with_supersonic_linear_theory(min, max)
+                    .is_err(),
+                "accepted min={min} max={max}"
+            );
+        }
         Ok(())
     }
 

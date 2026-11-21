@@ -112,7 +112,10 @@ mod aerodynamics {
                     world.part_aerodynamic_geometry.as_ref(),
                     &world.colliders,
                     &mut assembly_cache,
-                    atmosphere,
+                    super::assembly_aerodynamics::AssemblyEnvironment {
+                        atmosphere,
+                        oriented_cavities: world.preserve_assembly_mesh_cavities,
+                    },
                 )?;
                 let mut body = entry.body.motion();
                 let mut wave_cache = crate::aerodynamics::cache::PreparedGeometryCache::default();
@@ -139,11 +142,15 @@ mod aerodynamics {
                     },
                     &mut body,
                     &world.parts,
-                    super::AerodynamicsInputs::new(world.mesh_sound_speed)
-                        .with_base_pressure(&entry.body.base_pressure_patches)
-                        .with_cluster(entry.cluster.as_ref())
-                        .with_assembly(patches.as_ref())
-                        .with_voxel_wave(voxel_wave.as_ref()),
+                    super::AerodynamicsInputs::new(
+                        world.mesh_sound_speed,
+                        world.mesh_pressure_model,
+                    )
+                    .with_base_pressure(&entry.body.base_pressure_patches)
+                    .with_empirical_base(world.mesh_empirical_base)
+                    .with_cluster(entry.cluster.as_ref())
+                    .with_assembly(patches.as_ref())
+                    .with_voxel_wave(voxel_wave.as_ref()),
                 )?;
             }
             Ok(())
@@ -555,6 +562,7 @@ struct AerodynamicsBodyUpdate {
 
 struct PreparedAerodynamicLoads {
     mesh_patches: Option<crate::aerodynamics::geometry::PreparedSurfacePatches>,
+    empirical_base_patches: Option<Vec<crate::aerodynamics::pressure::PressurePatch>>,
     sphere_patches: Option<Vec<crate::aerodynamics::pressure::PressurePatch>>,
     voxel_wave: Option<crate::aerodynamics::hull::HullSection>,
     assembly_wave: Option<(PartId, crate::aerodynamics::hull::HullSection)>,
@@ -564,9 +572,13 @@ struct PreparedAerodynamicLoads {
 /// Borrowed inputs prepared before aerodynamic loads are evaluated.
 struct AerodynamicsInputs<'a> {
     mesh_sound_speed: f64,
+    mesh_pressure_model: crate::aerodynamics::pressure::MeshPressureModel,
+    empirical_base: Option<crate::aerodynamics::pressure::EmpiricalBasePressure>,
     cluster: Option<&'a RigidCluster>,
     dt: Option<f64>,
     mesh_patches: Option<&'a crate::aerodynamics::geometry::PreparedSurfacePatches>,
+    empirical_base_patches: Option<&'a [crate::aerodynamics::pressure::PressurePatch]>,
+    collider_mesh: Option<&'a crate::shape::TriangleMesh>,
     sphere_patches: Option<&'a [crate::aerodynamics::pressure::PressurePatch]>,
     voxel_wave: Option<&'a crate::aerodynamics::hull::HullSection>,
     assembly_wave: Option<&'a (PartId, crate::aerodynamics::hull::HullSection)>,
@@ -583,12 +595,19 @@ struct AerodynamicsInputs<'a> {
 }
 
 impl<'a> AerodynamicsInputs<'a> {
-    fn new(mesh_sound_speed: f64) -> Self {
+    fn new(
+        mesh_sound_speed: f64,
+        mesh_pressure_model: crate::aerodynamics::pressure::MeshPressureModel,
+    ) -> Self {
         Self {
             mesh_sound_speed,
+            mesh_pressure_model,
+            empirical_base: None,
             cluster: None,
             dt: None,
             mesh_patches: None,
+            empirical_base_patches: None,
+            collider_mesh: None,
             sphere_patches: None,
             voxel_wave: None,
             assembly_wave: None,
@@ -604,6 +623,14 @@ impl<'a> AerodynamicsInputs<'a> {
 
     fn with_cluster(mut self, cluster: Option<&'a RigidCluster>) -> Self {
         self.cluster = cluster;
+        self
+    }
+
+    fn with_empirical_base(
+        mut self,
+        base: Option<crate::aerodynamics::pressure::EmpiricalBasePressure>,
+    ) -> Self {
+        self.empirical_base = base;
         self
     }
 
@@ -656,10 +683,16 @@ impl<'a> AerodynamicsInputs<'a> {
 
     fn with_loads(mut self, loads: &'a PreparedAerodynamicLoads) -> Self {
         self.mesh_patches = loads.mesh_patches.as_ref();
+        self.empirical_base_patches = loads.empirical_base_patches.as_deref();
         self.sphere_patches = loads.sphere_patches.as_deref();
         self.voxel_wave = loads.voxel_wave.as_ref();
         self.assembly_wave = loads.assembly_wave.as_ref();
         self.wing_visibility = loads.wing_visibility.as_deref();
+        self
+    }
+
+    fn with_collider_mesh(mut self, mesh: Option<&'a crate::shape::TriangleMesh>) -> Self {
+        self.collider_mesh = mesh;
         self
     }
 
@@ -847,9 +880,16 @@ pub struct PhysicsWorld {
     part_gravity_published: Vec<PartGravityWrench>,
     part_gravity_pending: Vec<PartGravityWrench>,
     atmosphere: Atmosphere,
-    /// Sound speed used by the Newtonian mesh pressure model (m/s).
+    /// Sound speed used by the Mesh/Colliders pressure models (m/s).
     /// The default is 340 m/s; callers should set this for their atmosphere.
     mesh_sound_speed: f64,
+    /// Surface-pressure closure for primary and assembly Mesh/Colliders loads.
+    mesh_pressure_model: crate::aerodynamics::pressure::MeshPressureModel,
+    /// Optional empirical base-pressure add-on for the primary closed
+    /// Mesh/Colliders body.
+    mesh_empirical_base: Option<crate::aerodynamics::pressure::EmpiricalBasePressure>,
+    preserve_body_mesh_cavities: bool,
+    preserve_assembly_mesh_cavities: bool,
     aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
     part_hull_published: Vec<PartHullWrench>,
     part_hull_pending: Vec<PartHullWrench>,
@@ -1579,6 +1619,10 @@ impl PhysicsWorld {
             part_gravity_pending: Vec::new(),
             atmosphere: Atmosphere::Vacuum,
             mesh_sound_speed: 340.0,
+            mesh_pressure_model: crate::aerodynamics::pressure::MeshPressureModel::Newtonian,
+            mesh_empirical_base: None,
+            preserve_body_mesh_cavities: false,
+            preserve_assembly_mesh_cavities: false,
             aerodynamics_body_updates: Vec::new(),
             part_hull_published: Vec::new(),
             part_hull_pending: Vec::new(),
@@ -1650,9 +1694,84 @@ impl PhysicsWorld {
         Ok(())
     }
 
+    /// Selects oriented cavity handling for primary Mesh/Colliders geometry
+    /// on non-cluster bodies. The default is solid fill. The next preparation
+    /// uses the new rule, with the existing voxel and work budgets.
+    pub fn set_body_mesh_oriented_cavities(&mut self, enabled: bool) {
+        self.preserve_body_mesh_cavities = enabled;
+    }
+
+    /// Selects oriented cavity handling for assembly geometry. The default is
+    /// solid fill. Changing the rule discards derived occupancy, wing shielding
+    /// and wave data so the next preparation uses consistent geometry.
+    pub fn set_assembly_mesh_oriented_cavities(&mut self, enabled: bool) {
+        if self.preserve_assembly_mesh_cavities != enabled {
+            self.preserve_assembly_mesh_cavities = enabled;
+            self.assembly_aerodynamics = None;
+        }
+    }
+
     /// Returns the uniform Mesh/Colliders sound speed in m/s.
     pub fn mesh_sound_speed(&self) -> f64 {
         self.mesh_sound_speed
+    }
+
+    /// Selects the surface-pressure closure for primary and part-owned
+    /// Mesh/Colliders geometry. The default is unmodified Newtonian impact
+    /// pressure, which requires Mach >= 5.
+    ///
+    /// [`crate::aerodynamics::MeshPressureModel::ModifiedNewtonian`] enables
+    /// the compression-only extension for `0 <= Mach <= 5`. It uses the same
+    /// prepared exposure geometry and does not add a wake or friction.
+    /// [`crate::aerodynamics::MeshPressureModel::PotentialFlow`] enables a
+    /// bounded incompressible source-panel model for a closed isolated primary
+    /// Mesh/Colliders body at Mach <= 0.2 and up to 256 triangles; it does not
+    /// support clusters/parts or separation; it supports quasi-steady rigid
+    /// rotation through panel-local velocity. `KuttaLifting` derives
+    /// an equivalent uncambered thin wing from a closed wing mesh and applies
+    /// the finite-wing trailing-vortex lifting-line wake at Mach <= 0.3.
+    /// `VortexLattice` applies a bounded horseshoe-vortex lattice with a flat
+    /// trailing wake to a closed thin wing mesh. Changing the model does not
+    /// invalidate prepared geometry; the next aerodynamic evaluation uses the
+    /// new closure.
+    /// A body above the selected model's Mach domain returns an explicit
+    /// pressure error and rolls back its step.
+    pub fn set_mesh_pressure_model(
+        &mut self,
+        model: crate::aerodynamics::pressure::MeshPressureModel,
+    ) {
+        self.mesh_pressure_model = model;
+    }
+
+    /// Returns the current Mesh/Colliders surface-pressure closure.
+    pub fn mesh_pressure_model(&self) -> crate::aerodynamics::pressure::MeshPressureModel {
+        self.mesh_pressure_model
+    }
+
+    /// Configures the opt-in empirical base-pressure add-on for the primary
+    /// closed Mesh/Colliders body.
+    ///
+    /// The model adds `Cp_b(M, a_b)` from
+    /// [`crate::aerodynamics::pressure::EmpiricalBasePressure`] to rear-facing
+    /// prepared patches whose normals are within 10 degrees of the COM
+    /// body-motion direction. It requires the `Newtonian` or
+    /// `ModifiedNewtonian` surface closure, no cluster, no sphere substitute and
+    /// a Mach number in 1–5. Changing this setting does not invalidate prepared
+    /// geometry; the next aerodynamic evaluation uses the new closure. This is a
+    /// bounded empirical wake approximation, not a separated-wake solution.
+    pub fn set_mesh_empirical_base_pressure(
+        &mut self,
+        base: Option<crate::aerodynamics::pressure::EmpiricalBasePressure>,
+    ) {
+        self.mesh_empirical_base = base;
+    }
+
+    /// Returns the configured empirical base-pressure add-on, if any.
+    #[must_use]
+    pub fn mesh_empirical_base_pressure(
+        &self,
+    ) -> Option<crate::aerodynamics::pressure::EmpiricalBasePressure> {
+        self.mesh_empirical_base
     }
 
     /// Selects triangles from one attached collider's current tessellation.
@@ -1724,6 +1843,14 @@ impl PhysicsWorld {
                 aerodynamics,
                 crate::aerodynamics::Aerodynamics::Mesh(_)
                     | crate::aerodynamics::Aerodynamics::VoxelWave(_)
+                    | crate::aerodynamics::Aerodynamics::IncompressibleSphere(_)
+                    | crate::aerodynamics::Aerodynamics::ContinuumSphere(_)
+                    | crate::aerodynamics::Aerodynamics::CompressionDominatedParticle(_)
+                    | crate::aerodynamics::Aerodynamics::SlipCorrectedParticle(_)
+                    | crate::aerodynamics::Aerodynamics::CreepingParticle(_)
+                    | crate::aerodynamics::Aerodynamics::FreeMolecularParticle(_)
+                    | crate::aerodynamics::Aerodynamics::TransitionalParticle(_)
+                    | crate::aerodynamics::Aerodynamics::LothParticle(_)
                     | crate::aerodynamics::Aerodynamics::Colliders
             )
         {
@@ -3297,9 +3424,13 @@ impl PhysicsWorld {
     ) -> Result<(), Error> {
         let AerodynamicsInputs {
             mesh_sound_speed,
+            mesh_pressure_model,
+            empirical_base,
             cluster,
             dt,
             mesh_patches,
+            empirical_base_patches,
+            collider_mesh,
             sphere_patches,
             voxel_wave,
             assembly_wave,
@@ -3329,6 +3460,26 @@ impl PhysicsWorld {
                 cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::UnsupportedModel),
             }));
         }
+        if empirical_base.is_some()
+            && (!base_pressure_patches.is_empty()
+                || cluster.is_some()
+                || sphere_patches.is_some()
+                || !matches!(
+                    primary,
+                    crate::aerodynamics::Aerodynamics::Mesh(_)
+                        | crate::aerodynamics::Aerodynamics::Colliders
+                )
+                || !matches!(
+                    mesh_pressure_model,
+                    crate::aerodynamics::pressure::MeshPressureModel::Newtonian
+                        | crate::aerodynamics::pressure::MeshPressureModel::ModifiedNewtonian
+                ))
+        {
+            return Err(Error::from(StepError::Aerodynamics {
+                body_id,
+                cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::UnsupportedModel),
+            }));
+        }
         let error = || StepError::Aerodynamics {
             body_id,
             cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow),
@@ -3337,8 +3488,59 @@ impl PhysicsWorld {
             .world_center_of_mass()
             .map_err(|_| error())?
             .ok_or_else(error)?;
+        use crate::aerodynamics::{
+            Aerodynamics::{
+                CompressionDominatedParticle, ContinuumSphere, CreepingParticle,
+                FreeMolecularParticle, IncompressibleSphere, LothParticle, SlipCorrectedParticle,
+                TransitionalParticle,
+            },
+            sphere_drag::SphereDragRegime,
+        };
+        let sphere = match primary {
+            IncompressibleSphere(model) => Some((model, SphereDragRegime::Incompressible)),
+            ContinuumSphere(model) => Some((model, SphereDragRegime::Continuum)),
+            SlipCorrectedParticle(model) => Some((model, SphereDragRegime::SlipCorrectedParticle)),
+            CreepingParticle(model) => Some((model, SphereDragRegime::CreepingParticle)),
+            FreeMolecularParticle(model) => Some((model, SphereDragRegime::FreeMolecularParticle)),
+            TransitionalParticle(model) => Some((model, SphereDragRegime::TransitionalParticle)),
+            LothParticle(model) => Some((model, SphereDragRegime::LothParticle)),
+            CompressionDominatedParticle(model) => {
+                Some((model, SphereDragRegime::CompressionDominatedParticle))
+            }
+            _ => None,
+        };
+        if let Some((model, regime)) = sphere {
+            if cluster.is_some() {
+                return Err(StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel.into(),
+                }
+                .into());
+            }
+            let state = atmosphere
+                .state_at(center)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            let force = model
+                .evaluate(
+                    state,
+                    state.sound_speed().unwrap_or(mesh_sound_speed),
+                    body.state().linear_velocity(),
+                    body.state().angular_velocity(),
+                    regime,
+                )
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            body.apply_force(force).map_err(|_| error())?;
+        }
         let primary_surface = match primary {
             crate::aerodynamics::Aerodynamics::None
+            | IncompressibleSphere(_)
+            | ContinuumSphere(_)
+            | CompressionDominatedParticle(_)
+            | SlipCorrectedParticle(_)
+            | CreepingParticle(_)
+            | FreeMolecularParticle(_)
+            | TransitionalParticle(_)
+            | LothParticle(_)
             | crate::aerodynamics::Aerodynamics::Wing(_)
             | crate::aerodynamics::Aerodynamics::Wings(_)
             | crate::aerodynamics::Aerodynamics::Hull(_)
@@ -3378,18 +3580,122 @@ impl PhysicsWorld {
                 linear_velocity: body.state().linear_velocity(),
                 angular_velocity: body.state().angular_velocity(),
             };
-            let wrench = if let Some(patches) = sphere_patches {
+            let mut wrench = if let Some(patches) = sphere_patches {
                 crate::aerodynamics::pressure::evaluate_potential_sphere_patches(patches, flow)
             } else {
-                crate::aerodynamics::pressure::evaluate_prepared_mesh(
-                    mesh_patches.ok_or_else(error)?,
-                    flow,
-                )
+                match mesh_pressure_model {
+                    crate::aerodynamics::pressure::MeshPressureModel::Newtonian => {
+                        crate::aerodynamics::pressure::evaluate_prepared_mesh(
+                            mesh_patches.ok_or_else(error)?,
+                            flow,
+                        )
+                    }
+                    crate::aerodynamics::pressure::MeshPressureModel::ModifiedNewtonian => {
+                        crate::aerodynamics::pressure::evaluate_prepared_mesh_modified_newtonian(
+                            mesh_patches.ok_or_else(error)?,
+                            flow,
+                        )
+                    }
+                    crate::aerodynamics::pressure::MeshPressureModel::PotentialFlow => {
+                        if cluster.is_some() {
+                            return Err(Error::from(StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                ),
+                            }));
+                        }
+                        let mesh = match primary {
+                            crate::aerodynamics::Aerodynamics::Mesh(mesh) => Some(mesh),
+                            crate::aerodynamics::Aerodynamics::Colliders => collider_mesh,
+                            _ => None,
+                        }
+                        .ok_or_else(|| {
+                            Error::from(StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                ),
+                            })
+                        })?;
+                        crate::aerodynamics::potential::evaluate_closed_mesh(mesh, flow)
+                    }
+                    crate::aerodynamics::pressure::MeshPressureModel::KuttaLifting => {
+                        if cluster.is_some() {
+                            return Err(Error::from(StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                ),
+                            }));
+                        }
+                        let mesh = match primary {
+                            crate::aerodynamics::Aerodynamics::Mesh(mesh) => Some(mesh),
+                            crate::aerodynamics::Aerodynamics::Colliders => collider_mesh,
+                            _ => None,
+                        }
+                        .ok_or_else(|| {
+                            Error::from(StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                ),
+                            })
+                        })?;
+                        crate::aerodynamics::potential::evaluate_kutta_lifting_mesh(mesh, flow)
+                    }
+                    crate::aerodynamics::pressure::MeshPressureModel::VortexLattice => {
+                        if cluster.is_some() {
+                            return Err(Error::from(StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                ),
+                            }));
+                        }
+                        let mesh = match primary {
+                            crate::aerodynamics::Aerodynamics::Mesh(mesh) => Some(mesh),
+                            crate::aerodynamics::Aerodynamics::Colliders => collider_mesh,
+                            _ => None,
+                        }
+                        .ok_or_else(|| {
+                            Error::from(StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                ),
+                            })
+                        })?;
+                        crate::aerodynamics::vlm::evaluate_closed_wing(mesh, flow)
+                    }
+                }
             }
             .map_err(|cause| StepError::Aerodynamics {
                 body_id,
                 cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Pressure(cause)),
             })?;
+            if let Some(base) = empirical_base {
+                let base_patches = empirical_base_patches.ok_or_else(error)?;
+                let base_wrench = crate::aerodynamics::pressure::evaluate_empirical_base_patches(
+                    base_patches,
+                    flow,
+                    base,
+                )
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Pressure(
+                        cause,
+                    )),
+                })?;
+                wrench.force = wrench
+                    .force
+                    .checked_add(base_wrench.force)
+                    .ok_or_else(error)?;
+                wrench.moment = wrench
+                    .moment
+                    .checked_add(base_wrench.moment)
+                    .ok_or_else(error)?;
+            }
             body.apply_force(wrench.force).map_err(|_| error())?;
             body.apply_torque(wrench.moment).map_err(|_| error())?;
             if sphere_patches.is_none()
@@ -4094,7 +4400,10 @@ impl PhysicsWorld {
                 self.part_aerodynamic_geometry.as_ref(),
                 &self.colliders,
                 &mut self.assembly_aerodynamics,
-                atmosphere,
+                assembly_aerodynamics::AssemblyEnvironment {
+                    atmosphere,
+                    oriented_cavities: self.preserve_assembly_mesh_cavities,
+                },
             )?;
             let (mut mesh_patches, assembly_wave, wing_visibility) = match assembly_prepared {
                 Some(prepared) => (
@@ -4105,6 +4414,7 @@ impl PhysicsWorld {
                 None => (None, None, None),
             };
             let mut sphere_patches = None;
+            let mut empirical_base_patches = None;
             // Only the primary geometry samples the COM. Additional surfaces
             // still evaluate their own positions, including when the COM is in vacuum.
             let primary_atmosphere = if matches!(
@@ -4237,6 +4547,9 @@ impl PhysicsWorld {
                             });
                     prepared.config = config;
                     prepared.sound_speed = self.mesh_sound_speed;
+                    prepared
+                        .cache
+                        .set_oriented_cavities(self.preserve_body_mesh_cavities);
                     let key = crate::aerodynamics::cache::GeometryCacheKey {
                         body: body_id,
                         geometry_version: 0,
@@ -4359,6 +4672,24 @@ impl PhysicsWorld {
                             cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Geometry(cause)),
                         })?,
                 );
+                    if self.mesh_empirical_base.is_some()
+                        && entry.cluster.is_none()
+                        && matches!(
+                            self.mesh_pressure_model,
+                            crate::aerodynamics::pressure::MeshPressureModel::Newtonian
+                                | crate::aerodynamics::pressure::MeshPressureModel::ModifiedNewtonian
+                        )
+                    {
+                        empirical_base_patches = Some(
+                            crate::aerodynamics::pressure::closed_mesh_pressure_patches(mesh)
+                                .map_err(|cause| StepError::Aerodynamics {
+                                    body_id,
+                                    cause: crate::Error::from(
+                                        crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                                    ),
+                                })?,
+                        );
+                    }
                 }
             }
             self.aerodynamics_body_updates.push(AerodynamicsBodyUpdate {
@@ -4373,6 +4704,7 @@ impl PhysicsWorld {
                 applied_mesh_pressure: None,
                 loads: PreparedAerodynamicLoads {
                     mesh_patches,
+                    empirical_base_patches,
                     sphere_patches,
                     voxel_wave,
                     assembly_wave,
@@ -4403,20 +4735,23 @@ impl PhysicsWorld {
                                     update.id,
                                     &mut update.prepared,
                                     &self.parts,
-                                    AerodynamicsInputs::new(self.mesh_sound_speed)
-                                        .with_base_pressure(&entry.body.base_pressure_patches)
-                                        .with_cluster(entry.cluster.as_ref())
-                                        .with_timestep(Some(dt))
-                                        .with_loads(&update.loads)
-                                        .with_part_hull_wrenches(&mut update.part_hull_wrenches)
-                                        .with_part_wing_wrenches(&mut update.part_wing_wrenches)
-                                        .with_simple_surface_correction(
-                                            &mut update.simple_surface_correction,
-                                        )
-                                        .with_raw_simple_surfaces(&mut update.raw_simple_surfaces)
-                                        .with_applied_mesh_pressure(
-                                            &mut update.applied_mesh_pressure,
-                                        ),
+                                    AerodynamicsInputs::new(
+                                        self.mesh_sound_speed,
+                                        self.mesh_pressure_model,
+                                    )
+                                    .with_base_pressure(&entry.body.base_pressure_patches)
+                                    .with_empirical_base(self.mesh_empirical_base)
+                                    .with_cluster(entry.cluster.as_ref())
+                                    .with_timestep(Some(dt))
+                                    .with_collider_mesh(entry.collider_aerodynamic_mesh.as_ref())
+                                    .with_loads(&update.loads)
+                                    .with_part_hull_wrenches(&mut update.part_hull_wrenches)
+                                    .with_part_wing_wrenches(&mut update.part_wing_wrenches)
+                                    .with_simple_surface_correction(
+                                        &mut update.simple_surface_correction,
+                                    )
+                                    .with_raw_simple_surfaces(&mut update.raw_simple_surfaces)
+                                    .with_applied_mesh_pressure(&mut update.applied_mesh_pressure),
                                 )
                             })
                             .unwrap_or(Ok(()))
@@ -4480,7 +4815,15 @@ impl PhysicsWorld {
         // This diagnostic pass never applies forces; the solver path above is
         // unchanged. The workspace is committed only after the entire step.
         for update in &self.aerodynamics_body_updates {
-            if update.loads.sphere_patches.is_some() {
+            if update.loads.sphere_patches.is_some()
+                || self.mesh_empirical_base.is_some()
+                || matches!(
+                    self.mesh_pressure_model,
+                    crate::aerodynamics::pressure::MeshPressureModel::PotentialFlow
+                        | crate::aerodynamics::pressure::MeshPressureModel::KuttaLifting
+                        | crate::aerodynamics::pressure::MeshPressureModel::VortexLattice
+                )
+            {
                 continue;
             }
             let Some(patches) = update.loads.mesh_patches.as_ref() else {
@@ -4535,6 +4878,7 @@ impl PhysicsWorld {
                         .ok_or_else(error)?,
                 ),
             };
+            workspace.set_pressure_model(self.mesh_pressure_model);
             workspace
                 .configure_pending(&self.owner_pressure_owners)
                 .and_then(|()| workspace.prepare(patches, flow))
@@ -5895,7 +6239,10 @@ impl PhysicsWorld {
                                     self.part_aerodynamic_geometry.as_ref(),
                                     &self.colliders,
                                     &mut temporary_assembly,
-                                    atmosphere,
+                                    assembly_aerodynamics::AssemblyEnvironment {
+                                        atmosphere,
+                                        oriented_cavities: self.preserve_assembly_mesh_cavities,
+                                    },
                                 )
                             } else {
                                 Ok(None)
@@ -5903,10 +6250,17 @@ impl PhysicsWorld {
                             step.error = local_wave
                                 .and_then(|local_wave| {
                                     local_assembly.and_then(|local_assembly| {
-                                        let inputs = AerodynamicsInputs::new(self.mesh_sound_speed)
-                                            .with_base_pressure(&entry.body.base_pressure_patches)
-                                            .with_cluster(entry.cluster.as_ref())
-                                            .with_timestep(dt);
+                                        let inputs = AerodynamicsInputs::new(
+                                            self.mesh_sound_speed,
+                                            self.mesh_pressure_model,
+                                        )
+                                        .with_base_pressure(&entry.body.base_pressure_patches)
+                                        .with_empirical_base(self.mesh_empirical_base)
+                                        .with_cluster(entry.cluster.as_ref())
+                                        .with_collider_mesh(
+                                            entry.collider_aerodynamic_mesh.as_ref(),
+                                        )
+                                        .with_timestep(dt);
                                         let inputs = if let Some(update) = staged {
                                             inputs.with_loads(&update.loads)
                                         } else {
@@ -6186,6 +6540,15 @@ impl PhysicsWorld {
             .get_mut(id.dense)
             .ok_or_else(|| Error::from(CollisionError::InvalidSkinPose))?;
         entry.collider.set_skin_pose(matrices)?;
+        let body = entry.body;
+        if let Some(entry) = self.bodies.get_mut(body.dense) {
+            entry.collider_aerodynamic_mesh = None;
+            entry.mesh_aerodynamics = None;
+            entry.body.invalidate_collider_base_patches();
+        }
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&body);
+        }
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
         self.collision_system.invalidate_collider_contacts(id);

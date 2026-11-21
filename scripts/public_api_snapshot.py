@@ -3,12 +3,15 @@
 
 The snapshot lists public modules and root re-exports so API changes show up
 as an explicit diff during review. It is intentionally source-derived: running
-it after editing `crates/kapitsa/src/lib.rs` updates the snapshot.
+it after editing `crates/kapitsa/src/lib.rs` updates the snapshot. With
+`--check`, the committed snapshot is compared against the source-derived
+content and a mismatch exits non-zero without writing anything.
 """
 
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -56,7 +59,7 @@ def names_from_use(statement: str) -> list[str]:
     return names
 
 
-def main() -> None:
+def render_snapshot() -> tuple[str, int, int]:
     text = LIB.read_text(encoding="utf-8")
     modules = sorted(
         match.group(1)
@@ -78,8 +81,25 @@ def main() -> None:
         *sorted(root_names),
         "",
     ]
-    OUTPUT.write_text("\n".join(lines), encoding="utf-8")
-    print(f"wrote {OUTPUT.relative_to(ROOT)} ({len(modules)} modules, {len(root_names)} root items)")
+    return "\n".join(lines), len(modules), len(root_names)
+
+
+def main() -> None:
+    check = "--check" in sys.argv[1:]
+    expected, module_count, root_count = render_snapshot()
+    if check:
+        actual = OUTPUT.read_text(encoding="utf-8") if OUTPUT.exists() else ""
+        if actual != expected:
+            print(
+                f"{OUTPUT.relative_to(ROOT)} is out of date; "
+                "run scripts/public_api_snapshot.py to regenerate it",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        print(f"ok {OUTPUT.relative_to(ROOT)} ({module_count} modules, {root_count} root items)")
+        return
+    OUTPUT.write_text(expected, encoding="utf-8")
+    print(f"wrote {OUTPUT.relative_to(ROOT)} ({module_count} modules, {root_count} root items)")
 
 
 if __name__ == "__main__":

@@ -40,6 +40,75 @@ fn advance(world: &mut PhysicsWorld, sharded: bool) -> Result<(), crate::Error> 
 }
 
 #[test]
+fn glider_ailerons_bank_and_turn_in_free_flight() -> Result<(), Box<dyn std::error::Error>> {
+    const DT: f64 = 0.005;
+    const STEPS: usize = 200;
+    const DEFLECTION: f64 = 0.02;
+    // The banked wings see spanwise flow. Use the model's bounded projection.
+    const MAX_SIDESLIP: f64 = 0.1;
+
+    let fly = |density, command| -> Result<_, Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(test_atmosphere(AtmosphericState::new(
+            density,
+            Vec3::X * -5.0,
+        )?));
+        let mass = MassProperties::new(250.0, Vec3::ZERO, Mat3::IDENTITY * 500.0)?;
+        let mut glider = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        glider.set_linear_velocity(Vec3::X * 30.0)?;
+        let model = FiniteWing::new(8.0, 0.8, 0.02, -0.06, 0.2)?;
+        let body = world.add_body(glider)?;
+        let part = world.enable_cluster(body)?;
+
+        // The symmetric wings start with positive lift. Apply differential
+        // incidence after one neutral step, without changing the rigid state.
+        for deflection in [0.0, command] {
+            let mut surfaces = Vec::new();
+            for side in [-1.0, 1.0] {
+                surfaces.push(
+                    WingSurface::new(
+                        model,
+                        Transform::new(Vec3::Y * (2.0 * side), Quat::IDENTITY)?,
+                        2.0,
+                    )?
+                    .with_spanwise_projection(MAX_SIDESLIP)?
+                    .with_control(WingControl::new(
+                        side * deflection,
+                        DEFLECTION,
+                        1.0,
+                    )?),
+                );
+            }
+            world.set_part_aerodynamic_wings(part, surfaces)?;
+            world.step(DT)?;
+        }
+        for _ in 2..STEPS {
+            world.step(DT)?;
+        }
+        Ok(world.body(body).ok_or("glider body")?.motion())
+    };
+
+    let neutral = fly(1.2, 0.0)?;
+    let vacuum = fly(0.0, 0.0)?;
+    let neutral_state = neutral.state();
+    assert!(neutral_state.linear_velocity().z > 0.0);
+    assert_eq!(neutral_state.linear_velocity().y, 0.0);
+    assert_eq!(neutral_state.angular_velocity().x, 0.0);
+
+    for side in [-1.0, 1.0] {
+        let deflection = side * DEFLECTION;
+        let controlled = fly(1.2, deflection)?;
+        let state = controlled.state();
+        let wing_span = state.transform().transform_vector(Vec3::Y);
+        assert!(side * wing_span.z > 0.0, "wing span {wing_span:?}");
+        assert!(side * state.linear_velocity().y < 0.0);
+        assert!(side * state.transform().translation().y < 0.0);
+        assert_eq!(fly(0.0, deflection)?, vacuum);
+    }
+    Ok(())
+}
+
+#[test]
 fn automatic_weld_failure_uses_part_wing_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     use crate::cluster::ClusterPartDesc;
     for sharded in [false, true] {
@@ -215,7 +284,8 @@ fn part_wings_match_body_wings_after_mass_merge_split_and_root_deletion()
             first,
             &mut actual_loads,
             &world.parts,
-            AerodynamicsInputs::new(world.mesh_sound_speed).with_cluster(entry.cluster.as_ref()),
+            AerodynamicsInputs::new(world.mesh_sound_speed, world.mesh_pressure_model)
+                .with_cluster(entry.cluster.as_ref()),
         )?;
         PhysicsWorld::apply_aerodynamics(
             world.atmosphere(),
@@ -224,7 +294,7 @@ fn part_wings_match_body_wings_after_mass_merge_split_and_root_deletion()
             first,
             &mut expected_loads,
             &world.parts,
-            AerodynamicsInputs::new(world.mesh_sound_speed),
+            AerodynamicsInputs::new(world.mesh_sound_speed, world.mesh_pressure_model),
         )?;
         assert!((actual_loads.forces().force() - expected_loads.forces().force()).length() < 1e-12);
         assert!(

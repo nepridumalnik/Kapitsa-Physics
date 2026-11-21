@@ -184,3 +184,176 @@ were 608 ns and 431 ns respectively. Both runs used seven samples on the same
 machine and sequential execution. Untimed checks in the benchmark passed. The
 extreme-value fallback is covered separately by unit tests and is not measured
 by this ordinary-flight workload. These timings are observations, not thresholds.
+
+﻿
+## Surface visibility hardening
+
+Local Windows x64 run on production commit `e412640`. Both benchmark targets
+completed. The workspace test suite was active during this measurement.
+
+```powershell
+cargo bench -p kapitsa-core --bench aerodynamics --bench wing_shielding
+```
+
+| Partial-visibility fixture | Source triangles | Exposed patches | Median | Min/max |
+| --- | ---: | ---: | ---: | ---: |
+| Small | 6 | 5 | 26.35 us | 26.18 to 27.90 us |
+| Moderate | 96 | 80 | 3.155 ms | 3.148 to 3.176 ms |
+
+The wing-shielding benchmark measured medians of 8.49 and 2.23 us/step for
+one wing without and with a footprint, respectively. For 32 wings the
+medians were 21.44 and 12.94 us/step. These are workload timings. They do
+not establish peak allocation or an isolated speedup over the historical
+baseline.
+
+The follow-up run on `07c7285`, with independent predicate scaling on each
+axis, executed both targets before the workspace tests. The fixtures and
+benchmark procedure were unchanged.
+
+| Partial-visibility fixture | Median | Min/max |
+| --- | ---: | ---: |
+| Small | 25.96 us | 25.66 to 27.82 us |
+| Moderate | 2.166 ms | 2.109 to 2.403 ms |
+
+Wing-shielding medians without and with a footprint were 8.27 and
+2.18 us/step for one wing, and 20.82 and 12.56 us/step for 32 wings.
+
+The axial projection follow-up on `d4dbf07` measured 25.61 us
+(25.07 to 28.51 us) for the small partial-visibility fixture and 2.076 ms
+(2.069 to 2.083 ms) for the moderate fixture. Wing-shielding medians without
+and with a footprint were 8.17 and 2.15 us/step for one wing, and 20.73 and
+12.51 us/step for 32 wings.
+
+The direct bucket construction on `7d6e5a6` measured 25.44 us
+(24.94 to 26.62 us) for the small fixture and 2.057 ms (2.052 to
+2.070 ms) for the moderate fixture. The grid builder needs one triangle
+index per triangle-to-cell entry, two cell-sized arrays, and one additional
+prefix offset during construction. This is a logical storage count. The
+measurement does not include allocator overhead or process peak memory.
+
+The split-buffer reservation change on `8cf7271` measured 25.65 us
+(25.23 to 27.05 us) for the small fixture and 2.068 ms (2.061 to
+2.093 ms) for the moderate fixture. These ranges overlap the preceding
+measurements. The change bounds the requested split storage; the timing
+run provides no evidence of a speedup.
+
+The coordinate-aligned depth change on `9ac852c` measured 20.70 us
+(20.19 to 22.10 us) for the small fixture and 1.301 ms (1.288 to
+1.339 ms) for the moderate fixture. These fixtures use coordinate-aligned
+plates. The results give no timing estimate for inclined geometry.
+
+The exact depth fallback on `0337ef5` measured 20.66 us (20.13 to
+22.22 us) on the small fixture and 1.284 ms (1.279 to 1.287 ms)
+on the moderate fixture. These fixtures exercise the common path.
+The fallback itself has no timing measurement in this run.
+
+The projected orientation fallback on `cdc3e66` adds a synthetic
+two-triangle fixture with separation `2^-500 m` and oblique flow. The
+benchmark checks that only the blocker remains visible with area 0.5 m².
+End-to-end visibility preparation for this fixture measured 6.37 us
+(6.29 to 6.47 us). The run included the active workspace test suite and
+does not isolate determinant evaluation from geometry preparation.
+
+The area fallback revision `aec8f8d` measured medians of 21.35 us and
+1.308 ms for the small and moderate partial-visibility fixtures. The wide
+projected-edge fixture measured 6.24 us (6.21 to 6.29 us). The benchmark
+does not isolate the exact area fallback. Its subnormal-area behavior is
+covered by the focused regression.
+
+Projection from original coordinates on `d5624ae` measured medians of
+21.90 us and 1.346 ms on the small and moderate fixtures. The wide
+projected-edge fixture measured 6.06 us (6.05 to 6.20 us).
+
+The erased-endpoint check on `b449468` measured medians of 22.18 us
+(21.69 to 24.09 us) and 1.381 ms (1.376 to 1.383 ms) on the small and
+moderate fixtures. The wide projected-edge fixture measured 6.09 us
+(6.01 to 6.31 us).
+
+The zero-determinant recheck on `e3cb8b5` measured medians of
+21.98 us (21.68 to 23.29 us) and 1.380 ms (1.375 to 1.384 ms)
+on the small and moderate fixtures. The wide projected-edge fixture
+measured 5.99 us (5.95 to 6.08 us).
+
+The direction and edge-reference sign filter on `b1ed96a` measured
+medians of 21.90 us and 1.334 ms on the small and moderate fixtures.
+The wide projected-edge fixture measured 6.38 us (6.35 to 6.56 us).
+
+Selective coefficient refinement on `3144d7c` measured medians of
+20.88 us and 1.319 ms on the small and moderate fixtures. The wide
+projected-edge fixture measured 6.17 us (6.11 to 6.19 us).
+
+The affine distance fallback revision `8607c83` measured medians of
+21.07 us and 1.307 ms on the small and moderate fixtures. The wide
+projected-edge fixture measured 6.03 us (5.98 to 6.20 us). These runs
+do not isolate the exact affine fallback.
+
+Fused intersection interpolation on `c603ae5` measured 22.70 us for the
+small partial-visibility fixture, 1.445 ms for the moderate fixture and
+6.66 us for wide projected edges. The workspace test suite was running
+concurrently, so these values are not an isolated performance comparison.
+Both aerodynamic and wing-shielding benchmark targets completed.
+
+The subnormal crossing-ratio revision `98036f8` completed both benchmark
+targets. Small partial visibility measured 21.54 us median and wide
+projected edges 6.25 us median. A workspace test build ran concurrently;
+these values are not an isolated performance comparison.
+
+The crossing residual correction on `a633369` completed both benchmark
+targets. Small partial visibility measured 21.43 us median. The workspace
+test suite was active concurrently, so this is not an isolated comparison.
+
+The reciprocal correction on `3ef81e7` completed both benchmark targets.
+Small partial visibility measured 21.45 us median and wide projected edges
+6.17 us median. A workspace test build ran concurrently, so this is not an
+isolated performance comparison.
+
+The subnormal residual scaling on `b3ab97b` completed both benchmark targets.
+Small partial visibility measured 21.20 us median. The workspace test suite
+was active concurrently, so this is not an isolated performance comparison.
+
+The scaled crossing residual revision `791d0e4` completed both benchmark
+targets. Small partial visibility measured 21.90 us median. A workspace test
+suite was active concurrently, so this is not an isolated comparison.
+
+## Stabilization head measurements
+
+Recorded 2026-11-21 at `0b5af55` on the same local machine (rustc 1.98.0,
+cargo 1.98.0, Windows 11 x64). No production physics source changed after
+`791d0e4`; the intervening commits add one regression test, documentation and
+tooling only. The queued MSRV, rustdoc and benchmark-compilation checks had
+finished before this run, so no concurrent cargo activity accompanied the
+measurements. This remains an ordinary local run without CPU affinity,
+frequency pinning or isolated-host control.
+
+```powershell
+cargo bench -p kapitsa-core --bench aerodynamics --bench wing_shielding
+```
+
+All untimed correctness checks passed for both sizes. Values are ns per whole
+operation; ranges are observed sample variability, not confidence intervals.
+
+| Kernel | Small median | Small min–max | Moderate median | Moderate min–max |
+| --- | ---: | ---: | ---: | ---: |
+| Voxel preparation | 14509.00 | 14455.00–17946.00 | 261350.00 | 254710.00–269240.00 |
+| Partial visibility | 21605.00 | 21109.00–23011.00 | 1333690.00 | 1327910.00–1351790.00 |
+| Cache hit | 7.52 | 7.38–7.79 | 7.49 | 7.36–7.57 |
+| Cache miss + preparation | 14607.00 | 14450.00–14969.00 | 266780.00 | 265670.00–269630.00 |
+| Prepared pressure | 689.68 | 686.72–699.92 | 10510.94 | 10488.95–10529.54 |
+| Finite-wing surfaces | 442.35 | 440.72–447.13 | 7011.51 | 6959.61–7164.37 |
+| Wide projected edges | — | — | 6199.00 | 6119.00–6251.00 |
+
+Wing-shielding medians were 8.23 and 2.15 us/step for one wing without and
+with a footprint, and 20.73 and 12.51 us/step for 32 wings. These are workload
+timings, not thresholds, allocation bounds or an accuracy validation.
+
+Verification at the stabilization head: full workspace tests
+(`cargo test --workspace --all-features --locked`, 1335 core unit tests plus
+all integration suites, math, viewer and doctests, 0 failures), Clippy
+`-D warnings` over all workspace targets, `cargo fmt --all -- --check`, the
+declared MSRV check (`cargo +1.95.0 check --workspace --all-features
+--all-targets --locked`), rustdoc with `RUSTDOCFLAGS=-D warnings` (after
+repairing one private intra-doc link in the empirical base-pressure docs),
+benchmark compilation for every workspace target, and
+`python scripts/public_api_snapshot.py --check` all passed. The rustdoc JSON
+snapshot regenerated byte-identically. `.github/workflows/ci.yml` now defines
+these checks for hosted runs; the first hosted run is still to be observed.

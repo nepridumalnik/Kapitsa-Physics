@@ -5,13 +5,16 @@ pub mod cache;
 pub mod colliders;
 pub mod geometry;
 pub mod hull;
+pub mod potential;
 pub mod pressure;
 pub mod slender;
 pub mod sphere_drag;
+pub mod vlm;
 pub mod wave;
 pub mod wing;
 pub use atmosphere::{Atmosphere, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder};
 pub use colliders::ColliderTessellation;
+pub use pressure::MeshPressureModel;
 
 use std::fmt;
 
@@ -27,6 +30,30 @@ pub enum Aerodynamics {
     #[default]
     None,
     Simple(AerodynamicProperties),
+    /// Drag on an isolated nonrotating sphere outside a cluster, Mach ≤ 0.2
+    /// and diameter Reynolds number below 200,000 in continuum flow.
+    IncompressibleSphere(sphere_drag::IncompressibleSphereDrag),
+    /// Restricted compressible air drag on an isolated nonrotating sphere
+    /// outside a cluster. See [`sphere_drag::continuum_drag_coefficient`].
+    ContinuumSphere(sphere_drag::SphereDrag),
+    /// Precritical, compression-dominated drag on isolated spherical particles.
+    /// See [`sphere_drag::compression_dominated_particle_drag_coefficient`].
+    CompressionDominatedParticle(sphere_drag::SphereDrag),
+    /// Low-Mach drag with gas slip on an isolated spherical particle.
+    /// See [`sphere_drag::slip_corrected_particle_drag_coefficient`].
+    SlipCorrectedParticle(sphere_drag::SphereDrag),
+    /// Creeping drag on an isolated spherical particle with diffuse molecular
+    /// reflection. Requires Mach ≤ 0.05 and diameter Reynolds number ≤ 0.1.
+    CreepingParticle(sphere_drag::SphereDrag),
+    /// Free-molecular drag on an isolated spherical particle at diameter Kn ≥ 10.
+    /// Assumes diffuse reflection and equal air and particle temperatures.
+    FreeMolecularParticle(sphere_drag::SphereDrag),
+    /// Rarefaction-dominated transitional drag on an isolated spherical particle.
+    /// See [`sphere_drag::transitional_particle_drag_coefficient`].
+    TransitionalParticle(sphere_drag::SphereDrag),
+    /// Selects between the supported Loth spherical-particle branches by Reynolds number.
+    /// See [`sphere_drag::loth_particle_drag_coefficient`].
+    LothParticle(sphere_drag::SphereDrag),
     Wing(wing::WingSurface),
     Wings(Vec<wing::WingSurface>),
     Hull(Vec<hull::HullSection>),
@@ -39,7 +66,38 @@ impl fmt::Debug for Aerodynamics {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => formatter.write_str("None"),
+            Self::LothParticle(model) => {
+                formatter.debug_tuple("LothParticle").field(model).finish()
+            }
+            Self::TransitionalParticle(model) => formatter
+                .debug_tuple("TransitionalParticle")
+                .field(model)
+                .finish(),
+            Self::FreeMolecularParticle(model) => formatter
+                .debug_tuple("FreeMolecularParticle")
+                .field(model)
+                .finish(),
+            Self::CreepingParticle(model) => formatter
+                .debug_tuple("CreepingParticle")
+                .field(model)
+                .finish(),
+            Self::SlipCorrectedParticle(model) => formatter
+                .debug_tuple("SlipCorrectedParticle")
+                .field(model)
+                .finish(),
             Self::Simple(properties) => formatter.debug_tuple("Simple").field(properties).finish(),
+            Self::IncompressibleSphere(model) => formatter
+                .debug_tuple("IncompressibleSphere")
+                .field(model)
+                .finish(),
+            Self::ContinuumSphere(model) => formatter
+                .debug_tuple("ContinuumSphere")
+                .field(model)
+                .finish(),
+            Self::CompressionDominatedParticle(model) => formatter
+                .debug_tuple("CompressionDominatedParticle")
+                .field(model)
+                .finish(),
             Self::Wing(surface) => formatter.debug_tuple("Wing").field(surface).finish(),
             Self::Wings(surfaces) => formatter.debug_tuple("Wings").field(surfaces).finish(),
             Self::Hull(sections) => formatter.debug_tuple("Hull").field(sections).finish(),
@@ -56,6 +114,7 @@ pub struct AtmosphericState {
     density: f64,
     wind_velocity: Vec3,
     sound_speed: Option<f64>,
+    dynamic_viscosity: Option<f64>,
 }
 
 impl AtmosphericState {
@@ -71,6 +130,7 @@ impl AtmosphericState {
             density,
             wind_velocity,
             sound_speed: None,
+            dynamic_viscosity: None,
         })
     }
 
@@ -85,6 +145,11 @@ impl AtmosphericState {
     /// Optional locally sampled speed of sound in m/s.
     pub fn sound_speed(self) -> Option<f64> {
         self.sound_speed
+    }
+
+    /// Optional locally sampled dynamic viscosity in Pa·s.
+    pub fn dynamic_viscosity(self) -> Option<f64> {
+        self.dynamic_viscosity
     }
 }
 

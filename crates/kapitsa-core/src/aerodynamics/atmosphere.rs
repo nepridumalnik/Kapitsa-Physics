@@ -49,6 +49,7 @@ pub struct SphericalAtmosphere {
     wind: Vec3,
     wind_at_top: Option<Vec3>,
     sound_speed_profile: Option<(f64, f64)>,
+    dynamic_viscosity_profile: Option<(f64, f64)>,
 }
 
 impl SphericalAtmosphere {
@@ -77,9 +78,13 @@ impl SphericalAtmosphere {
         let sound_speed = self
             .sound_speed_profile
             .map(|(bottom, top)| (bottom * (1.0 - t) + top * t).max(bottom.min(top)));
+        let dynamic_viscosity = self
+            .dynamic_viscosity_profile
+            .map(|(bottom, top)| (bottom * (1.0 - t) + top * t).max(bottom.min(top)));
         if distance >= self.outer_radius {
             let mut state = AtmosphericState::new(0.0, wind)?;
             state.sound_speed = sound_speed;
+            state.dynamic_viscosity = dynamic_viscosity;
             return Ok(state);
         }
         let factor = match self.profile {
@@ -94,6 +99,7 @@ impl SphericalAtmosphere {
         };
         let mut state = AtmosphericState::new(self.reference_density * factor * edge, wind)?;
         state.sound_speed = sound_speed;
+        state.dynamic_viscosity = dynamic_viscosity;
         Ok(state)
     }
 
@@ -170,6 +176,7 @@ pub struct SphericalAtmosphereBuilder {
     wind: Vec3,
     wind_at_top: Option<Vec3>,
     sound_speed_profile: Option<(f64, f64)>,
+    dynamic_viscosity_profile: Option<(f64, f64)>,
 }
 
 impl SphericalAtmosphereBuilder {
@@ -231,6 +238,15 @@ impl SphericalAtmosphereBuilder {
         self
     }
 
+    /// Optional dynamic viscosity in Pa·s at the reference and outer radii.
+    /// Both values must be finite and positive. Samples interpolate linearly
+    /// between the radii and use the nearest endpoint outside the interval.
+    /// Without a profile, the atmosphere does not supply viscosity.
+    pub fn dynamic_viscosity_profile(mut self, reference: f64, top: f64) -> Self {
+        self.dynamic_viscosity_profile = Some((reference, top));
+        self
+    }
+
     /// Validates all settings and constructs the atmosphere.
     ///
     /// # Errors
@@ -259,6 +275,11 @@ impl SphericalAtmosphereBuilder {
             && (!reference.is_finite() || reference <= 0.0 || !top.is_finite() || top <= 0.0)
         {
             return Err(invalid("sound speeds must be finite and positive"));
+        }
+        if let Some((reference, top)) = self.dynamic_viscosity_profile
+            && (!reference.is_finite() || reference <= 0.0 || !top.is_finite() || top <= 0.0)
+        {
+            return Err(invalid("dynamic viscosities must be finite and positive"));
         }
         if !reference_radius.is_finite() || reference_radius < 0.0 {
             return Err(invalid("reference radius must be finite and non-negative"));
@@ -299,6 +320,7 @@ impl SphericalAtmosphereBuilder {
             wind: self.wind,
             wind_at_top: self.wind_at_top,
             sound_speed_profile: self.sound_speed_profile,
+            dynamic_viscosity_profile: self.dynamic_viscosity_profile,
         })
     }
 }
@@ -318,6 +340,7 @@ pub(crate) fn test_atmosphere(state: AtmosphericState) -> Atmosphere {
         wind: state.wind_velocity(),
         wind_at_top: None,
         sound_speed_profile: None,
+        dynamic_viscosity_profile: None,
     })
 }
 
@@ -332,6 +355,60 @@ mod tests {
             .reference_density(2.0)
             .height(50.0)
             .profile(DensityProfile::Exponential { scale_height: 10.0 })
+    }
+
+    #[test]
+    fn dynamic_viscosity_profile_samples_and_validates_endpoints() -> Result<(), crate::Error> {
+        use crate::aerodynamics::sphere_drag::{
+            SphereDrag, SphereDragRegime, incompressible_drag_force,
+        };
+
+        let atmosphere = builder().dynamic_viscosity_profile(2e-5, 1e-5).build()?;
+        assert_eq!(
+            atmosphere.state_at(Vec3::ZERO)?.dynamic_viscosity(),
+            Some(2e-5)
+        );
+        assert_eq!(
+            atmosphere.state_at(Vec3::X * 170.0)?.dynamic_viscosity(),
+            Some(1e-5)
+        );
+        let sample = atmosphere.state_at(Vec3::X * 135.0)?;
+        let viscosity = sample
+            .dynamic_viscosity()
+            .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+        assert!((viscosity - 1.5e-5).abs() < 1e-20);
+        assert_eq!(
+            builder()
+                .build()?
+                .state_at(Vec3::X * 135.0)?
+                .dynamic_viscosity(),
+            None
+        );
+        assert!(
+            builder()
+                .dynamic_viscosity_profile(0.0, 1e-5)
+                .build()
+                .is_err()
+        );
+        assert!(
+            builder()
+                .dynamic_viscosity_profile(1e-5, f64::NAN)
+                .build()
+                .is_err()
+        );
+
+        let relative_velocity = Vec3::X - sample.wind_velocity();
+        let expected =
+            incompressible_drag_force(0.01, sample.density(), viscosity, relative_velocity)?;
+        let actual = SphereDrag::new(0.01, 3e-5)?.evaluate(
+            sample,
+            340.0,
+            Vec3::X,
+            Vec3::ZERO,
+            SphereDragRegime::Incompressible,
+        )?;
+        assert_eq!(actual, expected);
+        Ok(())
     }
 
     #[test]

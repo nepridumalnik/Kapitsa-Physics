@@ -1,4 +1,4 @@
-use kapitsa_math::{Mat3, Vec3};
+use kapitsa_math::{Mat3, Quat, Vec3};
 
 use crate::{
     aerodynamics::{AerodynamicProperties, Aerodynamics, AtmosphericState},
@@ -11,6 +11,393 @@ use crate::{
 
 fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepError> {
     result.as_ref().err().and_then(|error| error.downcast_ref())
+}
+
+#[test]
+fn rarefied_particles_apply_drag_and_reject_dense_gas() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::sphere_drag::{
+        SphereDrag, SphereDragError, compression_dominated_particle_drag_coefficient,
+        free_molecular_particle_drag_coefficient, transitional_particle_drag_coefficient,
+    };
+
+    let diameter = 0.001_f64;
+    let speed = 100.0;
+    let sound_speed = 100.0;
+    let viscosity = 0.001;
+    let mass_kg = 1e-3;
+    let dt = 0.1;
+    let model = SphereDrag::new(diameter, viscosity)?;
+    for (density, aerodynamics, cd) in [
+        (
+            1e-6,
+            Aerodynamics::FreeMolecularParticle(model),
+            free_molecular_particle_drag_coefficient(0.7_f64.sqrt(), 10.0)?,
+        ),
+        (
+            0.02,
+            Aerodynamics::TransitionalParticle(model),
+            transitional_particle_drag_coefficient(1.0, 2.0)?,
+        ),
+        (
+            0.02,
+            Aerodynamics::LothParticle(model),
+            transitional_particle_drag_coefficient(1.0, 2.0)?,
+        ),
+        (
+            0.5,
+            Aerodynamics::LothParticle(model),
+            compression_dominated_particle_drag_coefficient(1.0, 50.0)?,
+        ),
+    ] {
+        let mut world = PhysicsWorld::new();
+        world.set_mesh_sound_speed(sound_speed)?;
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            density,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(mass_kg, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut particle = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        particle.set_linear_velocity(Vec3::X * speed)?;
+        particle.set_aerodynamics(aerodynamics);
+        let id = world.add_body(particle)?;
+        world.step(dt)?;
+        let before = world.body(id).ok_or("particle")?.motion();
+        let area = std::f64::consts::PI * diameter.powi(2) / 4.0;
+        let expected = speed - 0.5 * density * speed * speed * area * cd * dt / mass_kg;
+        assert!((before.state().linear_velocity() - Vec3::X * expected).length() < 1e-12);
+
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            10_000.0,
+            Vec3::ZERO,
+        )?));
+        assert!(
+            matches!(step_cause(&world.step(dt)), Some(crate::world::StepError::Aerodynamics { cause, .. })
+        if cause.downcast_ref::<SphereDragError>() == Some(&SphereDragError::UnsupportedDomain))
+        );
+        assert_eq!(world.body(id).ok_or("particle")?.motion(), before);
+    }
+    Ok(())
+}
+
+pub(super) fn hollow_box_mesh() -> Result<TriangleMesh, crate::Error> {
+    use crate::{
+        aerodynamics::colliders::{ColliderTessellation, collider_mesh},
+        collider::Collider,
+        shape::{Cuboid, Shape},
+    };
+
+    let outer = Collider::new(
+        Shape::Cuboid(Cuboid::new(2.0, 2.0, 2.0)?),
+        Transform::identity(),
+    );
+    let inner = Collider::new(
+        Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+        Transform::identity(),
+    );
+    let config = ColliderTessellation::default();
+    let outer = collider_mesh([&outer], config)?;
+    let inner = collider_mesh([&inner], config)?;
+    let mut vertices = Vec::new();
+    let mut faces = Vec::new();
+    for (mesh, reverse) in [(outer, false), (inner, true)] {
+        for &face in mesh.triangles() {
+            let mut indices = face.map(|i| {
+                let point = mesh.vertices()[i];
+                if let Some(index) = vertices.iter().position(|&v| v == point) {
+                    index
+                } else {
+                    vertices.push(point);
+                    vertices.len() - 1
+                }
+            });
+            if reverse {
+                indices.swap(1, 2);
+            }
+            faces.push(indices);
+        }
+    }
+    TriangleMesh::new(vertices, faces)
+}
+
+#[test]
+fn world_rebuilds_body_mesh_occupancy_after_cavity_policy_switch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::X * -2_000.0,
+    )?));
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+    body.set_aerodynamics(Aerodynamics::Mesh(hollow_box_mesh()?));
+    let id = world.add_body(body)?;
+    for enabled in [false, true, false] {
+        world.set_body_mesh_oriented_cavities(enabled);
+        world.step(1e-8)?;
+        let prepared = world
+            .bodies
+            .get(id.dense)
+            .and_then(|entry| entry.mesh_aerodynamics.as_ref())
+            .and_then(|prepared| prepared.cache.get())
+            .ok_or("prepared body mesh")?;
+        assert_eq!(prepared.occupied_at(Vec3::ZERO)?, !enabled);
+    }
+    Ok(())
+}
+
+#[test]
+fn transonic_wind_tunnel_wing_loads_advance_rigid_body() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::wing::{FiniteWing, WingSurface};
+
+    let model = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?
+        .with_ndarc_lift_correction(0.75, 1.2)?
+        .with_ndarc_drag_rise(0.75, 0.0, 0.04)?;
+    let area = 2.0;
+    let alpha = 0.04_f64;
+    let direction = Vec3::new(alpha.cos(), 0.0, -alpha.sin());
+    let lift_direction = Vec3::new(alpha.sin(), 0.0, alpha.cos());
+    let dt = 0.001;
+    let mass_kg = 250.0;
+    let sound_speed = 340.0;
+    let density = 1.2;
+
+    // Fixed-incidence wind-tunnel conditions with independently reset states.
+    for mach in [0.75, 0.85, 0.99, 1.0, 1.01, 1.15] {
+        let speed = mach * sound_speed;
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            density,
+            -direction * speed,
+        )?));
+        world.set_mesh_sound_speed(sound_speed)?;
+        let mass = MassProperties::new(mass_kg, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_aerodynamics(Aerodynamics::Wing(WingSurface::new(
+            model,
+            Transform::identity(),
+            area,
+        )?));
+        let id = world.add_body(body)?;
+
+        let coefficients = model.coefficients(alpha, mach)?;
+        let pressure_area = 0.5 * density * speed * speed * area;
+        let expected_velocity = (lift_direction * coefficients.lift
+            - direction * coefficients.drag)
+            * (pressure_area * dt / mass_kg);
+        world.step(dt)?;
+        let state = world.body(id).ok_or("wind-tunnel wing")?.state();
+        assert!(
+            (state.linear_velocity() - expected_velocity).length() < 1e-12,
+            "Mach {mach}"
+        );
+        assert!(state.linear_velocity().dot(direction) < 0.0);
+        assert!(state.linear_velocity().dot(lift_direction) > 0.0);
+        assert_eq!(state.angular_velocity(), Vec3::ZERO);
+    }
+    Ok(())
+}
+
+#[test]
+fn creeping_particle_steps_across_knudsen_regimes() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::sphere_drag::{SphereDrag, creeping_particle_drag_ratio};
+
+    let diameter = 0.01;
+    let viscosity = 0.001;
+    let speed = 0.005;
+    let sound_speed = 100.0;
+    let dt = 0.1;
+    let model = SphereDrag::new(diameter, viscosity)?;
+    let mut previous_speed = 0.0;
+    for density in [1.0, 0.001, 1e-6, 0.0] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            density,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_sound_speed(sound_speed)?;
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut particle = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        particle.set_linear_velocity(Vec3::X * speed)?;
+        particle.set_aerodynamics(Aerodynamics::CreepingParticle(model));
+        let body = world.add_body(particle)?;
+        world.step(dt)?;
+        let actual = world
+            .body(body)
+            .ok_or("spherical particle")?
+            .state()
+            .linear_velocity();
+        let pi = std::f64::consts::PI;
+        let expected = if density == 0.0 {
+            speed
+        } else {
+            let radius_kn =
+                viscosity / (density * sound_speed * (diameter / 2.0)) * (0.7 * pi).sqrt();
+            speed
+                - dt * (3.0 * pi * viscosity * diameter * speed)
+                    * creeping_particle_drag_ratio(radius_kn)?
+        };
+        assert!((actual - Vec3::X * expected).length() < 1e-14);
+        assert!(actual.x > previous_speed);
+        previous_speed = actual.x;
+    }
+    Ok(())
+}
+
+#[test]
+fn gas_slip_reduces_spherical_particle_deceleration() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::sphere_drag::{SphereDrag, slip_corrected_particle_drag_coefficient};
+
+    let diameter = 0.001;
+    let speed = 5.0;
+    let dt = 0.01;
+    let model = SphereDrag::new(diameter, 0.005)?;
+    let advance = |aerodynamics| -> Result<Vec3, Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_sound_speed(100.0)?;
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut particle = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        particle.set_linear_velocity(Vec3::X * speed)?;
+        let body = world.add_body(particle)?;
+        world.set_aerodynamics(body, aerodynamics)?;
+        world.step(dt)?;
+        Ok(world
+            .body(body)
+            .ok_or("spherical particle")?
+            .state()
+            .linear_velocity())
+    };
+
+    let slip = advance(Aerodynamics::SlipCorrectedParticle(model))?;
+    let continuum = advance(Aerodynamics::IncompressibleSphere(model))?;
+    let cd = slip_corrected_particle_drag_coefficient(0.05, 1.0)?;
+    let area = std::f64::consts::PI * diameter * diameter / 4.0;
+    let expected_speed = speed - 0.5 * speed * speed * area * cd * dt;
+    assert!((slip - Vec3::X * expected_speed).length() < 1e-12);
+    assert!(continuum.x < slip.x && slip.x < speed);
+    Ok(())
+}
+
+#[test]
+fn spherical_particle_applies_compression_dominated_drag_at_mach_quarter()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::sphere_drag::{
+        SphereDrag, compression_dominated_particle_drag_coefficient,
+    };
+
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::ZERO,
+    )?));
+    world.set_mesh_sound_speed(100.0)?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut particle = RigidBody::new_dynamic(Transform::identity(), mass)?;
+    let speed = 25.0;
+    let diameter = 0.02;
+    particle.set_linear_velocity(Vec3::X * speed)?;
+    let body = world.add_body(particle)?;
+    world.set_aerodynamics(
+        body,
+        Aerodynamics::CompressionDominatedParticle(SphereDrag::new(diameter, 0.001)?),
+    )?;
+    let dt = 0.001;
+    let area = std::f64::consts::PI * diameter * diameter / 4.0;
+    let cd = compression_dominated_particle_drag_coefficient(0.25, 500.0)?;
+    let expected_speed = speed - 0.5 * speed * speed * area * cd * dt;
+    world.step(dt)?;
+    let velocity = world
+        .body(body)
+        .ok_or("spherical particle")?
+        .state()
+        .linear_velocity();
+    assert!((velocity - Vec3::X * expected_speed).length() < 1e-12);
+    Ok(())
+}
+
+#[test]
+fn continuum_sphere_uses_relative_mach_and_sonic_drag() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::sphere_drag::{SphereDrag, SphereDragError, continuum_drag_force};
+
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::X * 10.0,
+    )?));
+    world.set_mesh_sound_speed(100.0)?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut sphere = RigidBody::new_dynamic(Transform::identity(), mass)?;
+    sphere.set_linear_velocity(Vec3::X * 110.0)?;
+    let body = world.add_body(sphere)?;
+    world.set_aerodynamics(
+        body,
+        Aerodynamics::ContinuumSphere(SphereDrag::new(0.01, 0.001)?),
+    )?;
+    let expected_force = continuum_drag_force(0.01, 1.0, 0.001, 100.0, Vec3::X * 100.0)?;
+    let dt = 0.001;
+    world.step(dt)?;
+    let velocity = world
+        .body(body)
+        .ok_or("sphere body")?
+        .state()
+        .linear_velocity();
+    assert!((velocity - (Vec3::X * 110.0 + expected_force * dt)).length() < 1e-12);
+
+    world
+        .body_mut(body)
+        .ok_or("sphere body")?
+        .set_linear_velocity(Vec3::X * 220.0)?;
+    let before = world.body(body).ok_or("sphere body")?.motion();
+    assert!(
+        matches!(step_cause(&world.step(dt)), Some(crate::world::StepError::Aerodynamics { cause, .. })
+        if cause.downcast_ref::<SphereDragError>() == Some(&SphereDragError::UnsupportedDomain))
+    );
+    assert_eq!(world.body(body).ok_or("sphere body")?.motion(), before);
+    Ok(())
+}
+
+#[test]
+fn incompressible_sphere_uses_relative_wind_and_rejects_out_of_domain_flow()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::sphere_drag::{IncompressibleSphereDrag, SphereDragError};
+
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::X * 2.0,
+    )?));
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+    world.set_aerodynamics(
+        body,
+        Aerodynamics::IncompressibleSphere(IncompressibleSphereDrag::new(0.1, 0.01)?),
+    )?;
+    assert!(world.enable_cluster(body).is_err());
+    world.step(0.001)?;
+    assert!(
+        world
+            .body(body)
+            .ok_or("sphere body")?
+            .state()
+            .linear_velocity()
+            .x
+            > 0.0
+    );
+
+    world
+        .body_mut(body)
+        .ok_or("sphere body")?
+        .set_linear_velocity(Vec3::X * 100.0)?;
+    let before = world.body(body).ok_or("sphere body")?.motion();
+    assert!(
+        matches!(step_cause(&world.step(0.001)), Some(crate::world::StepError::Aerodynamics { cause, .. })
+        if cause.downcast_ref::<SphereDragError>() == Some(&SphereDragError::UnsupportedDomain))
+    );
+    assert_eq!(world.body(body).ok_or("sphere body")?.motion(), before);
+    Ok(())
 }
 
 fn aero_cause(
@@ -234,6 +621,498 @@ fn existing_mesh_and_collider_models_reject_subsonic_flow_without_state_change()
             assert_eq!(world.body(id).unwrap().motion(), before);
         }
     }
+    Ok(())
+}
+
+#[test]
+fn modified_newtonian_mesh_and_collider_pressure_step_below_mach_five()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{MeshPressureModel, pressure::PressureError},
+        collider::Collider,
+        shape::{Cuboid, Shape},
+    };
+    for collider_mode in [false, true] {
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                1.0,
+                Vec3::ZERO,
+            )?));
+            world.set_mesh_pressure_model(MeshPressureModel::ModifiedNewtonian);
+            assert_eq!(
+                world.mesh_pressure_model(),
+                MeshPressureModel::ModifiedNewtonian
+            );
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::X * 100.0)?;
+            if collider_mode {
+                body.set_aerodynamics(Aerodynamics::Colliders);
+            } else {
+                body.set_aerodynamics(Aerodynamics::Mesh(TriangleMesh::new(
+                    vec![Vec3::ZERO, Vec3::Y, Vec3::Z],
+                    vec![[0, 1, 2]],
+                )?));
+            }
+            let id = world.add_body(body)?;
+            if collider_mode {
+                world.add_collider(
+                    id,
+                    Collider::new(
+                        Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                        Transform::identity(),
+                    ),
+                )?;
+            }
+            let before = world.body(id).ok_or("body")?.motion();
+            if sharded {
+                world.step_with_shards(
+                    0.01,
+                    &mut [Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(0.01)?;
+            }
+            assert!(
+                world.body(id).ok_or("body")?.state().linear_velocity().x < 100.0,
+                "collider={collider_mode}, sharded={sharded}"
+            );
+
+            // Above the modified model's Mach domain the step is atomic.
+            world.set_mesh_sound_speed(5.0)?;
+            let before_error = world.body(id).ok_or("body")?.motion();
+            let result = if sharded {
+                world.step_with_shards(
+                    0.01,
+                    &mut [Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )
+            } else {
+                world.step(0.01)
+            };
+            assert!(
+                matches!(aero_pressure(&result), Some(PressureError::UnsupportedMach)),
+                "collider={collider_mode}, sharded={sharded}: {result:?}"
+            );
+            assert_eq!(world.body(id).ok_or("body")?.motion(), before_error);
+            assert_ne!(before, before_error);
+
+            world.set_mesh_sound_speed(340.0)?;
+            if sharded {
+                world.step_with_shards(
+                    0.01,
+                    &mut [Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(0.01)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unit_cube_mesh() -> Result<TriangleMesh, crate::Error> {
+    TriangleMesh::new(
+        vec![
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::ONE,
+            Vec3::new(0.0, 1.0, 1.0),
+        ],
+        vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 7, 6],
+            [3, 6, 2],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ],
+    )
+}
+
+#[test]
+fn empirical_base_pressure_adds_axial_drag_in_world_steps() -> Result<(), Box<dyn std::error::Error>>
+{
+    use crate::aerodynamics::{MeshPressureModel, pressure::EmpiricalBasePressure};
+    use crate::{
+        collider::Collider,
+        shape::{Cuboid, Shape},
+    };
+    for collider_mode in [false, true] {
+        for sharded in [false, true] {
+            let mut velocities = Vec::new();
+            for base in [None, Some(EmpiricalBasePressure::new(1.0)?)] {
+                let mut world = PhysicsWorld::new();
+                world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                    1.0,
+                    Vec3::ZERO,
+                )?));
+                world.set_mesh_sound_speed(50.0)?;
+                world.set_mesh_pressure_model(MeshPressureModel::ModifiedNewtonian);
+                world.set_mesh_empirical_base_pressure(base);
+                assert_eq!(world.mesh_empirical_base_pressure(), base);
+                let mass = MassProperties::new(1.0, Vec3::splat(0.5), Mat3::IDENTITY)?;
+                let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+                body.set_linear_velocity(Vec3::X * 100.0)?;
+                body.set_aerodynamics(if collider_mode {
+                    Aerodynamics::Colliders
+                } else {
+                    Aerodynamics::Mesh(unit_cube_mesh()?)
+                });
+                let id = world.add_body(body)?;
+                if collider_mode {
+                    world.add_collider(
+                        id,
+                        Collider::new(
+                            Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                            Transform::new(Vec3::splat(-0.5), Quat::IDENTITY)?,
+                        ),
+                    )?;
+                }
+                if sharded {
+                    world.step_with_shards(
+                        1e-4,
+                        &mut [Vec::new()],
+                        &crate::execution::SequentialExecutor,
+                        1,
+                    )?;
+                } else {
+                    world.step(1e-4)?;
+                }
+                velocities.push(world.body(id).ok_or("body")?.state().linear_velocity().x);
+            }
+            assert!(
+                velocities[1] < velocities[0],
+                "collider={collider_mode}, sharded={sharded}: {velocities:?}"
+            );
+            assert!(velocities[0] < 100.0);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn empirical_base_pressure_rejects_unsupported_models_conflicts_and_mach()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::{
+        MeshPressureModel,
+        pressure::{BasePressure, EmpiricalBasePressure, PressureError},
+    };
+    let base = EmpiricalBasePressure::new(1.0)?;
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_sound_speed(50.0)?;
+        world.set_mesh_pressure_model(MeshPressureModel::PotentialFlow);
+        world.set_mesh_empirical_base_pressure(Some(base));
+        let mass = MassProperties::new(1.0, Vec3::splat(0.5), Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 100.0)?;
+        body.set_aerodynamics(Aerodynamics::Mesh(unit_cube_mesh()?));
+        let id = world.add_body(body)?;
+        let before = world.body(id).ok_or("body")?.motion();
+        let result = if sharded {
+            world.step_with_shards(
+                1e-4,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+        } else {
+            world.step(1e-4)
+        };
+        assert!(matches!(
+            aero_cause(&result),
+            Some(crate::aerodynamics::AerodynamicsError::UnsupportedModel)
+        ));
+        assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+    }
+
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::ZERO,
+    )?));
+    world.set_mesh_sound_speed(50.0)?;
+    world.set_mesh_pressure_model(MeshPressureModel::ModifiedNewtonian);
+    world.set_mesh_empirical_base_pressure(Some(base));
+    let mass = MassProperties::new(1.0, Vec3::splat(0.5), Mat3::IDENTITY)?;
+    let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+    body.set_linear_velocity(Vec3::X * 100.0)?;
+    body.set_aerodynamics(Aerodynamics::Mesh(unit_cube_mesh()?));
+    body.set_mesh_base_triangles(&[8], BasePressure::new(-0.4, 1.0, 5.0)?)?;
+    let id = world.add_body(body)?;
+    let before = world.body(id).ok_or("body")?.motion();
+    let result = world.step(1e-4);
+    assert!(
+        matches!(
+            aero_cause(&result),
+            Some(crate::aerodynamics::AerodynamicsError::UnsupportedModel)
+        ),
+        "{result:?}"
+    );
+    assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_sound_speed(200.0)?;
+        world.set_mesh_pressure_model(MeshPressureModel::ModifiedNewtonian);
+        world.set_mesh_empirical_base_pressure(Some(base));
+        let mass = MassProperties::new(1.0, Vec3::splat(0.5), Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 100.0)?;
+        body.set_aerodynamics(Aerodynamics::Mesh(unit_cube_mesh()?));
+        let id = world.add_body(body)?;
+        let before = world.body(id).ok_or("body")?.motion();
+        let result = if sharded {
+            world.step_with_shards(
+                1e-4,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+        } else {
+            world.step(1e-4)
+        };
+        assert!(
+            matches!(aero_pressure(&result), Some(PressureError::UnsupportedMach)),
+            "sharded={sharded}: {result:?}"
+        );
+        assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+    }
+    Ok(())
+}
+
+#[test]
+fn potential_flow_mesh_and_collider_models_step_on_closed_spheres()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            MeshPressureModel,
+            colliders::{ColliderTessellation, collider_mesh},
+            pressure::PressureError,
+        },
+        collider::Collider,
+        shape::{Shape, Sphere},
+    };
+    for collider_mode in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_pressure_model(MeshPressureModel::PotentialFlow);
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 20.0)?;
+        let mesh = collider_mesh(
+            [&Collider::new(
+                Shape::Sphere(Sphere::new(1.0)?),
+                Transform::identity(),
+            )],
+            ColliderTessellation::new(16, 9, 1000)?,
+        )?;
+        if collider_mode {
+            body.set_aerodynamics(Aerodynamics::Colliders);
+        } else {
+            body.set_aerodynamics(Aerodynamics::Mesh(mesh));
+        }
+        let id = world.add_body(body)?;
+        if collider_mode {
+            world.add_collider(
+                id,
+                Collider::new(Shape::Sphere(Sphere::new(1.0)?), Transform::identity()),
+            )?;
+        }
+        world.step(0.001)?;
+        let velocity = world.body(id).ok_or("body")?.state().linear_velocity();
+        assert!(
+            (velocity.x - 20.0).abs() < 1e-6 && velocity.is_finite(),
+            "collider={collider_mode}: {velocity:?}"
+        );
+
+        // The model is explicitly bounded to Mach <= 0.2.
+        world.set_mesh_sound_speed(50.0)?;
+        let before = world.body(id).ok_or("body")?.motion();
+        let result = world.step(0.001);
+        assert!(
+            matches!(aero_pressure(&result), Some(PressureError::UnsupportedMach)),
+            "collider={collider_mode}: {result:?}"
+        );
+        assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+    }
+    Ok(())
+}
+
+#[test]
+fn kutta_lifting_mesh_and_collider_models_step_on_thin_wings()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            MeshPressureModel,
+            colliders::{ColliderTessellation, collider_mesh},
+        },
+        collider::Collider,
+        shape::{Cuboid, Shape},
+    };
+    for collider_mode in [false, true] {
+        let mesh = collider_mesh(
+            [&Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 4.0, 0.1)?),
+                Transform::identity(),
+            )],
+            ColliderTessellation::new(16, 9, 1000)?,
+        )?;
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_pressure_model(MeshPressureModel::KuttaLifting);
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::new(20.0, 0.0, -2.0))?;
+        if collider_mode {
+            body.set_aerodynamics(Aerodynamics::Colliders);
+        } else {
+            body.set_aerodynamics(Aerodynamics::Mesh(mesh));
+        }
+        let id = world.add_body(body)?;
+        if collider_mode {
+            world.add_collider(
+                id,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(1.0, 4.0, 0.1)?),
+                    Transform::identity(),
+                ),
+            )?;
+        }
+        world.step(0.001)?;
+        let velocity = world.body(id).ok_or("body")?.state().linear_velocity();
+        assert!(
+            velocity.z > -2.0 && (velocity.x - 20.0).abs() > 1e-9,
+            "collider={collider_mode}: {velocity:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn vortex_lattice_mesh_and_collider_models_step_on_thin_wings()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            MeshPressureModel,
+            colliders::{ColliderTessellation, collider_mesh},
+        },
+        collider::Collider,
+        shape::{Cuboid, Shape},
+    };
+    for collider_mode in [false, true] {
+        let mesh = collider_mesh(
+            [&Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 4.0, 0.1)?),
+                Transform::identity(),
+            )],
+            ColliderTessellation::new(16, 9, 1000)?,
+        )?;
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        world.set_mesh_pressure_model(MeshPressureModel::VortexLattice);
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::new(20.0, 0.0, -2.0))?;
+        if collider_mode {
+            body.set_aerodynamics(Aerodynamics::Colliders);
+        } else {
+            body.set_aerodynamics(Aerodynamics::Mesh(mesh));
+        }
+        let id = world.add_body(body)?;
+        if collider_mode {
+            world.add_collider(
+                id,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(1.0, 4.0, 0.1)?),
+                    Transform::identity(),
+                ),
+            )?;
+        }
+        world.step(0.001)?;
+        let velocity = world.body(id).ok_or("body")?.state().linear_velocity();
+        assert!(
+            velocity.z > -2.0 && (velocity.x - 20.0).abs() > 1e-9,
+            "collider={collider_mode}: {velocity:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn potential_flow_supports_quasi_steady_body_rotation() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            MeshPressureModel,
+            colliders::{ColliderTessellation, collider_mesh},
+        },
+        collider::Collider,
+        shape::{Shape, Sphere},
+    };
+    let mesh = collider_mesh(
+        [&Collider::new(
+            Shape::Sphere(Sphere::new(1.0)?),
+            Transform::identity(),
+        )],
+        ColliderTessellation::new(16, 9, 1000)?,
+    )?;
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.0,
+        Vec3::ZERO,
+    )?));
+    world.set_mesh_pressure_model(MeshPressureModel::PotentialFlow);
+    let mut body = RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?;
+    body.set_linear_velocity(Vec3::X * 20.0)?;
+    body.set_angular_velocity(Vec3::Z)?;
+    body.set_aerodynamics(Aerodynamics::Mesh(mesh));
+    let id = world.add_body(body)?;
+    world.step(0.001)?;
+    assert!(
+        world
+            .body(id)
+            .ok_or("body")?
+            .state()
+            .angular_velocity()
+            .is_finite()
+    );
     Ok(())
 }
 
@@ -1824,6 +2703,58 @@ fn mesh_pressure_errors_preserve_cause_and_motion_in_all_world_paths() {
 }
 
 #[test]
+fn supersonic_linear_wing_loads_advance_body() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::wing::{FiniteWing, WingSurface};
+    let alpha = 0.05_f64;
+    let speed = 680.0;
+    let density = 1.2;
+    let area = 2.0;
+    let mass_kg = 100.0;
+    let dt = 0.001;
+    let direction = Vec3::new(alpha.cos(), 0.0, -alpha.sin());
+    let lift_direction = Vec3::new(-direction.z, 0.0, direction.x);
+    let model =
+        FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.4)?.with_supersonic_linear_theory(1.2, 3.0)?;
+    let coefficients = model.coefficients(alpha, speed / 340.0)?;
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            density,
+            Vec3::ZERO,
+        )?));
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(mass_kg, Vec3::ZERO, Mat3::IDENTITY)?,
+        )?;
+        body.set_linear_velocity(direction * speed)?;
+        body.set_aerodynamics(Aerodynamics::Wing(WingSurface::new(
+            model,
+            Transform::identity(),
+            area,
+        )?));
+        let id = world.add_body(body)?;
+        if sharded {
+            world.step_with_shards(
+                dt,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(dt)?;
+        }
+        let expected_delta = (lift_direction * coefficients.lift - direction * coefficients.drag)
+            * (0.5 * density * speed * speed * area * dt / mass_kg);
+        let velocity = world.body(id).ok_or("body")?.state().linear_velocity();
+        assert!(
+            (velocity - (direction * speed + expected_delta)).length() < 1e-9,
+            "sharded={sharded}: {velocity:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn wing_world_loads_and_failures_match_between_step_paths() {
     use crate::aerodynamics::wing::{FiniteWing, WingError, WingSurface};
     let mut reference = None;
@@ -2299,6 +3230,52 @@ fn normal_hull_table_range_failure_rolls_back_body_and_part_loads() {
 }
 
 #[test]
+fn predicted_transonic_hull_section_decelerates_body() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::hull::HullSection;
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            10.0,
+            std::f64::consts::PI,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?
+        .with_transonic_drag_rise(0.95, 10.0)?;
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+        )?;
+        body.set_linear_velocity(Vec3::X * 300.0)?;
+        body.set_aerodynamics(Aerodynamics::Hull(vec![section]));
+        let id = world.add_body(body)?;
+        if sharded {
+            world.step_with_shards(
+                0.01,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(0.01)?;
+        }
+        assert!(
+            world.body(id).ok_or("body")?.state().linear_velocity().x < 300.0,
+            "sharded={sharded}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn hull_sections_sample_spatial_density_independently() {
     use crate::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
     let atmosphere = Atmosphere::Sphere(
@@ -2769,16 +3746,19 @@ fn collider_pressure_cache_invalidation_and_sharded_parity()
                     Transform::identity(),
                 ),
             )?;
+            world.set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1)?)?;
             assert_eq!(
                 step(&mut world),
                 Err(crate::Error::from(crate::world::StepError::Aerodynamics {
                     body_id: id,
                     cause: crate::Error::from(
-                        crate::aerodynamics::AerodynamicsError::UnsupportedModel
+                        crate::aerodynamics::AerodynamicsError::TessellationBudgetExceeded
                     )
                 }))
             );
             assert_eq!(before, world.body(id).ok_or("body")?.motion());
+            world.set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1024)?)?;
+            step(&mut world)?;
         }
     }
     assert_eq!(outcomes[0], outcomes[2]);

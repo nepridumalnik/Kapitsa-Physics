@@ -77,7 +77,7 @@ fn wing_load(wings: &[WingSurface], flow: PressureFlow) -> PressureWrench {
     total
 }
 
-fn main() {
+fn main() -> Result<(), kapitsa_core::Error> {
     println!(
         "kapitsa-core scalar aerodynamic baseline; samples={SAMPLES}; median and min/max; 3 warmup operations"
     );
@@ -85,6 +85,14 @@ fn main() {
     let body = world
         .add_body(RigidBody::new_static(Transform::identity()))
         .unwrap();
+    let config = GeometryConfig {
+        cell_size: 0.25,
+        max_cells: 100_000,
+        max_work: 100_000_000,
+        max_patch_work: 100_000_000,
+        open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+        weld_tolerance: None,
+    };
     for (label, tiles, preparation_iterations) in [("small", 1, 100), ("moderate", 16, 10)] {
         let mesh = plates(tiles);
         let instances = [GeometryInstance {
@@ -92,14 +100,6 @@ fn main() {
             local_transform: Transform::identity(),
             owner: GeometryOwner::Body,
         }];
-        let config = GeometryConfig {
-            cell_size: 0.25,
-            max_cells: 100_000,
-            max_work: 100_000_000,
-            max_patch_work: 100_000_000,
-            open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
-            weld_tolerance: None,
-        };
         // All correctness checks are outside timed loops. No timing thresholds.
         let prepared = PreparedGeometry::prepare(&instances, config).unwrap();
         assert_eq!(
@@ -236,4 +236,38 @@ fn main() {
             black_box(wing_load(black_box(&wings), black_box(wing_flow)));
         });
     }
+
+    let rear_x = -2.0_f64.powi(-500);
+    let mesh = TriangleMesh::new(
+        vec![
+            Vec3::ZERO,
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::new(rear_x, 0.25, 0.25),
+            Vec3::new(rear_x, 0.50, 0.25),
+            Vec3::new(rear_x, 0.25, 0.50),
+        ],
+        vec![[0, 1, 2], [3, 4, 5]],
+    )?;
+    let instances = [GeometryInstance {
+        mesh: &mesh,
+        local_transform: Transform::identity(),
+        owner: GeometryOwner::Body,
+    }];
+    let prepared = PreparedGeometry::prepare(&instances, config)?;
+    let evaluate = || {
+        prepared.exposed_surface_patches(
+            black_box(&instances),
+            black_box(Vec3::X + Vec3::Y),
+            0.01,
+            config.max_patch_work,
+        )
+    };
+    let patches = evaluate()?;
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches.iter().map(|patch| patch.area).sum::<f64>(), 0.5);
+    measure("wide projected edges", 100, || {
+        assert!(black_box(evaluate()).is_ok());
+    });
+    Ok(())
 }

@@ -4,8 +4,116 @@ use kapitsa_math::Vec3;
 use super::AerodynamicsError;
 use crate::{
     collider::Collider,
-    shape::{Shape, TriangleMesh},
+    shape::{LevelSet, Shape, TriangleMesh},
 };
+
+// Consistent face diagonals on neighboring cells, with a common 0–7 diagonal.
+const CELL_TETRAHEDRA: [[usize; 4]; 6] = [
+    [0, 1, 3, 7],
+    [0, 3, 2, 7],
+    [0, 2, 6, 7],
+    [0, 6, 4, 7],
+    [0, 4, 5, 7],
+    [0, 5, 1, 7],
+];
+const MAX_LEVEL_SET_CELLS: usize = 65_536;
+
+fn emit_level_set(
+    field: &LevelSet,
+    emit: &mut impl FnMut([Vec3; 3]) -> Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+    let [nx, ny, nz] = field.dimensions();
+    for z in 0..nz - 1 {
+        for y in 0..ny - 1 {
+            for x in 0..nx - 1 {
+                let corners = std::array::from_fn::<_, 8, _>(|i| {
+                    [x + (i & 1), y + ((i >> 1) & 1), z + (i >> 2)]
+                });
+                let values =
+                    corners.map(|[x, y, z]| field.signed_distances()[(z * ny + y) * nx + x]);
+                if values
+                    .iter()
+                    .all(|value| (*value < 0.0) == (values[0] < 0.0))
+                {
+                    continue;
+                }
+                let nodes = std::array::from_fn::<_, 8, _>(|i| {
+                    let [x, y, z] = corners[i];
+                    let point = field.origin()
+                        + field.grid_spacing() * Vec3::new(x as f64, y as f64, z as f64);
+                    (point, values[i])
+                });
+                for tetrahedron in CELL_TETRAHEDRA {
+                    emit_tetrahedron(tetrahedron.map(|index| nodes[index]), emit)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn emit_tetrahedron(
+    nodes: [(Vec3, f64); 4],
+    emit: &mut impl FnMut([Vec3; 3]) -> Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+    let mut inside = [0; 4];
+    let mut outside = [0; 4];
+    let (mut ni, mut no) = (0, 0);
+    for (index, (_, value)) in nodes.iter().enumerate() {
+        if *value < 0.0 {
+            inside[ni] = index;
+            ni += 1;
+        } else {
+            outside[no] = index;
+            no += 1;
+        }
+    }
+    if ni == 0 || no == 0 {
+        return Ok(());
+    }
+    let outward = nodes[outside[0]].0 - nodes[inside[0]].0;
+    let crossing = |i: usize, o: usize| {
+        let (a, negative) = nodes[i];
+        let (b, positive) = nodes[o];
+        if positive == 0.0 {
+            return b;
+        }
+        let scale = (-negative).max(positive);
+        let negative = -negative / scale;
+        let positive = positive / scale;
+        a + (b - a) * (negative / (negative + positive))
+    };
+    let mut triangle = |a: Vec3, b: Vec3, c: Vec3| {
+        if a == b || a == c || b == c {
+            return Ok(());
+        }
+        let winding = (b - a).cross(c - a).dot(outward);
+        if !winding.is_finite() || winding == 0.0 {
+            return Err(AerodynamicsError::ArithmeticOverflow.into());
+        }
+        emit(if winding > 0.0 { [a, b, c] } else { [a, c, b] })
+    };
+    match ni {
+        1 => triangle(
+            crossing(inside[0], outside[0]),
+            crossing(inside[0], outside[1]),
+            crossing(inside[0], outside[2]),
+        ),
+        2 => {
+            let a = crossing(inside[0], outside[0]);
+            let b = crossing(inside[0], outside[1]);
+            let c = crossing(inside[1], outside[1]);
+            let d = crossing(inside[1], outside[0]);
+            triangle(a, b, c)?;
+            triangle(a, c, d)
+        }
+        _ => triangle(
+            crossing(inside[0], outside[0]),
+            crossing(inside[1], outside[0]),
+            crossing(inside[2], outside[0]),
+        ),
+    }
+}
 
 /// Resolution and aggregate output budget for one body's attached colliders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +163,124 @@ impl ColliderTessellation {
     }
 }
 
+fn emit_capped_cylinder(
+    start: Vec3,
+    end: Vec3,
+    start_radius: f64,
+    end_radius: f64,
+    segments: usize,
+    emit: &mut impl FnMut([Vec3; 3]) -> Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+    let axis = (end - start)
+        .try_normalize()
+        .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+    let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let u = axis
+        .cross(helper)
+        .try_normalize()
+        .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+    let v = axis.cross(u);
+    let radial = |i: usize| {
+        let angle = std::f64::consts::TAU * (i % segments) as f64 / segments as f64;
+        u * angle.cos() + v * angle.sin()
+    };
+    for i in 0..segments {
+        let first = radial(i);
+        let second = radial(i + 1);
+        let a = start + first * start_radius;
+        let b = start + second * start_radius;
+        let c = end + second * end_radius;
+        let d = end + first * end_radius;
+        emit([a, b, c])?;
+        emit([a, c, d])?;
+        emit([start, b, a])?;
+        emit([end, d, c])?;
+    }
+    Ok(())
+}
+
+fn emit_capsule(
+    start: Vec3,
+    end: Vec3,
+    start_radius: f64,
+    end_radius: f64,
+    config: ColliderTessellation,
+    emit: &mut impl FnMut([Vec3; 3]) -> Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+    let segment = end - start;
+    let length = segment.length();
+    let axis = segment
+        .try_normalize()
+        .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+    let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let u = axis
+        .cross(helper)
+        .try_normalize()
+        .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+    let v = axis.cross(u);
+    // A common supporting plane touches both endpoint spheres when its
+    // normal n satisfies n·(end − start) = start_radius − end_radius.
+    let seam_cos = (start_radius - end_radius) / length;
+    if !seam_cos.is_finite() || seam_cos.abs() >= 1.0 {
+        return Err(AerodynamicsError::ArithmeticOverflow.into());
+    }
+    let seam_sin = ((1.0 - seam_cos) * (1.0 + seam_cos)).sqrt();
+    let seam_angle = seam_sin.atan2(seam_cos);
+    let cap_steps = config.sphere_rings / 2;
+    let last = 2 * cap_steps + 1;
+    let point = |ring: usize, i: usize| {
+        if ring == 0 {
+            return end + axis * end_radius;
+        }
+        if ring == last {
+            return start - axis * start_radius;
+        }
+        let phi = std::f64::consts::TAU * (i % config.radial_segments) as f64
+            / config.radial_segments as f64;
+        let radial = u * phi.cos() + v * phi.sin();
+        let (center, radius, angle) = if ring <= cap_steps {
+            (end, end_radius, seam_angle * ring as f64 / cap_steps as f64)
+        } else {
+            let fraction = (ring - cap_steps - 1) as f64 / cap_steps as f64;
+            (
+                start,
+                start_radius,
+                seam_angle + (std::f64::consts::PI - seam_angle) * fraction,
+            )
+        };
+        let (sin, cos) = if ring == cap_steps || ring == cap_steps + 1 {
+            (seam_sin, seam_cos)
+        } else {
+            angle.sin_cos()
+        };
+        center + (radial * sin + axis * cos) * radius
+    };
+    emit_latitude_mesh(last + 1, config.radial_segments, point, emit)
+}
+
+fn emit_latitude_mesh(
+    rings: usize,
+    segments: usize,
+    point: impl Fn(usize, usize) -> Vec3,
+    emit: &mut impl FnMut([Vec3; 3]) -> Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+    for ring in 0..rings - 1 {
+        for segment in 0..segments {
+            let a = point(ring, segment);
+            let b = point(ring + 1, segment);
+            let c = point(ring + 1, segment + 1);
+            let d = point(ring, segment + 1);
+            if ring != rings - 2 {
+                emit([a, b, c])?;
+            }
+            if ring != 0 {
+                emit([a, c, d])?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Converts real surfaces into one body-local mesh. Collider transforms are baked
 /// in, not world poses or COM offsets. Source winding is preserved for meshes.
 /// Empty sets and unsupported shapes are rejected, never approximated by AABBs.
@@ -64,14 +290,43 @@ pub fn collider_mesh<'a>(
 ) -> Result<TriangleMesh, crate::Error> {
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
+    let mut remaining_level_set_cells = MAX_LEVEL_SET_CELLS;
     for collider in colliders {
         let count = match collider.shape() {
             Shape::Cuboid(_) => 12,
             Shape::Sphere(_) => 2 * config.radial_segments * (config.sphere_rings - 2),
-            Shape::Cylinder(_) => 4 * config.radial_segments,
+            Shape::Cylinder(_) | Shape::TaperedCylinder(_) => 4 * config.radial_segments,
+            Shape::Capsule(_) | Shape::TaperedCapsule(_) => {
+                4 * config.radial_segments * (config.sphere_rings / 2)
+            }
             Shape::Triangle(_) => 1,
             Shape::Convex(shape) => shape.faces().len(),
             Shape::TriangleMesh(shape) => shape.triangles().len(),
+            Shape::SkinnedTriangleMesh(shape) => shape.mesh().triangles().len(),
+            Shape::HeightField(shape) => (shape.rows() - 1)
+                .checked_mul(shape.columns() - 1)
+                .and_then(|cells| cells.checked_mul(2))
+                .ok_or(AerodynamicsError::TessellationBudgetExceeded)?,
+            Shape::LevelSet(shape) => {
+                let cells = shape
+                    .dimensions()
+                    .into_iter()
+                    .try_fold(1usize, |count, n| count.checked_mul(n - 1))
+                    .ok_or(AerodynamicsError::TessellationBudgetExceeded)?;
+                remaining_level_set_cells = remaining_level_set_cells
+                    .checked_sub(cells)
+                    .ok_or(AerodynamicsError::TessellationBudgetExceeded)?;
+                let remaining_triangles = config.max_triangles - triangles.len();
+                let mut count = 0;
+                emit_level_set(shape, &mut |_| {
+                    if count == remaining_triangles {
+                        return Err(AerodynamicsError::TessellationBudgetExceeded.into());
+                    }
+                    count += 1;
+                    Ok(())
+                })?;
+                count
+            }
             _ => return Err(crate::Error::from(AerodynamicsError::UnsupportedModel)),
         };
         if count > config.max_triangles - triangles.len() {
@@ -100,10 +355,29 @@ pub fn collider_mesh<'a>(
             Ok(())
         };
         match collider.shape() {
+            Shape::LevelSet(shape) => emit_level_set(shape, &mut emit)?,
+            Shape::HeightField(shape) => {
+                for row in 0..shape.rows() - 1 {
+                    for column in 0..shape.columns() - 1 {
+                        for triangle in
+                            crate::collision::height_field::cell_triangles(shape, row, column)?
+                        {
+                            emit(triangle)?;
+                        }
+                    }
+                }
+            }
             Shape::Triangle(shape) => emit(shape.vertices())?,
             Shape::TriangleMesh(shape) => {
                 for face in shape.triangles() {
                     emit(face.map(|i| shape.vertices()[i]))?;
+                }
+            }
+            Shape::SkinnedTriangleMesh(shape) => {
+                let mesh = shape.mesh();
+                let vertices = collider.query_vertices().unwrap_or(mesh.vertices());
+                for face in mesh.triangles() {
+                    emit(face.map(|i| vertices[i]))?;
                 }
             }
             Shape::Convex(shape) => {
@@ -148,47 +422,45 @@ pub fn collider_mesh<'a>(
                         theta.cos(),
                     ) * shape.radius()
                 };
-                for ring in 0..config.sphere_rings - 1 {
-                    for segment in 0..config.radial_segments {
-                        let a = point(ring, segment);
-                        let b = point(ring + 1, segment);
-                        let c = point(ring + 1, segment + 1);
-                        let d = point(ring, segment + 1);
-                        if ring != config.sphere_rings - 2 {
-                            emit([a, b, c])?;
-                        }
-                        if ring != 0 {
-                            emit([a, c, d])?;
-                        }
-                    }
-                }
+                emit_latitude_mesh(
+                    config.sphere_rings,
+                    config.radial_segments,
+                    point,
+                    &mut emit,
+                )?;
             }
-            Shape::Cylinder(shape) => {
-                let axis = (shape.end() - shape.start())
-                    .try_normalize()
-                    .ok_or(AerodynamicsError::ArithmeticOverflow)?;
-                let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
-                let u = axis
-                    .cross(helper)
-                    .try_normalize()
-                    .ok_or(AerodynamicsError::ArithmeticOverflow)?;
-                let v = axis.cross(u);
-                let radial = |i: usize| {
-                    let angle = std::f64::consts::TAU * (i % config.radial_segments) as f64
-                        / config.radial_segments as f64;
-                    (u * angle.cos() + v * angle.sin()) * shape.radius()
-                };
-                for i in 0..config.radial_segments {
-                    let a = shape.start() + radial(i);
-                    let b = shape.start() + radial(i + 1);
-                    let c = shape.end() + radial(i + 1);
-                    let d = shape.end() + radial(i);
-                    emit([a, b, c])?;
-                    emit([a, c, d])?;
-                    emit([shape.start(), b, a])?;
-                    emit([shape.end(), d, c])?;
-                }
-            }
+            Shape::Capsule(shape) => emit_capsule(
+                shape.start(),
+                shape.end(),
+                shape.radius(),
+                shape.radius(),
+                config,
+                &mut emit,
+            )?,
+            Shape::TaperedCapsule(shape) => emit_capsule(
+                shape.start(),
+                shape.end(),
+                shape.start_radius(),
+                shape.end_radius(),
+                config,
+                &mut emit,
+            )?,
+            Shape::Cylinder(shape) => emit_capped_cylinder(
+                shape.start(),
+                shape.end(),
+                shape.radius(),
+                shape.radius(),
+                config.radial_segments,
+                &mut emit,
+            )?,
+            Shape::TaperedCylinder(shape) => emit_capped_cylinder(
+                shape.start(),
+                shape.end(),
+                shape.start_radius(),
+                shape.end_radius(),
+                config.radial_segments,
+                &mut emit,
+            )?,
             _ => return Err(crate::Error::from(AerodynamicsError::UnsupportedModel)),
         }
     }
@@ -202,10 +474,131 @@ pub fn collider_mesh<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn level_set_mesh_extracts_plane_with_outward_winding() -> Result<(), crate::Error> {
+        let samples = [-1.0, 1.0].repeat(4);
+        let field = LevelSet::from_vec(Vec3::ZERO, [2; 3], Vec3::splat(1.0), samples)?;
+        let collider = Collider::new(Shape::LevelSet(field), Transform::identity());
+        let mesh = collider_mesh([&collider], ColliderTessellation::new(3, 3, 12)?)?;
+        let mut area = 0.0;
+        for face in mesh.triangles() {
+            let [a, b, c] = face.map(|i| mesh.vertices()[i]);
+            assert_eq!([a.x, b.x, c.x], [0.5; 3]);
+            let normal = (b - a).cross(c - a);
+            assert!(normal.x > 0.0);
+            area += normal.x / 2.0;
+        }
+        assert_eq!(area, 1.0);
+        assert_eq!(
+            collider_mesh(
+                [&collider],
+                ColliderTessellation::new(3, 3, mesh.triangles().len() - 1)?
+            )
+            .err(),
+            Some(AerodynamicsError::TessellationBudgetExceeded.into())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn level_set_mesh_voxelizes_across_shared_cell_boundaries() -> Result<(), crate::Error> {
+        let mut samples = vec![1.0; 27];
+        samples[13] = -1.0;
+        let field = LevelSet::from_vec(-Vec3::splat(1.0), [3; 3], Vec3::splat(1.0), samples)?;
+        let collider = Collider::new(Shape::LevelSet(field), Transform::identity());
+        let mesh = collider_mesh([&collider], ColliderTessellation::new(3, 3, 96)?)?;
+        let exact_budget = mesh.triangles().len();
+        assert!(exact_budget < 96);
+        let mesh = collider_mesh([&collider], ColliderTessellation::new(3, 3, exact_budget)?)?;
+        let geometry = PreparedGeometry::prepare(
+            &[GeometryInstance {
+                mesh: &mesh,
+                local_transform: Transform::identity(),
+                owner: GeometryOwner::Body,
+            }],
+            GeometryConfig {
+                cell_size: 0.125,
+                max_cells: 10_000,
+                max_work: 1_000_000,
+                open_mesh_policy: OpenMeshPolicy::Reject,
+                weld_tolerance: Some(1e-10),
+                max_patch_work: 1,
+            },
+        )?;
+        assert!(geometry.occupied_at(Vec3::ZERO)?);
+        assert!(!geometry.occupied_at(Vec3::X)?);
+        Ok(())
+    }
     use crate::{
-        shape::{Cuboid, Cylinder, Plane, Sphere},
+        aerodynamics::geometry::{
+            GeometryConfig, GeometryInstance, GeometryOwner, OpenMeshPolicy, PreparedGeometry,
+        },
+        shape::{
+            Capsule, Cuboid, Cylinder, HeightField, Plane, Sphere, TaperedCapsule, TaperedCylinder,
+        },
         transform::Transform,
     };
+    use kapitsa_math::Affine3;
+
+    #[test]
+    fn skinned_mesh_conversion_uses_committed_pose() -> Result<(), crate::Error> {
+        use crate::shape::{BoneInfluence, SkinnedTriangleMesh};
+
+        let reference = vec![Vec3::ZERO, Vec3::X, Vec3::Y];
+        let mesh = TriangleMesh::new(reference.clone(), vec![[0, 1, 2]])?;
+        let skin = SkinnedTriangleMesh::new(
+            mesh,
+            vec![String::from("root")],
+            (0..3)
+                .map(|_| BoneInfluence::new(0, 1.0).map(|influence| vec![influence]))
+                .collect::<Result<_, _>>()?,
+            Affine3::IDENTITY,
+            vec![Affine3::IDENTITY],
+        )?;
+        let mut collider = Collider::new(Shape::SkinnedTriangleMesh(skin), Transform::identity());
+        let config = ColliderTessellation::new(3, 3, 1)?;
+        assert_eq!(collider_mesh([&collider], config)?.vertices(), reference);
+        let displacement = Vec3::Z * 2.0;
+        collider.set_skin_pose(&[Affine3::from_translation(displacement)])?;
+        let posed = collider_mesh([&collider], config)?;
+        assert!(
+            posed
+                .vertices()
+                .iter()
+                .copied()
+                .eq(reference.into_iter().map(|v| v + displacement))
+        );
+        assert_eq!(posed.triangles(), &[[0, 1, 2]]);
+        Ok(())
+    }
+
+    #[test]
+    fn height_field_mesh_uses_collision_diagonal_and_budget() -> Result<(), crate::Error> {
+        let field = HeightField::from_vec(
+            2,
+            2,
+            kapitsa_math::Vec2::new(2.0, 3.0),
+            vec![0.0, 0.5, 0.25, 1.0],
+        )?;
+        let collider = Collider::new(Shape::HeightField(field), Transform::identity());
+        let mesh = collider_mesh([&collider], ColliderTessellation::new(3, 3, 2)?)?;
+        let a = Vec3::ZERO;
+        let b = Vec3::new(2.0, 0.0, 0.5);
+        let c = Vec3::new(2.0, 3.0, 1.0);
+        let d = Vec3::new(0.0, 3.0, 0.25);
+        assert!(
+            mesh.triangles()
+                .iter()
+                .map(|face| face.map(|i| mesh.vertices()[i]))
+                .eq([[a, b, c], [a, c, d]])
+        );
+        assert_eq!(
+            collider_mesh([&collider], ColliderTessellation::new(3, 3, 1)?).err(),
+            Some(AerodynamicsError::TessellationBudgetExceeded.into())
+        );
+        Ok(())
+    }
 
     #[test]
     fn conversion_winding_budget_and_unsupported_shapes() -> Result<(), Box<dyn std::error::Error>>
@@ -218,6 +611,9 @@ mod tests {
             Shape::Cuboid(Cuboid::new(2.0, 2.0, 2.0)?),
             Shape::Sphere(Sphere::new(1.0)?),
             Shape::Cylinder(Cylinder::new(-Vec3::Z, Vec3::Z, 1.0)?),
+            Shape::TaperedCylinder(TaperedCylinder::new(-Vec3::Z, Vec3::Z, 1.0, 0.5)?),
+            Shape::Capsule(Capsule::new(-Vec3::Z, Vec3::Z, 1.0)?),
+            Shape::TaperedCapsule(TaperedCapsule::new(-Vec3::Z, Vec3::Z, 1.0, 0.5)?),
         ] {
             let collider = Collider::new(shape, Transform::identity());
             let mesh = collider_mesh([&collider], config)?;
@@ -240,6 +636,104 @@ mod tests {
             collider_mesh([&plane], config).err(),
             Some(crate::Error::from(AerodynamicsError::UnsupportedModel))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn tapered_capsule_mesh_joins_caps_on_common_tangent() -> Result<(), crate::Error> {
+        let start = -Vec3::Z;
+        let end = Vec3::Z;
+        let collider = Collider::new(
+            Shape::TaperedCapsule(TaperedCapsule::new(start, end, 1.0, 0.5)?),
+            Transform::identity(),
+        );
+        let mesh = collider_mesh([&collider], ColliderTessellation::new(12, 8, 192)?)?;
+        assert_eq!(mesh.triangles().len(), 192);
+        let normal = Vec3::new(0.0, (15.0_f64 / 16.0).sqrt(), 0.25);
+        for expected in [
+            start + normal,
+            end + normal * 0.5,
+            start - Vec3::Z,
+            end + Vec3::Z * 0.5,
+        ] {
+            assert!(
+                mesh.vertices()
+                    .iter()
+                    .any(|point| (*point - expected).length() < 1e-14)
+            );
+        }
+        let support = start.dot(normal) + 1.0;
+        assert!(
+            mesh.vertices()
+                .iter()
+                .all(|point| point.dot(normal) <= support + 1e-14)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tapered_cylinder_mesh_uses_distinct_radii_at_both_caps() -> Result<(), crate::Error> {
+        let collider = Collider::new(
+            Shape::TaperedCylinder(TaperedCylinder::new(-Vec3::Z, Vec3::Z, 1.0, 0.5)?),
+            Transform::identity(),
+        );
+        let segments = 12;
+        let mesh = collider_mesh(
+            [&collider],
+            ColliderTessellation::new(segments, 8, 4 * segments)?,
+        )?;
+        assert_eq!(mesh.triangles().len(), 4 * segments);
+        let mut rim_points = [0; 2];
+        for vertex in mesh.vertices() {
+            assert_eq!(vertex.z.abs(), 1.0);
+            let side = usize::from(vertex.z > 0.0);
+            let radial = vertex.x.hypot(vertex.y);
+            if radial != 0.0 {
+                assert!((radial - [1.0, 0.5][side]).abs() < 1e-14);
+                rim_points[side] += 1;
+            }
+        }
+        assert_eq!(rim_points, [5 * segments; 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn capsule_mesh_fills_both_caps_and_barrel_after_transform() -> Result<(), crate::Error> {
+        let offset = Vec3::new(2.0, 3.0, 4.0);
+        let collider = Collider::new(
+            Shape::Capsule(Capsule::new(-Vec3::X, Vec3::X, 0.5)?),
+            Transform::new(offset, kapitsa_math::Quat::IDENTITY)?,
+        );
+        let triangles = 4 * 12 * (8 / 2);
+        let mesh = collider_mesh([&collider], ColliderTessellation::new(12, 8, triangles)?)?;
+        assert_eq!(mesh.triangles().len(), triangles);
+        assert_eq!(
+            collider_mesh(
+                [&collider],
+                ColliderTessellation::new(12, 8, triangles - 1)?
+            )
+            .err(),
+            Some(AerodynamicsError::TessellationBudgetExceeded.into())
+        );
+        let geometry = PreparedGeometry::prepare(
+            &[GeometryInstance {
+                mesh: &mesh,
+                local_transform: Transform::identity(),
+                owner: GeometryOwner::Body,
+            }],
+            GeometryConfig {
+                cell_size: 0.05,
+                max_cells: 100_000,
+                max_work: 10_000_000,
+                open_mesh_policy: OpenMeshPolicy::Reject,
+                weld_tolerance: Some(1e-10),
+                max_patch_work: 1,
+            },
+        )?;
+        for x in [-1.25, 0.0, 1.25] {
+            assert!(geometry.occupied_at(offset + Vec3::X * x)?);
+        }
+        assert!(!geometry.occupied_at(offset + Vec3::Y * 0.8)?);
         Ok(())
     }
 }
