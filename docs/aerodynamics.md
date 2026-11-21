@@ -92,6 +92,32 @@ Validation is repeated on every evaluation without allocating. A mismatch drops 
 
 Tests compare shared and body-local forces, cover geometry-edit and replacement fallback, merge/split/root transfer, and assert ordinary/sharded agreement. A cold-step allocation comparison (four vessels) records 91 allocations/48.5 KB shared versus 131/194 KB body-local.
 
+### Background preparation of assembly shapes
+
+For persistent management in a `PhysicsWorld`, use `manage_body_shape`.
+Once the initial shape is published, an invalidated binding schedules a new
+cook at the next full step boundary. A one-shot `queue_body_shape` does not
+enable this behavior. `stop_managing_body_shape` disables automatic scheduling
+and cancels pending work. A failed request is retained for inspection rather
+than retried every step; submit a new request to recover.
+
+For explicit mesh assemblies, create a bounded `aerodynamics::shape::worker::ShapeWorker`
+and call `PhysicsClient::queue_body_shape` after editing the assembly. The queue
+captures the current sources at the command boundary; the worker cooks them
+without borrowing the simulation world. `poll_body_shape` publishes available
+results and reports `Cooking`, `Ready`, or `Failed` even while paused.
+`queue_body_shape_with_completion` optionally delivers the publication result
+(shape ID or typed failure) once the world processes it. While paused, polling
+drives publication. Cancellation or supersession closes the completion channel.
+`cancel_body_shape` prevents an
+unpublished result from installing and leaves the installed binding unchanged.
+
+`ZeroForce` suppresses aerodynamic loads while the request is pending.
+`KeepPrevious` can retain mesh pressure after a mesh-only edit, but not across
+a weld-graph or membership change. `BlockStep` waits at the full step boundary;
+status polling itself never waits for a cook. Failed or stale results do not
+replace the last installed binding. Colliders are not accepted as cook sources.
+
 ## Conventions
 
 Use SI units. Let `v = v_COM + omega × (x - x_COM) - wind(x)` be the body's velocity relative to the atmosphere at a force application point. The incoming fluid velocity is `-v`. Surface normals point outwards. Forces and torques are accumulated in world coordinates; geometry is prepared in body-local coordinates, independent of the center of mass.

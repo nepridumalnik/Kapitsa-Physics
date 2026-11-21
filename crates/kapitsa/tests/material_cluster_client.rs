@@ -392,6 +392,110 @@ async fn part_aerodynamic_geometry_commands_apply_loads_on_both_executors()
         let mesh =
             kapitsa::shape::TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]])?;
         client.set_part_aerodynamic_mesh(part, Some(mesh)).await?;
+        use kapitsa::aerodynamics::shape::worker::{PendingAero, ShapeWorker};
+        use kapitsa_core::world::BodyShapeStatus;
+        let worker = ShapeWorker::new(2)?;
+        let (completion, result) = std::sync::mpsc::channel();
+        client
+            .queue_body_shape_with_completion(id, PendingAero::BlockStep, &worker, Some(completion))
+            .await?;
+        let published = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match client.poll_body_shape(id).await? {
+                    BodyShapeStatus::Ready(shape) => return Ok(shape),
+                    BodyShapeStatus::Cooking => tokio::task::yield_now().await,
+                    BodyShapeStatus::Failed(error) => return Err(error),
+                    BodyShapeStatus::Unmanaged => {
+                        return Err(kapitsa::Error::new(
+                            kapitsa_core::ErrorKind::Aerodynamics,
+                            "cook disappeared",
+                        ));
+                    }
+                }
+            }
+        })
+        .await??;
+        assert_eq!(result.try_recv()??, published);
+        assert_eq!(
+            client.poll_body_shape(id).await?,
+            BodyShapeStatus::Ready(published)
+        );
+        client
+            .queue_body_shape(id, PendingAero::ZeroForce, &worker)
+            .await?;
+        assert!(client.cancel_body_shape(id).await?);
+        client.stop_managing_body_shape(id).await?;
+        let (completion, result) = std::sync::mpsc::channel();
+        client
+            .manage_body_shape(id, PendingAero::ZeroForce, &worker, Some(completion))
+            .await?;
+        client.stop_managing_body_shape(id).await?;
+        assert!(result.try_recv().is_err());
+        assert!(!client.cancel_body_shape(id).await?);
+        assert_eq!(
+            client.poll_body_shape(id).await?,
+            BodyShapeStatus::Ready(published)
+        );
+        let (completion, result) = std::sync::mpsc::channel();
+        client
+            .queue_body_shape_with_completion(id, PendingAero::ZeroForce, &worker, Some(completion))
+            .await?;
+        client.set_part_aerodynamic_colliders(part, true).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match client.poll_body_shape(id).await? {
+                    BodyShapeStatus::Cooking => tokio::task::yield_now().await,
+                    BodyShapeStatus::Failed(error) => {
+                        assert_eq!(result.try_recv()?, Err(error));
+                        return Ok::<(), Box<dyn std::error::Error>>(());
+                    }
+                    other => {
+                        return Err(
+                            format!("expected stale publication failure, got {other:?}").into()
+                        );
+                    }
+                }
+            }
+        })
+        .await??;
+        assert!(client.cancel_body_shape(id).await?);
+        assert_eq!(
+            client.poll_body_shape(id).await?,
+            BodyShapeStatus::Unmanaged
+        );
+        // A supported mesh can still exceed the cook budget. Exercise the
+        // worker's own typed failure, separately from stale publication.
+        let oversized = kapitsa::shape::TriangleMesh::new(
+            vec![Vec3::ZERO, Vec3::Y * 1e6, Vec3::Z * 1e6],
+            vec![[0, 1, 2]],
+        )?;
+        client
+            .set_part_aerodynamic_mesh(part, Some(oversized))
+            .await?;
+        let (completion, result) = std::sync::mpsc::channel();
+        client
+            .queue_body_shape_with_completion(id, PendingAero::ZeroForce, &worker, Some(completion))
+            .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match client.poll_body_shape(id).await? {
+                    BodyShapeStatus::Cooking => tokio::task::yield_now().await,
+                    BodyShapeStatus::Failed(error) => {
+                        assert!(
+                            error
+                                .downcast_ref::<kapitsa::aerodynamics::geometry::GeometryError>()
+                                .is_some(),
+                            "{error:?}"
+                        );
+                        assert_eq!(result.try_recv()?, Err(error));
+                        return Ok::<(), Box<dyn std::error::Error>>(());
+                    }
+                    other => return Err(format!("expected cook failure, got {other:?}").into()),
+                }
+            }
+        })
+        .await??;
+        assert!(client.cancel_body_shape(id).await?);
         client.set_part_aerodynamic_colliders(part, true).await?;
         client
             .set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1024)?)

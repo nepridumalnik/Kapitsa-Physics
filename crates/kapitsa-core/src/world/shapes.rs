@@ -8,7 +8,7 @@
 //! preparation on mismatch.
 
 use crate::aerodynamics::shape::worker::{PendingAero, PendingShape};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::TryRecvError;
 
 pub(super) struct PendingBodyShape {
@@ -16,16 +16,39 @@ pub(super) struct PendingBodyShape {
     welds: Vec<super::WeldId>,
     policy: PendingAero,
     result: Result<PendingShape, crate::Error>,
+    completion: Option<BodyShapeCompletion>,
+    inputs: Option<(Vec<CookedSource>, bool)>,
+}
+
+pub(super) struct ManagedBodyShape {
+    policy: PendingAero,
+    worker: crate::aerodynamics::shape::worker::ShapeWorker,
+}
+
+/// Sends the outcome once the world publishes or rejects a background result.
+pub type BodyShapeCompletion = std::sync::mpsc::Sender<Result<ShapeId, crate::Error>>;
+
+/// Status of background preparation for an assembly.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BodyShapeStatus {
+    /// No active cook or valid installed binding.
+    Unmanaged,
+    /// The latest request is awaiting publication.
+    Cooking,
+    /// The installed shape matches the assembly.
+    Ready(ShapeId),
+    /// The latest request failed; the original cause is preserved.
+    Failed(crate::Error),
 }
 
 pub(super) fn suppress_pending_shape(
-    pending: Option<&HashMap<BodyId, PendingBodyShape>>,
+    pending: Option<&BTreeMap<BodyId, PendingBodyShape>>,
     body: BodyId,
     previous_is_current: impl FnOnce() -> bool,
 ) -> bool {
     pending
         .and_then(|jobs| jobs.get(&body))
-        .is_some_and(|job| job.policy == PendingAero::ZeroForce || !previous_is_current())
+        .is_some_and(|job| job.policy != PendingAero::KeepPrevious || !previous_is_current())
 }
 
 use super::{BodyEntry, BodyId, ClusterError, PartId, PhysicsWorld};
@@ -47,7 +70,7 @@ pub(super) fn resolve_shared_shape<'a>(
     bindings: Option<&'a HashMap<BodyId, ShapeBinding>>,
     parts: &DensePool<ClusterPart>,
     geometry: Option<&HashMap<PartId, super::assembly_aerodynamics::PartGeometry>>,
-    settings: (bool, Option<&HashMap<BodyId, PendingBodyShape>>),
+    settings: (bool, Option<&BTreeMap<BodyId, PendingBodyShape>>),
     body_id: BodyId,
     entry: &BodyEntry,
 ) -> Option<(&'a ShapeBinding, &'a CookedShape)> {
@@ -93,6 +116,149 @@ pub(super) fn resolve_shared_shape<'a>(
 }
 
 impl PhysicsWorld {
+    /// Starts background preparation and automatically queues a replacement
+    /// at a full step boundary when the installed binding becomes invalid.
+    pub fn manage_body_shape(
+        &mut self,
+        body: BodyId,
+        policy: PendingAero,
+        worker: &crate::aerodynamics::shape::worker::ShapeWorker,
+    ) -> Result<(), crate::Error> {
+        self.manage_body_shape_with_completion(body, policy, worker, None)
+    }
+
+    /// Enables automatic recooking and reports the initial publication outcome.
+    pub fn manage_body_shape_with_completion(
+        &mut self,
+        body: BodyId,
+        policy: PendingAero,
+        worker: &crate::aerodynamics::shape::worker::ShapeWorker,
+        completion: Option<BodyShapeCompletion>,
+    ) -> Result<(), crate::Error> {
+        self.queue_body_shape_with_completion(body, policy, worker, completion)?;
+        self.managed_shapes
+            .get_or_insert_with(BTreeMap::new)
+            .insert(
+                body,
+                ManagedBodyShape {
+                    policy,
+                    worker: worker.clone(),
+                },
+            );
+        Ok(())
+    }
+
+    /// Disables automatic preparation and cancels any pending request.
+    pub fn stop_managing_body_shape(&mut self, body: BodyId) {
+        if let Some(managed) = &mut self.managed_shapes {
+            managed.remove(&body);
+        }
+        self.cancel_body_shape(body);
+    }
+
+    fn schedule_managed_shapes(&mut self) -> Result<(), crate::Error> {
+        let Some(managed) = self.managed_shapes.take() else {
+            return Ok(());
+        };
+        let result = managed.iter().try_for_each(|(&body, control)| {
+            if self
+                .pending_shapes
+                .as_ref()
+                .and_then(|jobs| jobs.get(&body))
+                .is_some_and(|job| self.pending_inputs_match(body, job))
+                || matches!(self.body_shape_status(body), BodyShapeStatus::Ready(_))
+            {
+                return Ok(());
+            }
+            self.queue_body_shape(body, control.policy, &control.worker)
+                .map_err(|cause| {
+                    crate::Error::from(super::StepError::Aerodynamics {
+                        body_id: body,
+                        cause,
+                    })
+                })
+        });
+        self.managed_shapes = Some(managed);
+        result
+    }
+
+    fn pending_inputs_match(&self, body: BodyId, job: &PendingBodyShape) -> bool {
+        let Some((sources, cavities)) = &job.inputs else {
+            return true;
+        };
+        *cavities == self.preserve_assembly_mesh_cavities
+            && self
+                .cluster(body)
+                .is_some_and(|cluster| cluster.parts() == job.parts && cluster.welds() == job.welds)
+            && job.parts.iter().zip(sources).all(|(&part, source)| {
+                self.part_aerodynamic_mesh_arc(part)
+                    .is_some_and(|mesh| std::sync::Arc::ptr_eq(mesh, &source.mesh))
+                    && self
+                        .cluster_part(part)
+                        .is_some_and(|entry| entry.local_transform() == source.local_transform)
+            })
+    }
+    /// Queues preparation of the assembly's current explicit meshes.
+    pub fn queue_body_shape(
+        &mut self,
+        body: BodyId,
+        policy: PendingAero,
+        worker: &crate::aerodynamics::shape::worker::ShapeWorker,
+    ) -> Result<(), crate::Error> {
+        self.queue_body_shape_with_completion(body, policy, worker, None)
+    }
+
+    /// Queues cooking and optionally reports its publication outcome.
+    /// Cancellation or supersession disconnects the completion channel.
+    pub fn queue_body_shape_with_completion(
+        &mut self,
+        body: BodyId,
+        policy: PendingAero,
+        worker: &crate::aerodynamics::shape::worker::ShapeWorker,
+        completion: Option<BodyShapeCompletion>,
+    ) -> Result<(), crate::Error> {
+        let parts = self
+            .cluster(body)
+            .ok_or(ClusterError::NotClustered)?
+            .parts()
+            .to_vec();
+        let sources = parts
+            .iter()
+            .enumerate()
+            .map(|(index, &part)| {
+                Ok(CookedSource {
+                    mesh: self
+                        .part_aerodynamic_mesh_arc(part)
+                        .ok_or(ShapeRegistryError::UnsupportedSource)?
+                        .clone(),
+                    local_transform: self
+                        .cluster_part(part)
+                        .ok_or(ClusterError::InvalidPartId)?
+                        .local_transform(),
+                    slot: crate::aerodynamics::geometry::OwnerSlot::new(
+                        u32::try_from(index).map_err(|_| ShapeRegistryError::InvalidBinding)?,
+                    ),
+                })
+            })
+            .collect::<Result<Vec<_>, crate::Error>>()?;
+        let cook = worker
+            .submit(
+                sources.clone(),
+                assembly_pressure_config(),
+                self.preserve_assembly_mesh_cavities,
+            )
+            .map_err(|error| crate::Error::from_source(crate::ErrorKind::Aerodynamics, error))?;
+        self.track_body_shape(body, parts, policy, cook)?;
+        if let Some(job) = self
+            .pending_shapes
+            .as_mut()
+            .and_then(|jobs| jobs.get_mut(&body))
+        {
+            job.completion = completion;
+            job.inputs = Some((sources, self.preserve_assembly_mesh_cavities));
+        }
+        Ok(())
+    }
     /// Tracks an already queued cook for this assembly, superseding any older request.
     pub fn track_body_shape(
         &mut self,
@@ -108,19 +274,90 @@ impl PhysicsWorld {
             return Err(ShapeRegistryError::InvalidBinding.into());
         }
         let welds = cluster.welds().to_vec();
-        self.pending_shapes.get_or_insert_with(HashMap::new).insert(
-            body,
-            PendingBodyShape {
-                parts,
-                welds,
-                policy,
-                result: Ok(cook),
-            },
-        );
+        self.pending_shapes
+            .get_or_insert_with(BTreeMap::new)
+            .insert(
+                body,
+                PendingBodyShape {
+                    parts,
+                    welds,
+                    policy,
+                    result: Ok(cook),
+                    completion: None,
+                    inputs: None,
+                },
+            );
+        self.body_revision = self.body_revision.wrapping_add(1);
         Ok(())
     }
 
-    pub(super) fn finish_pending_shapes(&mut self) {
+    /// Publishes completed work without advancing the simulation. A pending
+    /// `BlockStep` request is only waited on by the physics step, not here.
+    pub fn poll_body_shapes(&mut self) {
+        self.collect_pending_shapes(false);
+    }
+
+    /// Stops tracking the latest request without changing the installed binding.
+    /// An in-flight result for that request can no longer be published.
+    pub fn cancel_body_shape(&mut self, body: BodyId) -> bool {
+        let cancelled = self
+            .pending_shapes
+            .as_mut()
+            .is_some_and(|jobs| jobs.remove(&body).is_some());
+        if cancelled {
+            self.body_revision = self.body_revision.wrapping_add(1);
+        }
+        cancelled
+    }
+
+    /// Returns the state of the latest request, or of the installed binding.
+    pub fn body_shape_status(&self, body: BodyId) -> BodyShapeStatus {
+        if let Some(job) = self
+            .pending_shapes
+            .as_ref()
+            .and_then(|jobs| jobs.get(&body))
+        {
+            return match &job.result {
+                Ok(_) => BodyShapeStatus::Cooking,
+                Err(error) => BodyShapeStatus::Failed(error.clone()),
+            };
+        }
+        self.body_entry_for_shape_status(body)
+            .and_then(|entry| self.shared_shape(body, entry))
+            .map_or(BodyShapeStatus::Unmanaged, |(binding, _)| {
+                BodyShapeStatus::Ready(binding.shape())
+            })
+    }
+
+    fn body_entry_for_shape_status(&self, body: BodyId) -> Option<&BodyEntry> {
+        if body.world != self.world_id {
+            return None;
+        }
+        self.bodies.get(body.dense)
+    }
+
+    pub(super) fn finish_pending_shapes(&mut self) -> Result<(), crate::Error> {
+        self.schedule_managed_shapes()?;
+        self.collect_pending_shapes(true);
+        // Choose a stable error when multiple requests fail at one boundary.
+        if let Some((body_id, cause)) = self
+            .pending_shapes
+            .iter()
+            .flat_map(|jobs| jobs.iter())
+            .filter(|(_, job)| job.policy == PendingAero::BlockStep)
+            .filter_map(|(&body, job)| job.result.as_ref().err().map(|error| (body, error)))
+            .min_by_key(|(body, _)| *body)
+        {
+            return Err(super::StepError::Aerodynamics {
+                body_id,
+                cause: cause.clone(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn collect_pending_shapes(&mut self, wait: bool) {
         let Some(mut pending) = self.pending_shapes.take() else {
             return;
         };
@@ -128,14 +365,21 @@ impl PhysicsWorld {
             let Some(cluster) = self.cluster(body) else {
                 return false;
             };
-            if cluster.welds() != job.welds || cluster.parts().len() != job.parts.len() {
-                job.result = Err(ShapeRegistryError::StaleBinding.into());
+            if cluster.welds() != job.welds
+                || cluster.parts().len() != job.parts.len()
+                || !self.pending_inputs_match(body, job)
+            {
+                let error = crate::Error::from(ShapeRegistryError::StaleBinding);
+                if let Some(completion) = job.completion.take() {
+                    let _ = completion.send(Err(error.clone()));
+                }
+                job.result = Err(error);
                 return true;
             }
             let Ok(cook) = &mut job.result else {
                 return true;
             };
-            let result = if job.policy == PendingAero::BlockStep {
+            let result = if wait && job.policy == PendingAero::BlockStep {
                 cook.wait()
             } else {
                 cook.try_recv()
@@ -143,9 +387,17 @@ impl PhysicsWorld {
             let result = match result {
                 Ok(result) => result,
                 Err(TryRecvError::Empty) => return true,
-                Err(TryRecvError::Disconnected) => Err(ShapeRegistryError::StaleBinding.into()),
+                Err(error @ TryRecvError::Disconnected) => Err(crate::Error::from_source(
+                    crate::ErrorKind::Aerodynamics,
+                    error,
+                )),
             };
-            match result.and_then(|shape| self.publish_body_shape(body, shape, job.parts.clone())) {
+            let outcome =
+                result.and_then(|shape| self.publish_body_shape(body, shape, job.parts.clone()));
+            if let Some(completion) = job.completion.take() {
+                let _ = completion.send(outcome.clone());
+            }
+            match outcome {
                 Ok(_) => false,
                 Err(error) => {
                     job.result = Err(error);
@@ -293,6 +545,7 @@ impl PhysicsWorld {
             self.shapes.remove(id);
             return Err(error);
         }
+        self.body_revision = self.body_revision.wrapping_add(1);
         Ok(id)
     }
 
@@ -397,6 +650,276 @@ mod tests {
     use kapitsa_math::Vec3;
     use std::sync::Arc;
 
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Run alone: process-wide allocation counter"]
+    fn pending_shape_status_and_collection_do_not_allocate() -> Result<(), crate::Error> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        let (producer, pending) = PendingShape::test_channel();
+        world.track_body_shape(body, vec![part], PendingAero::ZeroForce, pending)?;
+        world.finish_pending_shapes()?;
+        let counts = super::super::tests::tracked_world_allocations(|| {
+            for _ in 0..128 {
+                assert!(world.finish_pending_shapes().is_ok());
+                assert_eq!(world.body_shape_status(body), BodyShapeStatus::Cooking);
+            }
+        });
+        drop(producer);
+        println!("128 pending checks: {counts:?} (allocations, bytes)");
+        assert_eq!(counts, (0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn polling_rejects_edited_inputs_before_the_worker_finishes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        let cube = super::super::shape_binding_tests::cube;
+        world.set_part_aerodynamic_mesh(part, Some(cube()?))?;
+        let worker = ShapeWorker::new(2)?;
+        let (completion, outcome) = std::sync::mpsc::channel();
+        world.queue_body_shape_with_completion(
+            body,
+            PendingAero::BlockStep,
+            &worker,
+            Some(completion),
+        )?;
+        let (producer, pending) = PendingShape::test_channel();
+        world
+            .pending_shapes
+            .as_mut()
+            .and_then(|jobs| jobs.get_mut(&body))
+            .ok_or("missing queued job")?
+            .result = Ok(pending);
+        world.set_part_aerodynamic_mesh(part, Some(cube()?))?;
+        world.poll_body_shapes();
+        let expected = crate::Error::from(ShapeRegistryError::StaleBinding);
+        assert_eq!(outcome.try_recv()?, Err(expected.clone()));
+        assert_eq!(
+            world.body_shape_status(body),
+            BodyShapeStatus::Failed(expected.clone())
+        );
+        assert!(producer.send(Err(expected)).is_err());
+        assert!(world.shape_registry().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn managed_edit_supersedes_in_flight_inputs() -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        world.set_part_aerodynamic_mesh(part, Some(super::super::shape_binding_tests::cube()?))?;
+        let worker = ShapeWorker::new(2)?;
+        world.manage_body_shape(body, PendingAero::BlockStep, &worker)?;
+        let (sender, pending) = PendingShape::test_channel();
+        let job = world
+            .pending_shapes
+            .as_mut()
+            .and_then(|jobs| jobs.get_mut(&body))
+            .ok_or("missing initial job")?;
+        job.result = Ok(pending);
+        world.set_part_aerodynamic_mesh(part, Some(super::super::shape_binding_tests::cube()?))?;
+        world.step(1e-8)?;
+        assert!(
+            sender
+                .send(Err(ShapeRegistryError::StaleBinding.into()))
+                .is_err()
+        );
+        let BodyShapeStatus::Ready(id) = world.body_shape_status(body) else {
+            return Err("replacement was not published".into());
+        };
+        let shape = world
+            .shape_registry()
+            .get(id)
+            .ok_or("missing installed shape")?;
+        assert!(Arc::ptr_eq(
+            &shape.sources()[0].mesh,
+            world
+                .part_aerodynamic_mesh_arc(part)
+                .ok_or("missing live mesh")?
+        ));
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn managed_mesh_edit_does_not_cook_on_step_thread(
+        #[case] sharded: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::super::test_atmosphere(
+            crate::aerodynamics::AtmosphericState::new(1.0, Vec3::X * -2000.0)?,
+        ));
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        world.set_part_aerodynamic_mesh(part, Some(super::super::shape_binding_tests::cube()?))?;
+        let worker = ShapeWorker::new(2)?;
+        world.manage_body_shape(body, PendingAero::BlockStep, &worker)?;
+        world.finish_pending_shapes()?;
+        let installed = world
+            .shape_binding(body)
+            .ok_or("missing initial shape")?
+            .shape();
+        world.manage_body_shape(body, PendingAero::ZeroForce, &worker)?;
+        world.cancel_body_shape(body);
+        // Local preparation would fail the geometry budget and abort this step.
+        world.set_part_aerodynamic_mesh(
+            part,
+            Some(TriangleMesh::new(
+                vec![Vec3::ZERO, Vec3::Y * 1e6, Vec3::Z * 1e6],
+                vec![[0, 1, 2]],
+            )?),
+        )?;
+        use crate::aerodynamics::AerodynamicsTask;
+        AerodynamicsTask.execute(&world)?;
+        let mut snapshots = [Vec::new()];
+        world.fill_step_shards(&mut snapshots)?;
+        let snapshot = snapshots[0].first_mut().ok_or("missing snapshot")?;
+        snapshot.integrate(1e-8)?;
+        assert_eq!(
+            snapshot
+                .predicted
+                .ok_or("missing prediction")?
+                .linear_velocity(),
+            Vec3::ZERO
+        );
+        if sharded {
+            world.step_with_shards(
+                1e-8,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(1e-8)?;
+        }
+        assert!(world.owner_mesh_pressure(body).is_none());
+        assert!(matches!(
+            world.body_shape_status(body),
+            BodyShapeStatus::Cooking | BodyShapeStatus::Failed(_)
+        ));
+        assert_eq!(
+            world.shape_binding(body).map(ShapeBinding::shape),
+            Some(installed)
+        );
+        world.stop_managing_body_shape(body);
+        assert!(
+            world.fill_step_shards(&mut snapshots).is_err(),
+            "the same oversized mesh must fail synchronous local preparation"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn managed_merge_recooks_the_surviving_assembly() -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let mass = crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?;
+        let first = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            mass,
+        )?)?;
+        let second = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            mass,
+        )?)?;
+        let a = world.enable_cluster(first)?;
+        let b = world.enable_cluster(second)?;
+        for part in [a, b] {
+            world.set_part_aerodynamic_mesh(
+                part,
+                Some(super::super::shape_binding_tests::cube()?),
+            )?;
+        }
+        let worker = ShapeWorker::new(2)?;
+        world.manage_body_shape(first, PendingAero::BlockStep, &worker)?;
+        world.step(1e-8)?;
+        let initial = world.shape_binding(first).ok_or("initial binding")?.shape();
+        world.merge_clusters(
+            first,
+            second,
+            super::super::shape_binding_tests::merge_weld(),
+        )?;
+        world.step(1e-8)?;
+        let current = world.shape_binding(first).ok_or("merged binding")?;
+        assert_ne!(initial, current.shape());
+        assert_eq!(current.parts(), &[a, b]);
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn block_step_failure_keeps_motion(
+        #[case] sharded: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        let before = *world.body(body).ok_or("body")?.state();
+        let (sender, pending) = PendingShape::test_channel();
+        world.track_body_shape(body, vec![part], PendingAero::BlockStep, pending)?;
+        drop(sender);
+        let result = if sharded {
+            world.step_with_shards(
+                1e-8,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+        } else {
+            world.step(1e-8)
+        };
+        let error = result.err().ok_or("failed cook allowed the step")?;
+        assert!(
+            matches!(error.downcast_ref::<super::super::StepError>(), Some(super::super::StepError::Aerodynamics { body_id, cause })
+            if *body_id == body && cause.downcast_ref::<TryRecvError>() == Some(&TryRecvError::Disconnected))
+        );
+        assert_eq!(*world.body(body).ok_or("body")?.state(), before);
+        Ok(())
+    }
+
+    #[test]
+    fn disconnected_cook_reports_transport_failure() -> Result<(), crate::Error> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        let (sender, pending) = PendingShape::test_channel();
+        world.track_body_shape(body, vec![part], PendingAero::ZeroForce, pending)?;
+        assert_eq!(world.body_shape_status(body), BodyShapeStatus::Cooking);
+        drop(sender);
+        world.poll_body_shapes();
+        assert!(
+            matches!(world.body_shape_status(body), BodyShapeStatus::Failed(error)
+            if error.downcast_ref::<TryRecvError>() == Some(&TryRecvError::Disconnected))
+        );
+        assert!(world.shape_registry().is_empty());
+        Ok(())
+    }
+
     #[rstest::rstest]
     #[case(false, PendingAero::ZeroForce, false)]
     #[case(true, PendingAero::ZeroForce, false)]
@@ -431,7 +954,11 @@ mod tests {
             let previous = world.cook_shape(&sources, false)?;
             world.bind_shape(body, previous, vec![part])?;
         }
-        let (sender, pending) = PendingShape::test_channel();
+        let (sender, mut pending) = PendingShape::test_channel();
+        let (entered, wait_started) = std::sync::mpsc::channel();
+        if policy == PendingAero::BlockStep {
+            pending.on_wait = Some(entered);
+        }
         world.track_body_shape(body, vec![part], policy, pending)?;
         let mesh = if policy == PendingAero::KeepPrevious {
             let replacement = Arc::new(super::super::shape_binding_tests::cube()?);
@@ -511,10 +1038,21 @@ mod tests {
                 Vec3::ZERO
             );
         }
-        sender
-            .send(Ok(shape.take().ok_or("shape")?))
-            .map_err(|_| "disconnected")?;
-        advance(&mut world)?;
+        let shape = shape.take().ok_or("shape")?;
+        if policy == PendingAero::BlockStep {
+            let producer = std::thread::spawn(move || {
+                wait_started
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(|_| "step never entered wait")?;
+                sender.send(Ok(shape)).map_err(|_| "disconnected")
+            });
+            let result = advance(&mut world);
+            producer.join().map_err(|_| "producer panicked")??;
+            result?;
+        } else {
+            sender.send(Ok(shape)).map_err(|_| "disconnected")?;
+            advance(&mut world)?;
+        }
         assert!(world.shape_binding(body).is_some());
         assert!(
             world
@@ -560,6 +1098,18 @@ mod tests {
             error.downcast_ref::<ShapeRegistryError>(),
             Some(&ShapeRegistryError::InvalidBinding)
         );
+        assert_eq!(world.shape_registry().len(), 1);
+        assert_eq!(world.shape_binding(body).map(ShapeBinding::shape), Some(id));
+        let (sender, pending) = PendingShape::test_channel();
+        world.track_body_shape(body, vec![part], PendingAero::ZeroForce, pending)?;
+        sender
+            .send(Ok(worker
+                .submit(sources.to_vec(), assembly_pressure_config(), false)?
+                .recv()??))
+            .map_err(|_| "cancel fixture disconnected")?;
+        assert!(world.cancel_body_shape(body));
+        assert!(!world.cancel_body_shape(body));
+        world.poll_body_shapes();
         assert_eq!(world.shape_registry().len(), 1);
         assert_eq!(world.shape_binding(body).map(ShapeBinding::shape), Some(id));
         Ok(())

@@ -107,6 +107,90 @@ impl PhysicsClient {
             _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
+    /// Queues background preparation of the body's current assembly geometry.
+    pub async fn queue_body_shape(
+        &self,
+        body: BodyId,
+        policy: kapitsa_core::aerodynamics::shape::worker::PendingAero,
+        worker: &kapitsa_core::aerodynamics::shape::worker::ShapeWorker,
+    ) -> Result<(), Error> {
+        self.queue_body_shape_with_completion(body, policy, worker, None)
+            .await
+    }
+
+    /// Queues a cook and sends its outcome when the world processes publication.
+    /// While paused, call `poll_body_shape` to drive publication. Superseding
+    /// or cancelling the request disconnects its completion channel.
+    pub async fn queue_body_shape_with_completion(
+        &self,
+        body: BodyId,
+        policy: kapitsa_core::aerodynamics::shape::worker::PendingAero,
+        worker: &kapitsa_core::aerodynamics::shape::worker::ShapeWorker,
+        completion: Option<kapitsa_core::world::BodyShapeCompletion>,
+    ) -> Result<(), Error> {
+        expect_done(
+            self.submit(PhysicsCommand::QueueBodyShape {
+                body,
+                policy,
+                worker: worker.clone(),
+                completion,
+                managed: false,
+            })
+            .await?,
+        )
+    }
+
+    /// Starts background preparation and schedules new cooks after subsequent
+    /// assembly edits at full step boundaries. Completion reports the initial cook.
+    pub async fn manage_body_shape(
+        &self,
+        body: BodyId,
+        policy: kapitsa_core::aerodynamics::shape::worker::PendingAero,
+        worker: &kapitsa_core::aerodynamics::shape::worker::ShapeWorker,
+        completion: Option<kapitsa_core::world::BodyShapeCompletion>,
+    ) -> Result<(), Error> {
+        expect_done(
+            self.submit(PhysicsCommand::QueueBodyShape {
+                body,
+                policy,
+                worker: worker.clone(),
+                completion,
+                managed: true,
+            })
+            .await?,
+        )
+    }
+
+    /// Disables automatic recooking and cancels any pending request.
+    pub async fn stop_managing_body_shape(&self, body: BodyId) -> Result<(), Error> {
+        expect_done(
+            self.submit(PhysicsCommand::StopManagingBodyShape { body })
+                .await?,
+        )
+    }
+
+    /// Cancels a tracked background cook without replacing the installed binding.
+    pub async fn cancel_body_shape(&self, body: BodyId) -> Result<bool, Error> {
+        match self
+            .submit(PhysicsCommand::CancelBodyShape { body })
+            .await?
+        {
+            PhysicsCommandResult::BodyShapeCancelled(cancelled) => Ok(cancelled),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
+        }
+    }
+
+    /// Publishes available cook results and reads the latest status, even while paused.
+    pub async fn poll_body_shape(
+        &self,
+        body: BodyId,
+    ) -> Result<kapitsa_core::world::BodyShapeStatus, Error> {
+        match self.submit(PhysicsCommand::PollBodyShape { body }).await? {
+            PhysicsCommandResult::BodyShapeStatus(status) => Ok(status),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
+        }
+    }
+
     /// Replaces explicit finite wings in the stable part-local frame; empty clears.
     /// Takes owned configuration and applies it in queue order, even while paused.
     /// Loads are additive to hull, geometry and other explicit surfaces; callers

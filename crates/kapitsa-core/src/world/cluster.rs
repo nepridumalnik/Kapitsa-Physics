@@ -1635,6 +1635,8 @@ impl PhysicsWorld {
         if let Some(bindings) = &mut self.shape_bindings {
             bindings.remove(&second);
         }
+        self.cancel_body_shape(second);
+        self.stop_managing_body_shape(second);
         self.synchronize_cluster_physics_state(&[first]);
         Ok(())
     }

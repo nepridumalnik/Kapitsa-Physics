@@ -95,6 +95,20 @@ mod aerodynamics {
                     world: world.world_id,
                     dense,
                 };
+                let shared = world.shared_shape(body_id, entry);
+                if world
+                    .managed_shapes
+                    .as_ref()
+                    .is_some_and(|jobs| jobs.contains_key(&body_id))
+                    && shared.is_none()
+                    || super::shapes::suppress_pending_shape(
+                        world.pending_shapes.as_ref(),
+                        body_id,
+                        || shared.is_some(),
+                    )
+                {
+                    continue;
+                }
                 if !entry.body.base_pressure_patches.is_empty()
                     || entry.body.potential_sphere.is_some()
                 {
@@ -105,7 +119,6 @@ mod aerodynamics {
                         ),
                     }));
                 }
-                let shared = world.shared_shape(body_id, entry);
                 let patches = super::assembly_aerodynamics::prepare(
                     body_id,
                     entry,
@@ -179,6 +192,7 @@ mod query;
 #[cfg(test)]
 mod shape_binding_tests;
 mod shapes;
+pub use shapes::{BodyShapeCompletion, BodyShapeStatus};
 
 pub use aerodynamics::{AerodynamicSurface, AerodynamicTarget, AerodynamicsTask};
 pub use chunk::{AddChunkBatchError, AddChunkError, ChunkOperationError, RemoveChunkBatchError};
@@ -882,7 +896,8 @@ pub struct PhysicsWorld {
     assembly_aerodynamics: Option<HashMap<BodyId, assembly_aerodynamics::AssemblyAerodynamics>>,
     shapes: crate::aerodynamics::shape::ShapeRegistry,
     shape_bindings: Option<HashMap<BodyId, crate::aerodynamics::shape::ShapeBinding>>,
-    pending_shapes: Option<HashMap<BodyId, shapes::PendingBodyShape>>,
+    pending_shapes: Option<std::collections::BTreeMap<BodyId, shapes::PendingBodyShape>>,
+    managed_shapes: Option<std::collections::BTreeMap<BodyId, shapes::ManagedBodyShape>>,
     welds: DensePool<Weld>,
     colliders: DensePool<ColliderEntry>,
     chunks: DensePool<chunk::ChunkEntry>,
@@ -1624,6 +1639,7 @@ impl PhysicsWorld {
             shapes: crate::aerodynamics::shape::ShapeRegistry::new(),
             shape_bindings: None,
             pending_shapes: None,
+            managed_shapes: None,
             welds: DensePool::new(),
             colliders: DensePool::new(),
             chunks: DensePool::new(),
@@ -4351,7 +4367,7 @@ impl PhysicsWorld {
         self.part_wing_pending.clear();
         self.simple_surface_pending.clear();
         self.raw_simple_pending.clear();
-        self.finish_pending_shapes();
+        self.finish_pending_shapes()?;
         self.prune_stale_shape_bindings();
         let atmosphere = self.atmosphere;
         if matches!(atmosphere, Atmosphere::Vacuum) {
@@ -6235,6 +6251,11 @@ impl PhysicsWorld {
                         if apply_aerodynamics
                             && !matches!(atmosphere, Atmosphere::Vacuum)
                             && let Some(entry) = self.bodies.get(step.body_id.dense)
+                            && (!self
+                                .managed_shapes
+                                .as_ref()
+                                .is_some_and(|jobs| jobs.contains_key(&step.body_id))
+                                || self.shared_shape(step.body_id, entry).is_some())
                             && !shapes::suppress_pending_shape(
                                 self.pending_shapes.as_ref(),
                                 step.body_id,
@@ -6806,6 +6827,8 @@ impl PhysicsWorld {
         if let Some(bindings) = &mut self.shape_bindings {
             bindings.remove(&id);
         }
+        self.cancel_body_shape(id);
+        self.stop_managing_body_shape(id);
         Some(removed)
     }
 
