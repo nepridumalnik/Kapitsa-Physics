@@ -8,7 +8,7 @@
 //! preparation on mismatch.
 
 use crate::aerodynamics::shape::worker::{PendingAero, PendingShape};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::TryRecvError;
 
 pub(super) struct PendingBodyShape {
@@ -42,7 +42,7 @@ pub enum BodyShapeStatus {
 }
 
 pub(super) fn suppress_pending_shape(
-    pending: Option<&HashMap<BodyId, PendingBodyShape>>,
+    pending: Option<&BTreeMap<BodyId, PendingBodyShape>>,
     body: BodyId,
     previous_is_current: impl FnOnce() -> bool,
 ) -> bool {
@@ -70,7 +70,7 @@ pub(super) fn resolve_shared_shape<'a>(
     bindings: Option<&'a HashMap<BodyId, ShapeBinding>>,
     parts: &DensePool<ClusterPart>,
     geometry: Option<&HashMap<PartId, super::assembly_aerodynamics::PartGeometry>>,
-    settings: (bool, Option<&HashMap<BodyId, PendingBodyShape>>),
+    settings: (bool, Option<&BTreeMap<BodyId, PendingBodyShape>>),
     body_id: BodyId,
     entry: &BodyEntry,
 ) -> Option<(&'a ShapeBinding, &'a CookedShape)> {
@@ -136,13 +136,15 @@ impl PhysicsWorld {
         completion: Option<BodyShapeCompletion>,
     ) -> Result<(), crate::Error> {
         self.queue_body_shape_with_completion(body, policy, worker, completion)?;
-        self.managed_shapes.get_or_insert_with(HashMap::new).insert(
-            body,
-            ManagedBodyShape {
-                policy,
-                worker: worker.clone(),
-            },
-        );
+        self.managed_shapes
+            .get_or_insert_with(BTreeMap::new)
+            .insert(
+                body,
+                ManagedBodyShape {
+                    policy,
+                    worker: worker.clone(),
+                },
+            );
         Ok(())
     }
 
@@ -272,17 +274,19 @@ impl PhysicsWorld {
             return Err(ShapeRegistryError::InvalidBinding.into());
         }
         let welds = cluster.welds().to_vec();
-        self.pending_shapes.get_or_insert_with(HashMap::new).insert(
-            body,
-            PendingBodyShape {
-                parts,
-                welds,
-                policy,
-                result: Ok(cook),
-                completion: None,
-                inputs: None,
-            },
-        );
+        self.pending_shapes
+            .get_or_insert_with(BTreeMap::new)
+            .insert(
+                body,
+                PendingBodyShape {
+                    parts,
+                    welds,
+                    policy,
+                    result: Ok(cook),
+                    completion: None,
+                    inputs: None,
+                },
+            );
         self.body_revision = self.body_revision.wrapping_add(1);
         Ok(())
     }
