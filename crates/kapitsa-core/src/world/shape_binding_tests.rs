@@ -611,6 +611,46 @@ fn allocation_world(shared: bool) -> Result<PhysicsWorld, Box<dyn std::error::Er
 
 #[cfg(feature = "bench-internals")]
 #[test]
+#[ignore = "Run alone: process-wide allocation counter"]
+fn shared_shape_warm_steps_add_no_allocations() -> Result<(), Box<dyn std::error::Error>> {
+    const STEPS: usize = 16;
+    const DT: f64 = 1e-8;
+    let mut local = allocation_world(false)?;
+    let mut shared = allocation_world(true)?;
+    for _ in 0..STEPS {
+        local.step(DT)?;
+        shared.step(DT)?;
+    }
+    let measure = |world: &mut PhysicsWorld| {
+        super::tests::tracked_world_allocations(|| {
+            for _ in 0..STEPS {
+                assert!(world.step(DT).is_ok());
+            }
+        })
+    };
+    let local_counts = measure(&mut local);
+    let shared_counts = measure(&mut shared);
+    println!(
+        "{STEPS} warm steps, four vessels (allocations, bytes): local={local_counts:?}, shared={shared_counts:?}"
+    );
+    assert!(shared_counts.0 <= local_counts.0);
+    assert!(shared_counts.1 <= local_counts.1);
+    for ((_, local_body), (id, shared_body)) in local.bodies().zip(shared.bodies()) {
+        assert!(shared.shape_binding(id).is_some());
+        assert_eq!(
+            local_body.state().linear_velocity(),
+            shared_body.state().linear_velocity()
+        );
+        assert_eq!(
+            local_body.state().angular_velocity(),
+            shared_body.state().angular_velocity()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
 #[ignore = "Run alone: compares cold one-step allocations for shared versus body-local vessels"]
 fn shared_shape_cold_step_allocates_less_than_body_local() -> Result<(), Box<dyn std::error::Error>>
 {

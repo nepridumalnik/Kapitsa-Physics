@@ -386,3 +386,9 @@ These are workload timings, not thresholds, allocation bounds or accuracy
 validation. A separate ignored allocation comparison for a cold step with four
 vessels records 91 allocations/48,536 bytes shared versus 131/194,136 bytes
 body-local.
+
+The isolated `shared_shape_warm_steps_add_no_allocations` regression warms
+both four-vessel worlds for 16 steps, then measures 16 more steps. Both paths
+recorded 4,800 allocations and 1,168,384 bytes, with identical linear and
+angular velocities. This demonstrates no added allocations for this warmed
+mesh workload, not an allocation-free physics step.
