@@ -94,6 +94,13 @@ Tests compare shared and body-local forces, cover geometry-edit and replacement 
 
 ### Background preparation of assembly shapes
 
+For persistent management in a `PhysicsWorld`, use `manage_body_shape`.
+Once the initial shape is published, an invalidated binding schedules a new
+cook at the next full step boundary. A one-shot `queue_body_shape` does not
+enable this behavior. `stop_managing_body_shape` disables automatic scheduling
+and cancels pending work. A failed request is retained for inspection rather
+than retried every step; submit a new request to recover.
+
 For explicit mesh assemblies, create a bounded `aerodynamics::shape::worker::ShapeWorker`
 and call `PhysicsClient::queue_body_shape` after editing the assembly. The queue
 captures the current sources at the command boundary; the worker cooks them

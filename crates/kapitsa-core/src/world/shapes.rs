@@ -644,6 +644,17 @@ mod tests {
                 vec![[0, 1, 2]],
             )?),
         )?;
+        let mut snapshots = [Vec::new()];
+        world.fill_step_shards(&mut snapshots)?;
+        let snapshot = snapshots[0].first_mut().ok_or("missing snapshot")?;
+        snapshot.integrate(1e-8)?;
+        assert_eq!(
+            snapshot
+                .predicted
+                .ok_or("missing prediction")?
+                .linear_velocity(),
+            Vec3::ZERO
+        );
         if sharded {
             world.step_with_shards(
                 1e-8,

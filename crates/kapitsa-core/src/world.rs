@@ -6223,6 +6223,11 @@ impl PhysicsWorld {
                         if apply_aerodynamics
                             && !matches!(atmosphere, Atmosphere::Vacuum)
                             && let Some(entry) = self.bodies.get(step.body_id.dense)
+                            && (!self
+                                .managed_shapes
+                                .as_ref()
+                                .is_some_and(|jobs| jobs.contains_key(&step.body_id))
+                                || self.shared_shape(step.body_id, entry).is_some())
                             && !shapes::suppress_pending_shape(
                                 self.pending_shapes.as_ref(),
                                 step.body_id,
