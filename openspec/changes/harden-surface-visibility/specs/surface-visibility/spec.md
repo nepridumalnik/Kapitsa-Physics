@@ -331,17 +331,27 @@ to zero SHALL return `PrecisionLoss`.
 
 ### Requirement: Preserve representable numeric intersections
 
-Crossing calculations SHALL preserve representable intersections when
-finite distance or endpoint differences overflow. Finite coordinate
-differences SHALL use fused multiply-add for interpolation. Unrepresentable
-results SHALL return an error.
+Crossing fractions SHALL use the smaller-to-larger absolute distance ratio.
+Finite coordinate differences SHALL use fused multiply-add for interpolation.
+Unrepresentable results SHALL return an error.
 
 #### Scenario: Finite distances have an overflowing difference
 
 - **WHEN** opposite-signed finite distances have a difference outside the
   finite `f64` range
-- **THEN** the crossing fraction is computed after a common rescaling that
-  preserves the ratio, and a representable fraction is retained
+- **THEN** the smaller-to-larger absolute distance ratio is computed first,
+  and the endpoint-order fraction is reconstructed from that ratio without
+  overflowing a distance sum
+
+#### Scenario: Subnormal distances preserve 1:2 and 2:1 crossing ratios
+
+- **WHEN** opposite-signed distances have absolute magnitudes `2*m` and `m`,
+  where `m` is the smallest positive binary64 subnormal
+- **THEN** the smaller-to-larger ratio remains representable and crossing
+  fractions are `2/3` for `(2*m, -m)` and `1/3` for `(m, -2*m)`
+- **AND** a ratio that underflows to zero returns `PrecisionLoss`
+- **AND** this is a synthetic regression assertion, not test execution
+  evidence or independent physical validation
 
 #### Scenario: Endpoint coordinate subtraction overflows
 
@@ -365,7 +375,8 @@ results SHALL return an error.
 #### Scenario: Crossing arithmetic retains binary64 limits
 
 - **WHEN** crossings use fused multiply-add for finite coordinate differences
-- **THEN** coordinate subtraction and the crossing fraction still round to
+- **THEN** coordinate subtraction, the smaller-to-larger ratio, `1 + ratio`,
+  reciprocal, endpoint-order fraction and constructed point still round to
   binary64, and a fraction can still round to one
 - **AND** a smaller edge ratio rounding to zero remains `PrecisionLoss`, while
   a non-finite constructed point remains `ArithmeticOverflow`

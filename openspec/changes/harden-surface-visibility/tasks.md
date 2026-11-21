@@ -148,7 +148,10 @@
   `1.0`, `-3.0` yield fraction `0.25` and ties-to-even zero from `m/2`, in
   either endpoint order; separate product rounding would leave `m`. Record
   synthetic assertions only, not test execution or independent physical validation.
-- [x] Retain rounded binary64 differences, fractions and intersection coordinates,
-  possible fraction rounding to one, smaller-ratio underflow `PrecisionLoss`
+- [x] Record smaller-to-larger absolute-distance ratios for crossing fractions,
+  including the subnormal `1:2` and `2:1` regression (`1/3` and `2/3` in
+  endpoint order); retain the underflow error as `PrecisionLoss`.
+- [x] Retain rounded binary64 differences, ratios, `1 + ratio`, reciprocals,
+  fractions and intersection coordinates, possible fraction rounding to one,
   and non-finite-point `ArithmeticOverflow`; do not claim exact geometry or a
   global numeric error bound from fused multiply-add.

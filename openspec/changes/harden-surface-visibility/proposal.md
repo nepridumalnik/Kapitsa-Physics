@@ -124,7 +124,9 @@ This change covers:
   and is not test execution evidence or independent physical validation;
 - preserving representable shadow intersections when finite floating-point
   distance or coordinate differences would overflow during intersection
-  arithmetic;
+  arithmetic; crossing fractions use the smaller-to-larger absolute distance
+  ratio, then reconstruct the endpoint-order result without forming an
+  overflowing distance sum;
 - using `difference.mul_add(fraction, near)` for each finite coordinate
   difference `far - near`, rounding the product and addition together so a
   subnormal product residual can contribute before final binary64 rounding;
@@ -136,11 +138,17 @@ This change covers:
   zero, identically after reversing endpoints and distances; separate product
   rounding would lose `-m/2` before addition and leave `m`; this is not test
   execution evidence or independent physical validation;
+- recording the subnormal crossing-fraction regression for distances in the
+  `1:2` and `2:1` ratios: the smaller-to-larger ratio remains representable,
+  producing `1/3` or `2/3` in the corresponding endpoint order; this is not
+  test execution evidence or independent physical validation;
 - retaining binary64 rounding of coordinate differences, crossing fractions
   and constructed intersections, including possible fraction rounding to one;
-  fused multiply-add does not make geometry exact or provide a global numeric
-  error bound; smaller-ratio underflow still returns `PrecisionLoss` and
-  non-finite constructed points still return `ArithmeticOverflow`;
+  the ratio, `1 + ratio`, reciprocal and final fraction remain binary64
+  operations; smaller-ratio underflow still returns `PrecisionLoss` and
+  non-finite constructed points still return `ArithmeticOverflow`; fused
+  multiply-add does not make geometry exact or provide a global numeric error
+  bound;
 - checking that each source triangle's clipped pieces conserve its local
   barycentric area, with a heuristic precision allowance based on work for
   that source partition;
