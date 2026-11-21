@@ -365,6 +365,24 @@ impl PhysicsWorld {
         part: PartId,
         mesh: Option<TriangleMesh>,
     ) -> Result<(), ClusterError> {
+        self.install_part_wave_source_mesh(part, mesh.map(Arc::new))
+    }
+
+    /// Sets an explicitly shared mesh as a wave-only source for this part.
+    pub fn set_part_wave_source_mesh_shared(
+        &mut self,
+        part: PartId,
+        mesh: Option<Arc<TriangleMesh>>,
+    ) -> Result<(), Error> {
+        self.install_part_wave_source_mesh(part, mesh)
+            .map_err(Error::from)
+    }
+
+    fn install_part_wave_source_mesh(
+        &mut self,
+        part: PartId,
+        mesh: Option<Arc<TriangleMesh>>,
+    ) -> Result<(), ClusterError> {
         if self.cluster_part(part).is_none() {
             return Err(ClusterError::InvalidPartId);
         }
@@ -378,10 +396,7 @@ impl PhysicsWorld {
         {
             return Ok(());
         }
-        self.replace_part_wave_geometry(
-            part,
-            mesh.map(|mesh| PartGeometry::WaveSourceMesh(Arc::new(mesh))),
-        )
+        self.replace_part_wave_geometry(part, mesh.map(PartGeometry::WaveSourceMesh))
     }
 
     /// Selects part-owned colliders as geometry-only input to the wave union.
@@ -427,6 +442,11 @@ impl PhysicsWorld {
 
     /// Returns the configured physical mesh in the part's local frame.
     pub fn part_aerodynamic_mesh(&self, part: PartId) -> Option<&TriangleMesh> {
+        self.part_aerodynamic_mesh_arc(part).map(Arc::as_ref)
+    }
+
+    /// Borrows the mesh allocation for use in a cooked shape source.
+    pub fn part_aerodynamic_mesh_arc(&self, part: PartId) -> Option<&Arc<TriangleMesh>> {
         self.cluster_part(part)?;
         match self.part_aerodynamic_geometry.as_ref()?.get(&part)? {
             PartGeometry::Mesh(mesh) | PartGeometry::WaveSourceMesh(mesh) => Some(mesh),
@@ -644,26 +664,26 @@ pub(super) fn prepare(
         return Ok(None);
     }
     if let Some(shared) = shared {
-        // Bindings cover mesh sources only: wave parts and collider
-        // tessellation are rejected when binding, so a shared evaluation can
-        // never carry a wave model.
-        if wave_model.is_some() {
-            return Err(Error::from(StepError::Aerodynamics {
-                body_id,
-                cause: crate::Error::from(
-                    crate::aerodynamics::shape::ShapeRegistryError::UnsupportedSource,
-                ),
-            }));
-        }
         let caches = caches.get_or_insert_with(HashMap::new);
         if !caches.contains_key(&body_id) {
             caches
                 .try_reserve(1)
                 .map_err(|_| geometry_error(GeometryError::AllocationFailed))?;
-            caches.insert(
-                body_id,
-                AssemblyAerodynamics::empty(environment.oriented_cavities),
-            );
+            let mut cache = AssemblyAerodynamics::empty(environment.oriented_cavities);
+            for &part in shared.0.parts() {
+                if matches!(
+                    geometry.get(&part),
+                    Some(PartGeometry::Wave(_) | PartGeometry::WaveSourceMesh(_))
+                ) {
+                    cache
+                        .wave_only_parts
+                        .try_reserve(1)
+                        .map_err(|_| geometry_error(GeometryError::AllocationFailed))?;
+                    cache.wave_only_parts.push(part);
+                }
+            }
+            cache.wave_only_parts.sort_unstable();
+            caches.insert(body_id, cache);
         }
         let prepared = evaluate(
             body_id,
@@ -893,20 +913,15 @@ fn evaluate(
             });
         }
     }
-    // A shared shape already carries the pressure union in slot order, so the
-    // per-body collider and wave-only lists are empty and must not leak from a
-    // cached non-shared preparation.
+    // Shared sources cannot include collider tessellation. Wave-only sources
+    // still shield other parts but do not receive mesh pressure.
     let shared_geometry = shared.map(|(_, shape)| shape.geometry());
     let collider_parts: &[PartId] = if shared_geometry.is_some() {
         &[]
     } else {
         &prepared.collider_parts
     };
-    let wave_only_parts: &[PartId] = if shared_geometry.is_some() {
-        &[]
-    } else {
-        &prepared.wave_only_parts
-    };
+    let wave_only_parts = &prepared.wave_only_parts;
     let wave = if let Some((part, model, local)) = wave_model {
         let inverse = local.inverse().map_err(|_| {
             crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(
@@ -930,6 +945,10 @@ fn evaluate(
                 local_transform,
                 owner: instance.owner,
             });
+        }
+        if shared.is_some() {
+            // The body-local wave union keeps PartId order, not cook slot order.
+            wave_instances.sort_unstable_by_key(|instance| instance.owner);
         }
         prepared
             .wave_cache
@@ -1112,8 +1131,10 @@ pub(super) fn binding_matches(
         {
             return Err(invalid());
         }
-        let Some(PartGeometry::Mesh(mesh)) = geometry.and_then(|items| items.get(&part)) else {
-            return Err(crate::Error::from(ShapeRegistryError::UnsupportedSource));
+        let mesh = match geometry.and_then(|items| items.get(&part)) {
+            Some(PartGeometry::Mesh(mesh) | PartGeometry::WaveSourceMesh(mesh)) => mesh,
+            Some(PartGeometry::Wave(model)) => &model.mesh,
+            _ => return Err(ShapeRegistryError::UnsupportedSource.into()),
         };
         if !Arc::ptr_eq(mesh, &source.mesh) || live.local_transform() != source.local_transform {
             return Err(invalid());
@@ -1341,6 +1362,84 @@ mod tests {
                 weld_tolerance: None,
             },
         )?)
+    }
+
+    #[test]
+    fn bound_wave_model_keeps_local_wave_response() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::{geometry::OwnerSlot, shape::CookedSource};
+        let mut results = Vec::new();
+        for (bound, sharded) in [(false, false), (true, false), (true, true)] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let mut rigid = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            rigid.set_linear_velocity(Vec3::X * 680.0)?;
+            let body = world.add_body(rigid)?;
+            let root = world.enable_cluster(body)?;
+            world.set_part_voxel_wave(root, Some(wave_model()?))?;
+            let offset = Vec3::X * 2.0;
+            let rotation = kapitsa_math::Quat::IDENTITY;
+            let local_transform = Transform::new(offset, rotation)?;
+            let child = world.add_cluster_part(
+                root,
+                crate::cluster::ClusterPartDesc {
+                    local_transform,
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::X * 680.0,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    frame_a: JointFrame::new(offset, rotation),
+                    ..weld()
+                },
+            )?;
+            let source_mesh = Arc::new(plate()?);
+            world.set_part_wave_source_mesh_shared(child, Some(Arc::clone(&source_mesh)))?;
+            if bound {
+                let mesh = Arc::clone(world.part_aerodynamic_mesh_arc(root).ok_or("wave mesh")?);
+                let shape = world.cook_shape(
+                    &[
+                        CookedSource {
+                            mesh,
+                            local_transform: Transform::identity(),
+                            slot: OwnerSlot::new(0),
+                        },
+                        CookedSource {
+                            mesh: source_mesh,
+                            local_transform,
+                            slot: OwnerSlot::new(1),
+                        },
+                    ],
+                    false,
+                )?;
+                world.bind_shape(body, shape, vec![root, child])?;
+            }
+            if sharded {
+                world.step_with_shards(1e-4, &mut [Vec::new()], &SequentialExecutor, 1)?;
+            } else {
+                world.step(1e-4)?;
+            }
+            let cache = world
+                .assembly_aerodynamics
+                .as_ref()
+                .and_then(|c| c.get(&body))
+                .ok_or("assembly cache")?;
+            assert!(cache.wave_cache.get().is_some());
+            if bound {
+                assert!(cache.sources.is_empty());
+                assert!(cache.cache.get().is_none());
+                assert!(world.shape_binding(body).is_some());
+            }
+            results.push(world.body(body).ok_or("body")?.state().linear_velocity());
+        }
+        assert!(results[0].x < 680.0);
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[0], results[2]);
+        Ok(())
     }
 
     #[test]

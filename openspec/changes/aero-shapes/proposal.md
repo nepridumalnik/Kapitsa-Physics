@@ -141,11 +141,12 @@ Decisions:
    `Arc<TriangleMesh>` on several parts; the owning
    `set_part_aerodynamic_mesh` still creates a private allocation per part, and
    structurally equal but distinct meshes are rejected with `InvalidBinding`.
-   Collider-tessellated and wave sources are rejected with `UnsupportedSource`.
+   Collider-tessellated sources are rejected with `UnsupportedSource`. Explicit
+   meshes, wave-source meshes and voxel-wave model meshes support binding.
 9. **Scope of sharing.** Sharing covers the pressure union and wing shielding,
    which consume one occupancy. The wave union stays body-local because it is
    expressed in the wave part's local frame with the model's own geometry
-   configuration. Bound vessels therefore contain mesh parts only. Topology
+   configuration. Wave-only parts remain excluded from pressure loads. Topology
    changes either keep a binding valid (a split leaving exactly the bound
    parts) or stale it (membership changed), in which case evaluation falls back
    until the body is re-bound.

@@ -128,6 +128,9 @@ impl PhysicsWorld {
         self.shape_bindings
             .get_or_insert_with(HashMap::new)
             .insert(body, binding);
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&body);
+        }
         Ok(())
     }
 
