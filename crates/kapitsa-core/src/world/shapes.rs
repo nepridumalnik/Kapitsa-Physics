@@ -219,8 +219,24 @@ impl PhysicsWorld {
         self.bodies.get(body.dense)
     }
 
-    pub(super) fn finish_pending_shapes(&mut self) {
+    pub(super) fn finish_pending_shapes(&mut self) -> Result<(), crate::Error> {
         self.collect_pending_shapes(true);
+        // Choose a stable error when multiple requests fail at one boundary.
+        if let Some((body_id, cause)) = self
+            .pending_shapes
+            .iter()
+            .flat_map(|jobs| jobs.iter())
+            .filter(|(_, job)| job.policy == PendingAero::BlockStep)
+            .filter_map(|(&body, job)| job.result.as_ref().err().map(|error| (body, error)))
+            .min_by_key(|(body, _)| *body)
+        {
+            return Err(super::StepError::Aerodynamics {
+                body_id,
+                cause: cause.clone(),
+            }
+            .into());
+        }
+        Ok(())
     }
 
     fn collect_pending_shapes(&mut self, wait: bool) {
@@ -503,6 +519,41 @@ mod tests {
     use crate::{shape::TriangleMesh, transform::Transform};
     use kapitsa_math::Vec3;
     use std::sync::Arc;
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn block_step_failure_keeps_motion(
+        #[case] sharded: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        let before = *world.body(body).ok_or("body")?.state();
+        let (sender, pending) = PendingShape::test_channel();
+        world.track_body_shape(body, vec![part], PendingAero::BlockStep, pending)?;
+        drop(sender);
+        let result = if sharded {
+            world.step_with_shards(
+                1e-8,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+        } else {
+            world.step(1e-8)
+        };
+        let error = result.err().ok_or("failed cook allowed the step")?;
+        assert!(
+            matches!(error.downcast_ref::<super::super::StepError>(), Some(super::super::StepError::Aerodynamics { body_id, cause })
+            if *body_id == body && cause.downcast_ref::<TryRecvError>() == Some(&TryRecvError::Disconnected))
+        );
+        assert_eq!(*world.body(body).ok_or("body")?.state(), before);
+        Ok(())
+    }
 
     #[test]
     fn disconnected_cook_reports_transport_failure() -> Result<(), crate::Error> {

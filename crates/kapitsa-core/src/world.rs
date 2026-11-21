@@ -4337,7 +4337,7 @@ impl PhysicsWorld {
         self.part_wing_pending.clear();
         self.simple_surface_pending.clear();
         self.raw_simple_pending.clear();
-        self.finish_pending_shapes();
+        self.finish_pending_shapes()?;
         self.prune_stale_shape_bindings();
         let atmosphere = self.atmosphere;
         if matches!(atmosphere, Atmosphere::Vacuum) {
