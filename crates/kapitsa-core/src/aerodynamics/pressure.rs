@@ -1242,9 +1242,10 @@ pub fn evaluate_prepared_surface(
 /// The surface contribution uses [`evaluate_prepared_mesh`] or
 /// [`evaluate_prepared_mesh_modified_newtonian`] through `model`; only those
 /// two compression closures are supported. Rear-facing patches whose outward
-/// normal is within [`EMPIRICAL_BASE_MAX_OFF_AXIS_ANGLE`] of the body-motion
-/// direction receive `Cp_b(M, a_b)` from `base`. The load is summed about the
-/// common body COM with the same world-space conventions as the surface loads.
+/// normal is within 10 degrees of the body-motion direction
+/// (`EMPIRICAL_BASE_MAX_OFF_AXIS_ANGLE`) receive `Cp_b(M, a_b)` from `base`.
+/// The load is summed about the common body COM with the same world-space
+/// conventions as the surface loads.
 ///
 /// Base classification uses the COM translation relative to the atmosphere
 /// wind. Rotation is not used to reclassify or locally vary the base pressure;
