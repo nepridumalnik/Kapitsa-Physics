@@ -107,6 +107,34 @@ impl PhysicsClient {
             _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
+    /// Queues background preparation of the body's current assembly geometry.
+    pub async fn queue_body_shape(
+        &self,
+        body: BodyId,
+        policy: kapitsa_core::aerodynamics::shape::worker::PendingAero,
+        worker: &kapitsa_core::aerodynamics::shape::worker::ShapeWorker,
+    ) -> Result<(), Error> {
+        expect_done(
+            self.submit(PhysicsCommand::QueueBodyShape {
+                body,
+                policy,
+                worker: worker.clone(),
+            })
+            .await?,
+        )
+    }
+
+    /// Publishes available cook results and reads the latest status, even while paused.
+    pub async fn poll_body_shape(
+        &self,
+        body: BodyId,
+    ) -> Result<kapitsa_core::world::BodyShapeStatus, Error> {
+        match self.submit(PhysicsCommand::PollBodyShape { body }).await? {
+            PhysicsCommandResult::BodyShapeStatus(status) => Ok(status),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
+        }
+    }
+
     /// Replaces explicit finite wings in the stable part-local frame; empty clears.
     /// Takes owned configuration and applies it in queue order, even while paused.
     /// Loads are additive to hull, geometry and other explicit surfaces; callers

@@ -392,6 +392,32 @@ async fn part_aerodynamic_geometry_commands_apply_loads_on_both_executors()
         let mesh =
             kapitsa::shape::TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]])?;
         client.set_part_aerodynamic_mesh(part, Some(mesh)).await?;
+        use kapitsa::aerodynamics::shape::worker::{PendingAero, ShapeWorker};
+        use kapitsa_core::world::BodyShapeStatus;
+        let worker = ShapeWorker::new(2)?;
+        client
+            .queue_body_shape(id, PendingAero::BlockStep, &worker)
+            .await?;
+        let published = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match client.poll_body_shape(id).await? {
+                    BodyShapeStatus::Ready(shape) => return Ok(shape),
+                    BodyShapeStatus::Cooking => tokio::task::yield_now().await,
+                    BodyShapeStatus::Failed(error) => return Err(error),
+                    BodyShapeStatus::Unmanaged => {
+                        return Err(kapitsa::Error::new(
+                            kapitsa_core::ErrorKind::Aerodynamics,
+                            "cook disappeared",
+                        ));
+                    }
+                }
+            }
+        })
+        .await??;
+        assert_eq!(
+            client.poll_body_shape(id).await?,
+            BodyShapeStatus::Ready(published)
+        );
         client.set_part_aerodynamic_colliders(part, true).await?;
         client
             .set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1024)?)

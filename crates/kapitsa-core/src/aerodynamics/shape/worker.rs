@@ -9,6 +9,7 @@ use std::{io, sync::mpsc, thread};
 use super::{CookedShape, CookedSource, GeometryConfig};
 
 /// A single background cook worker with bounded waiting capacity.
+#[derive(Clone)]
 pub struct ShapeWorker {
     requests: mpsc::SyncSender<Request>,
 }

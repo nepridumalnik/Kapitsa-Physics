@@ -172,6 +172,16 @@ impl std::error::Error for CommandBatchError {
 /// An operation applied to the simulation world at a physics-step boundary.
 #[non_exhaustive]
 pub enum PhysicsCommand {
+    /// Queues cooking of the current assembly meshes.
+    QueueBodyShape {
+        body: BodyId,
+        policy: crate::aerodynamics::shape::worker::PendingAero,
+        worker: crate::aerodynamics::shape::worker::ShapeWorker,
+    },
+    /// Publishes available background results and reads the body's status.
+    PollBodyShape {
+        body: BodyId,
+    },
     /// Adds a material and returns its ID.
     AddMaterial {
         material: PhysicsMaterial,
@@ -676,6 +686,8 @@ impl PhysicsCommandBuffer {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicsCommandResult {
+    /// Latest background preparation status.
+    BodyShapeStatus(crate::world::BodyShapeStatus),
     /// The command completed without returning a newly allocated ID.
     Done,
     /// A body was inserted.
@@ -1099,6 +1111,8 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::SetPartMassWithTransfer { .. }
         | PhysicsCommand::GetCluster { .. }
         | PhysicsCommand::GetClusterPart { .. }
+        | PhysicsCommand::QueueBodyShape { .. }
+        | PhysicsCommand::PollBodyShape { .. }
         | PhysicsCommand::GetWeld { .. }
         | PhysicsCommand::AddGravity { .. }
         | PhysicsCommand::UpdateGravity { .. }
@@ -1181,6 +1195,8 @@ fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result
         | PhysicsCommand::SetPartMassWithTransfer { .. }
         | PhysicsCommand::GetCluster { .. }
         | PhysicsCommand::GetClusterPart { .. }
+        | PhysicsCommand::QueueBodyShape { .. }
+        | PhysicsCommand::PollBodyShape { .. }
         | PhysicsCommand::GetWeld { .. }
         | PhysicsCommand::AddGravity { .. }
         | PhysicsCommand::UpdateGravity { .. }
@@ -1343,6 +1359,18 @@ pub(crate) fn apply_command_inner(
         }
         PhysicsCommand::GetClusterPart { part } => {
             PhysicsCommandResult::ClusterPart(world.cluster_part(part).cloned())
+        }
+        PhysicsCommand::QueueBodyShape {
+            body,
+            policy,
+            worker,
+        } => {
+            world.queue_body_shape(body, policy, &worker)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::PollBodyShape { body } => {
+            world.poll_body_shapes();
+            PhysicsCommandResult::BodyShapeStatus(world.body_shape_status(body))
         }
         PhysicsCommand::GetWeld { weld } => PhysicsCommandResult::Weld(world.weld(weld).copied()),
         PhysicsCommand::AddGravity { gravity } => {

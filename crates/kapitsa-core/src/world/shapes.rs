@@ -18,6 +18,19 @@ pub(super) struct PendingBodyShape {
     result: Result<PendingShape, crate::Error>,
 }
 
+/// Status of background preparation for an assembly.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BodyShapeStatus {
+    /// No active cook or valid installed binding.
+    Unmanaged,
+    /// The latest request is awaiting publication.
+    Cooking,
+    /// The installed shape matches the assembly.
+    Ready(ShapeId),
+    /// The latest request failed; the original cause is preserved.
+    Failed(crate::Error),
+}
+
 pub(super) fn suppress_pending_shape(
     pending: Option<&HashMap<BodyId, PendingBodyShape>>,
     body: BodyId,
@@ -93,6 +106,46 @@ pub(super) fn resolve_shared_shape<'a>(
 }
 
 impl PhysicsWorld {
+    /// Queues preparation of the assembly's current explicit meshes.
+    pub fn queue_body_shape(
+        &mut self,
+        body: BodyId,
+        policy: PendingAero,
+        worker: &crate::aerodynamics::shape::worker::ShapeWorker,
+    ) -> Result<(), crate::Error> {
+        let parts = self
+            .cluster(body)
+            .ok_or(ClusterError::NotClustered)?
+            .parts()
+            .to_vec();
+        let sources = parts
+            .iter()
+            .enumerate()
+            .map(|(index, &part)| {
+                Ok(CookedSource {
+                    mesh: self
+                        .part_aerodynamic_mesh_arc(part)
+                        .ok_or(ShapeRegistryError::UnsupportedSource)?
+                        .clone(),
+                    local_transform: self
+                        .cluster_part(part)
+                        .ok_or(ClusterError::InvalidPartId)?
+                        .local_transform(),
+                    slot: crate::aerodynamics::geometry::OwnerSlot::new(
+                        u32::try_from(index).map_err(|_| ShapeRegistryError::InvalidBinding)?,
+                    ),
+                })
+            })
+            .collect::<Result<Vec<_>, crate::Error>>()?;
+        let cook = worker
+            .submit(
+                sources,
+                assembly_pressure_config(),
+                self.preserve_assembly_mesh_cavities,
+            )
+            .map_err(|error| crate::Error::from_source(crate::ErrorKind::Aerodynamics, error))?;
+        self.track_body_shape(body, parts, policy, cook)
+    }
     /// Tracks an already queued cook for this assembly, superseding any older request.
     pub fn track_body_shape(
         &mut self,
@@ -120,7 +173,43 @@ impl PhysicsWorld {
         Ok(())
     }
 
+    /// Publishes completed work without advancing the simulation. A pending
+    /// `BlockStep` request is only waited on by the physics step, not here.
+    pub fn poll_body_shapes(&mut self) {
+        self.collect_pending_shapes(false);
+    }
+
+    /// Returns the state of the latest request, or of the installed binding.
+    pub fn body_shape_status(&self, body: BodyId) -> BodyShapeStatus {
+        if let Some(job) = self
+            .pending_shapes
+            .as_ref()
+            .and_then(|jobs| jobs.get(&body))
+        {
+            return match &job.result {
+                Ok(_) => BodyShapeStatus::Cooking,
+                Err(error) => BodyShapeStatus::Failed(error.clone()),
+            };
+        }
+        self.body_entry_for_shape_status(body)
+            .and_then(|entry| self.shared_shape(body, entry))
+            .map_or(BodyShapeStatus::Unmanaged, |(binding, _)| {
+                BodyShapeStatus::Ready(binding.shape())
+            })
+    }
+
+    fn body_entry_for_shape_status(&self, body: BodyId) -> Option<&BodyEntry> {
+        if body.world != self.world_id {
+            return None;
+        }
+        self.bodies.get(body.dense)
+    }
+
     pub(super) fn finish_pending_shapes(&mut self) {
+        self.collect_pending_shapes(true);
+    }
+
+    fn collect_pending_shapes(&mut self, wait: bool) {
         let Some(mut pending) = self.pending_shapes.take() else {
             return;
         };
@@ -135,7 +224,7 @@ impl PhysicsWorld {
             let Ok(cook) = &mut job.result else {
                 return true;
             };
-            let result = if job.policy == PendingAero::BlockStep {
+            let result = if wait && job.policy == PendingAero::BlockStep {
                 cook.wait()
             } else {
                 cook.try_recv()
