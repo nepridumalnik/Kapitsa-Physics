@@ -131,6 +131,7 @@ pub mod transform {
 
 /// The synchronous physics world and its identifiers.
 pub mod world {
+    pub use kapitsa_core::world::BodyShapeStatus;
     pub use kapitsa_core::world::{
         AddChunkBatchError, AddChunkError, ChunkId, ChunkOperationError, PhysicsWorld,
         RemoveChunkBatchError, StepResults,
