@@ -753,6 +753,11 @@ mod tests {
             world.shape_binding(body).map(ShapeBinding::shape),
             Some(installed)
         );
+        world.stop_managing_body_shape(body);
+        assert!(
+            world.fill_step_shards(&mut snapshots).is_err(),
+            "the same oversized mesh must fail synchronous local preparation"
+        );
         Ok(())
     }
 
