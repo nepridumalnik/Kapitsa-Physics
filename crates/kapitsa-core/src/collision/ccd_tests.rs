@@ -285,6 +285,28 @@ fn convex_toi_accounts_for_rotation_without_endpoint_overlap() {
 }
 
 #[test]
+fn rotating_sphere_cuboid_toi_reverses_contact_orientation() -> Result<(), crate::Error> {
+    use crate::collision::CollisionError;
+    let rod = Shape::Cuboid(Cuboid::new(4.0, 0.2, 0.2)?);
+    let sphere = Shape::Sphere(Sphere::new(0.2)?);
+    let start = Transform::identity();
+    let rotation = Quat::from_axis_angle(Vec3::Z, std::f64::consts::PI)
+        .ok_or(crate::Error::from(CollisionError::InvalidContact))?;
+    let end = transform(Vec3::ZERO, rotation);
+    let target = transform(Vec3::Y * 1.5, Quat::IDENTITY);
+    assert!(convex_toi(&rod, end, end, &sphere, target, target)?.is_none());
+    let forward = convex_toi(&rod, start, end, &sphere, target, target)?
+        .ok_or(crate::Error::from(CollisionError::InvalidContact))?;
+    let reverse = convex_toi(&sphere, target, target, &rod, start, end)?
+        .ok_or(crate::Error::from(CollisionError::InvalidContact))?;
+    assert_eq!(forward.toi, reverse.toi);
+    assert_eq!(forward.normal, -reverse.normal);
+    assert_eq!(forward.point_a, reverse.point_b);
+    assert_eq!(forward.point_b, reverse.point_a);
+    Ok(())
+}
+
+#[test]
 fn plane_toi_is_analytic_for_linear_sphere_motion() {
     let sphere = Shape::Sphere(Sphere::new(1.0).expect("sphere"));
     let plane = Plane::from_vec(Vec3::Z, 0.0).expect("plane");
