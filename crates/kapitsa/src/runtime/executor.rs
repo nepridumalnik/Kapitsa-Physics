@@ -172,13 +172,14 @@ impl StepExecutor for RayonExecutor {
         RA: Send,
         RB: Send,
     {
-        if self
+        // Keep the Rust 1.95 API; newer toolchains rename this method.
+        #[allow(deprecated)]
+        let permit = self
             .spare_workers
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |available| {
                 available.checked_sub(1)
-            })
-            .is_err()
-        {
+            });
+        if permit.is_err() {
             return (left(), right());
         }
         // Never wait for a permit: nested work runs locally when the budget is
