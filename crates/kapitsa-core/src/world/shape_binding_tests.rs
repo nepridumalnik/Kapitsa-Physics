@@ -9,7 +9,9 @@ use crate::aerodynamics::Aerodynamics;
 use crate::aerodynamics::shape::{
     CookedSource, ShapeId, ShapeRegistry, ShapeRegistryError, assembly_pressure_config,
 };
+use crate::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
 use crate::execution::SequentialExecutor;
+use crate::joint::JointFrame;
 use crate::mass::MassProperties;
 use crate::rigid_body::RigidBody;
 use crate::shape::TriangleMesh;
@@ -412,5 +414,128 @@ fn bound_body_ordinary_and_sharded_steps_agree() -> Result<(), Box<dyn std::erro
         (ordinary_velocity - sharded_velocity).length() < 1e-12,
         "velocity mismatch: ordinary {ordinary_velocity:?} vs sharded {sharded_velocity:?}"
     );
+    Ok(())
+}
+
+fn merge_weld() -> WeldDesc {
+    WeldDesc {
+        frame_a: JointFrame::IDENTITY,
+        frame_b: JointFrame::IDENTITY,
+        strength: WeldStrength::Unbreakable,
+        stiffness: WeldStiffness {
+            linear: 1.0,
+            angular: 1.0,
+        },
+    }
+}
+
+fn part_desc(mass: MassProperties) -> ClusterPartDesc {
+    ClusterPartDesc {
+        local_transform: Transform::identity(),
+        mass,
+        colliders: Vec::new(),
+        linear_velocity: Vec3::ZERO,
+        angular_velocity: Vec3::ZERO,
+    }
+}
+
+#[test]
+fn merging_bodies_drops_absorbed_binding_and_stales_the_survivor()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = wind_world()?;
+    let (first, first_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
+    let (second, second_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
+    let first_mesh = part_mesh(&world, first_part)?;
+    let first_shape = world.cook_shape(&[source(&first_mesh, Vec3::ZERO, 0)?], false)?;
+    world.bind_shape(first, first_shape, vec![first_part])?;
+    let second_mesh = part_mesh(&world, second_part)?;
+    let second_shape = world.cook_shape(&[source(&second_mesh, Vec3::ZERO, 0)?], false)?;
+    world.bind_shape(second, second_shape, vec![second_part])?;
+
+    world.merge_clusters(first, second, merge_weld())?;
+    assert!(
+        world.shape_binding(second).is_none(),
+        "absorbed body must not keep its binding"
+    );
+    assert!(
+        world.shape_binding(first).is_some(),
+        "binding is stored until the next step validates it"
+    );
+    world.step(1e-8)?;
+    assert!(
+        world.shape_binding(first).is_none(),
+        "membership change must stale the surviving binding"
+    );
+    let velocity = body_velocity(&world, first)?;
+    assert!(
+        velocity.length() > 1e-6,
+        "merged cluster must still receive pressure, got {velocity:?}"
+    );
+    assert!(world.body(second).is_none());
+    Ok(())
+}
+
+#[test]
+fn splitting_a_cluster_drops_binding_and_presses_both_bodies()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = wind_world()?;
+    let (first, first_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
+    let (second, second_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
+    let first_mesh = part_mesh(&world, first_part)?;
+    let first_shape = world.cook_shape(&[source(&first_mesh, Vec3::ZERO, 0)?], false)?;
+    world.bind_shape(first, first_shape, vec![first_part])?;
+    world.merge_clusters(first, second, merge_weld())?;
+    let bridge = world.cluster(first).ok_or("cluster")?.welds()[0];
+    let bodies = world.break_weld(bridge)?;
+    assert_eq!(bodies[0], first);
+    let new_body = *bodies.get(1).ok_or("split body")?;
+    assert!(world.shape_binding(first).is_some());
+    assert!(world.shape_binding(new_body).is_none());
+    world.step(1e-8)?;
+    assert!(
+        world.shape_binding(first).is_some(),
+        "the surviving cluster is exactly the bound part, so sharing stays valid"
+    );
+    assert!(body_velocity(&world, first)?.length() > 1e-6);
+    assert!(body_velocity(&world, new_body)?.length() > 1e-6);
+    assert_eq!(world.part_body(second_part), Some(new_body));
+    Ok(())
+}
+
+#[test]
+fn removing_the_root_part_transfers_root_and_stales_binding()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = wind_world()?;
+    let (body, root) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let child = world.add_cluster_part(root, part_desc(mass), merge_weld())?;
+    world.set_part_aerodynamic_mesh(child, Some(cube()?))?;
+    let root_mesh = part_mesh(&world, root)?;
+    let child_mesh = part_mesh(&world, child)?;
+    let sources = vec![
+        source(&root_mesh, Vec3::ZERO, 0)?,
+        source(&child_mesh, Vec3::ZERO, 1)?,
+    ];
+    let shape = world.cook_shape(&sources, false)?;
+    world.bind_shape(body, shape, vec![root, child])?;
+    world.destroy_cluster_part(root)?;
+    assert_eq!(
+        world.cluster(body).map(|cluster| cluster.root()),
+        Some(child)
+    );
+    world.step(1e-8)?;
+    assert!(
+        world.shape_binding(body).is_none(),
+        "part removal must stale the binding"
+    );
+    assert!(body_velocity(&world, body)?.length() > 1e-6);
+    assert!(
+        !world
+            .part_aerodynamic_geometry
+            .as_ref()
+            .is_some_and(|geometry| geometry.contains_key(&root)),
+        "destroyed root must not leave geometry behind"
+    );
+    assert!(world.cluster_part(root).is_none());
     Ok(())
 }

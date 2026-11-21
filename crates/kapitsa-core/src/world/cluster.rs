@@ -1630,6 +1630,9 @@ impl PhysicsWorld {
         if let Some(caches) = &mut self.assembly_aerodynamics {
             caches.remove(&second);
         }
+        if let Some(bindings) = &mut self.shape_bindings {
+            bindings.remove(&second);
+        }
         self.synchronize_cluster_physics_state(&[first]);
         Ok(())
     }
