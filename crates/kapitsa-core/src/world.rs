@@ -174,6 +174,9 @@ mod part_hull_tests;
 #[cfg(test)]
 mod part_wings_tests;
 mod query;
+#[cfg(test)]
+mod shape_binding_tests;
+mod shapes;
 
 pub use aerodynamics::{AerodynamicSurface, AerodynamicTarget, AerodynamicsTask};
 pub use chunk::{AddChunkBatchError, AddChunkError, ChunkOperationError, RemoveChunkBatchError};
@@ -865,6 +868,8 @@ pub struct PhysicsWorld {
     parts: DensePool<ClusterPart>,
     part_aerodynamic_geometry: Option<HashMap<PartId, assembly_aerodynamics::PartGeometry>>,
     assembly_aerodynamics: Option<HashMap<BodyId, assembly_aerodynamics::AssemblyAerodynamics>>,
+    shapes: crate::aerodynamics::shape::ShapeRegistry,
+    shape_bindings: Option<HashMap<BodyId, crate::aerodynamics::shape::ShapeBinding>>,
     welds: DensePool<Weld>,
     colliders: DensePool<ColliderEntry>,
     chunks: DensePool<chunk::ChunkEntry>,
@@ -1603,6 +1608,8 @@ impl PhysicsWorld {
             parts: DensePool::new(),
             part_aerodynamic_geometry: None,
             assembly_aerodynamics: None,
+            shapes: crate::aerodynamics::shape::ShapeRegistry::new(),
+            shape_bindings: None,
             welds: DensePool::new(),
             colliders: DensePool::new(),
             chunks: DensePool::new(),
@@ -6741,6 +6748,9 @@ impl PhysicsWorld {
         }
         if let Some(caches) = &mut self.assembly_aerodynamics {
             caches.remove(&id);
+        }
+        if let Some(bindings) = &mut self.shape_bindings {
+            bindings.remove(&id);
         }
         Some(removed)
     }

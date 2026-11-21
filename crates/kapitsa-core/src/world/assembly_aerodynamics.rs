@@ -949,6 +949,57 @@ fn evaluate(
     })
 }
 
+/// Verifies that `binding` still describes `cooked` for `body_id` in the live
+/// world: revision, preparation configuration, cavity policy, cluster
+/// membership, part meshes and transforms.
+///
+/// The checks allocate nothing, so evaluation can repeat them every step and
+/// fall back to body-local preparation on any mismatch instead of using stale
+/// or foreign geometry.
+pub(super) fn binding_matches(
+    body_id: BodyId,
+    entry: &BodyEntry,
+    parts: &DensePool<ClusterPart>,
+    geometry: Option<&HashMap<PartId, PartGeometry>>,
+    oriented_cavities: bool,
+    cooked: &crate::aerodynamics::shape::CookedShape,
+    binding: &crate::aerodynamics::shape::ShapeBinding,
+) -> Result<(), crate::Error> {
+    use crate::aerodynamics::shape::{ShapeRegistryError, assembly_pressure_config};
+    let invalid = || crate::Error::from(ShapeRegistryError::InvalidBinding);
+    if cooked.revision() != binding.revision() {
+        return Err(ShapeRegistryError::StaleBinding.into());
+    }
+    if cooked.config() != assembly_pressure_config()
+        || cooked.oriented_cavities() != oriented_cavities
+    {
+        return Err(invalid());
+    }
+    let cluster = entry
+        .cluster
+        .as_ref()
+        .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?;
+    let sources = cooked.sources();
+    let bound = binding.parts();
+    if bound.len() != sources.len() || bound.len() != cluster.parts().len() {
+        return Err(invalid());
+    }
+    for (source, &part) in sources.iter().zip(bound) {
+        let live = parts.get(part.dense).ok_or_else(invalid)?;
+        if part.world != body_id.world || live.body() != body_id || !cluster.parts().contains(&part)
+        {
+            return Err(invalid());
+        }
+        let Some(PartGeometry::Mesh(mesh)) = geometry.and_then(|items| items.get(&part)) else {
+            return Err(crate::Error::from(ShapeRegistryError::UnsupportedSource));
+        };
+        if !Arc::ptr_eq(mesh, &source.mesh) || live.local_transform() != source.local_transform {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
 fn pressure_geometry_config(collider_parts: &[PartId]) -> GeometryConfig {
     if collider_parts.is_empty() {
         return crate::aerodynamics::shape::assembly_pressure_config();
