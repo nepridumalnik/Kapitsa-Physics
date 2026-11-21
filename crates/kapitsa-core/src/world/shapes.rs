@@ -651,6 +651,45 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn polling_rejects_edited_inputs_before_the_worker_finishes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        let cube = super::super::shape_binding_tests::cube;
+        world.set_part_aerodynamic_mesh(part, Some(cube()?))?;
+        let worker = ShapeWorker::new(2)?;
+        let (completion, outcome) = std::sync::mpsc::channel();
+        world.queue_body_shape_with_completion(
+            body,
+            PendingAero::BlockStep,
+            &worker,
+            Some(completion),
+        )?;
+        let (producer, pending) = PendingShape::test_channel();
+        world
+            .pending_shapes
+            .as_mut()
+            .and_then(|jobs| jobs.get_mut(&body))
+            .ok_or("missing queued job")?
+            .result = Ok(pending);
+        world.set_part_aerodynamic_mesh(part, Some(cube()?))?;
+        world.poll_body_shapes();
+        let expected = crate::Error::from(ShapeRegistryError::StaleBinding);
+        assert_eq!(outcome.try_recv()?, Err(expected.clone()));
+        assert_eq!(
+            world.body_shape_status(body),
+            BodyShapeStatus::Failed(expected.clone())
+        );
+        assert!(producer.send(Err(expected)).is_err());
+        assert!(world.shape_registry().is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn managed_edit_supersedes_in_flight_inputs() -> Result<(), Box<dyn std::error::Error>> {
         let mut world = PhysicsWorld::new();
         let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
