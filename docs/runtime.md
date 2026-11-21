@@ -164,3 +164,29 @@ optimization details remain in the
 For joint row identity, sequential constraint updates, and modular rocket
 regression results, see [`Joint constraint solving`](joints.md) and its linked
 stress measurements.
+## Host-driven physics
+
+`PhysicsSystem` lets an application own the timing of physics. It requires no
+Tokio runtime. Each `update(dt)` performs one blocking step (`dt` in seconds)
+and returns a borrowed view of the committed events, impulses and diagnostics.
+Read or copy what you need before mutating the system again. Inspect body
+states through `world()` and apply changes between steps through `world_mut()`.
+On error, the update does not publish a new result; prior committed results
+remain available through `world().committed_step_results()`.
+
+```rust
+use kapitsa::{PhysicsSystem, PhysicsWorld};
+
+fn main() -> Result<(), kapitsa::Error> {
+    let mut physics = PhysicsSystem::builder(PhysicsWorld::new()).build()?;
+    let results = physics.update(1.0 / 120.0)?;
+    println!("{} collision events", results.collision_events().len());
+    Ok(())
+}
+```
+
+The default is sequential. With `parallel`, configure `.workers(count)` with
+a `NonZeroUsize` to create a private pool, or use `.rayon_pool(pool)` with an
+`Arc<rayon::ThreadPool>` to share the application's pool. The last pool setting
+wins. Dropping a system releases its pool reference; a pool still owned by the
+application remains usable. Neither option needs `service`.

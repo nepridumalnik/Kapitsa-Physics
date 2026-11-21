@@ -13,7 +13,9 @@ mod executor;
 pub mod metrics;
 #[cfg(test)]
 mod modular_rocket_fixture;
+mod physics_system;
 mod planner;
+pub use physics_system::{PhysicsSystem, PhysicsSystemBuilder};
 #[cfg(all(test, feature = "service"))]
 mod sync;
 

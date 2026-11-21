@@ -2727,7 +2727,12 @@ impl PhysicsWorld {
     /// this without a preceding `simulate` returns the current committed view.
     pub fn fetch_results(&mut self) -> Result<StepResults<'_>, Error> {
         let staged = self.staged_step_result.take().unwrap_or(Ok(()));
-        staged.map(|()| StepResults { world: self })
+        staged.map(|()| self.committed_step_results())
+    }
+
+    /// Borrows the latest committed step results without consuming a staged outcome.
+    pub fn committed_step_results(&self) -> StepResults<'_> {
+        StepResults { world: self }
     }
 
     /// Advances one step using the supplied statically dispatched task executor.

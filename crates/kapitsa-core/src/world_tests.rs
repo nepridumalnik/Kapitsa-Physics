@@ -5212,3 +5212,15 @@ fn step_diagnostics_publish_only_on_success() -> Result<(), crate::Error> {
     assert_eq!(world.step_diagnostics(), StepDiagnostics::default());
     Ok(())
 }
+#[test]
+fn committed_results_do_not_consume_staged_failure() -> Result<(), crate::Error> {
+    let mut world = crate::world::PhysicsWorld::new();
+    world.simulate(0.01);
+    let diagnostics = world.committed_step_results().diagnostics();
+    assert_eq!(world.fetch_results()?.diagnostics(), diagnostics);
+    world.simulate(f64::NAN);
+    assert_eq!(world.committed_step_results().diagnostics(), diagnostics);
+    assert!(world.fetch_results().is_err());
+    assert_eq!(world.fetch_results()?.diagnostics(), diagnostics);
+    Ok(())
+}

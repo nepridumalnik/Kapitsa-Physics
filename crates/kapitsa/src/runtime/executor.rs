@@ -36,29 +36,27 @@ pub struct RayonExecutor {
     spare_workers: Arc<AtomicUsize>,
 }
 
-#[cfg(feature = "service")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RayonPoolError {
     InvalidWorkerCount,
     BuildFailed,
     RuntimeUnavailable,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "service"))]
     ExecutorsStillActive,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "service"))]
     WorkerExitedEarly,
     PoolAlreadyShutDown,
 }
 
-#[cfg(feature = "service")]
 impl std::fmt::Display for RayonPoolError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
             Self::InvalidWorkerCount => "Rayon worker count must be positive",
             Self::BuildFailed => "Rayon worker pool could not be created",
             Self::RuntimeUnavailable => "the host Tokio runtime cannot start Rayon workers",
-            #[cfg(test)]
+            #[cfg(all(test, feature = "service"))]
             Self::ExecutorsStillActive => "Rayon executor handles are still active",
-            #[cfg(test)]
+            #[cfg(all(test, feature = "service"))]
             Self::WorkerExitedEarly => "a Rayon worker exited before shutdown completed",
             Self::PoolAlreadyShutDown => "Rayon worker pool is already shut down",
         };
@@ -66,7 +64,6 @@ impl std::fmt::Display for RayonPoolError {
     }
 }
 
-#[cfg(feature = "service")]
 impl std::error::Error for RayonPoolError {}
 
 #[cfg(feature = "service")]
@@ -227,6 +224,11 @@ impl StepExecutor for RayonExecutor {
 }
 
 impl RayonExecutor {
+    #[cfg(test)]
+    pub(super) fn pool_weak(&self) -> std::sync::Weak<ThreadPool> {
+        Arc::downgrade(&self.pool)
+    }
+
     /// Creates an independent worker budget over an existing Rayon pool.
     pub fn from_pool(pool: Arc<ThreadPool>) -> Self {
         let spare = pool.current_num_threads().saturating_sub(1);
@@ -305,13 +307,13 @@ impl Drop for WorkerPermit<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "service"))]
 struct WorkerExitSignal {
     index: usize,
     sender: async_mpsc::UnboundedSender<usize>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "service"))]
 impl Drop for WorkerExitSignal {
     fn drop(&mut self) {
         let _ = self.sender.send(self.index);
