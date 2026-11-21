@@ -189,6 +189,10 @@ pub enum PhysicsCommand {
     CancelBodyShape {
         body: BodyId,
     },
+    /// Disables automatic recooking and cancels any pending request.
+    StopManagingBodyShape {
+        body: BodyId,
+    },
     /// Adds a material and returns its ID.
     AddMaterial {
         material: PhysicsMaterial,
@@ -1123,6 +1127,7 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::QueueBodyShape { .. }
         | PhysicsCommand::PollBodyShape { .. }
         | PhysicsCommand::CancelBodyShape { .. }
+        | PhysicsCommand::StopManagingBodyShape { .. }
         | PhysicsCommand::GetWeld { .. }
         | PhysicsCommand::AddGravity { .. }
         | PhysicsCommand::UpdateGravity { .. }
@@ -1208,6 +1213,7 @@ fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result
         | PhysicsCommand::QueueBodyShape { .. }
         | PhysicsCommand::PollBodyShape { .. }
         | PhysicsCommand::CancelBodyShape { .. }
+        | PhysicsCommand::StopManagingBodyShape { .. }
         | PhysicsCommand::GetWeld { .. }
         | PhysicsCommand::AddGravity { .. }
         | PhysicsCommand::UpdateGravity { .. }
@@ -1387,6 +1393,10 @@ pub(crate) fn apply_command_inner(
         }
         PhysicsCommand::CancelBodyShape { body } => {
             PhysicsCommandResult::BodyShapeCancelled(world.cancel_body_shape(body))
+        }
+        PhysicsCommand::StopManagingBodyShape { body } => {
+            world.stop_managing_body_shape(body);
+            PhysicsCommandResult::Done
         }
         PhysicsCommand::PollBodyShape { body } => {
             world.poll_body_shapes();

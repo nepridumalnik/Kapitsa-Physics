@@ -161,6 +161,14 @@ impl PhysicsClient {
         )
     }
 
+    /// Disables automatic recooking and cancels any pending request.
+    pub async fn stop_managing_body_shape(&self, body: BodyId) -> Result<(), Error> {
+        expect_done(
+            self.submit(PhysicsCommand::StopManagingBodyShape { body })
+                .await?,
+        )
+    }
+
     /// Cancels a tracked background cook without replacing the installed binding.
     pub async fn cancel_body_shape(&self, body: BodyId) -> Result<bool, Error> {
         match self
