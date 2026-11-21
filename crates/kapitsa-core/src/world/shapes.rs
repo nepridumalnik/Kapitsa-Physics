@@ -179,6 +179,14 @@ impl PhysicsWorld {
         self.collect_pending_shapes(false);
     }
 
+    /// Stops tracking the latest request without changing the installed binding.
+    /// An in-flight result for that request can no longer be published.
+    pub fn cancel_body_shape(&mut self, body: BodyId) -> bool {
+        self.pending_shapes
+            .as_mut()
+            .is_some_and(|jobs| jobs.remove(&body).is_some())
+    }
+
     /// Returns the state of the latest request, or of the installed binding.
     pub fn body_shape_status(&self, body: BodyId) -> BodyShapeStatus {
         if let Some(job) = self
@@ -664,6 +672,18 @@ mod tests {
             error.downcast_ref::<ShapeRegistryError>(),
             Some(&ShapeRegistryError::InvalidBinding)
         );
+        assert_eq!(world.shape_registry().len(), 1);
+        assert_eq!(world.shape_binding(body).map(ShapeBinding::shape), Some(id));
+        let (sender, pending) = PendingShape::test_channel();
+        world.track_body_shape(body, vec![part], PendingAero::ZeroForce, pending)?;
+        sender
+            .send(Ok(worker
+                .submit(sources.to_vec(), assembly_pressure_config(), false)?
+                .recv()??))
+            .map_err(|_| "cancel fixture disconnected")?;
+        assert!(world.cancel_body_shape(body));
+        assert!(!world.cancel_body_shape(body));
+        world.poll_body_shapes();
         assert_eq!(world.shape_registry().len(), 1);
         assert_eq!(world.shape_binding(body).map(ShapeBinding::shape), Some(id));
         Ok(())
