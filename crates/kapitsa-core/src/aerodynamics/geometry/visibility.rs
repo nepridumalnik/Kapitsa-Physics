@@ -200,7 +200,10 @@ pub(super) fn crossing_fraction(a: f64, b: f64) -> Result<f64, crate::Error> {
     let fraction = if a <= b {
         smaller_fraction
     } else {
-        1.0 / (1.0 + ratio)
+        let reciprocal = 1.0 / denominator;
+        let reciprocal_residual = (-reciprocal).mul_add(denominator, 1.0);
+        reciprocal
+            + (reciprocal_residual - reciprocal * (denominator_error + ratio_error)) / denominator
     };
     Ok(fraction)
 }
@@ -732,6 +735,17 @@ mod tests {
             crossing_fraction(small, -large)?,
             2.0_f64.powi(-53).next_down()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn crossing_fraction_corrects_large_endpoint_reciprocal() -> Result<(), crate::Error> {
+        // Expected value is the nearest binary64 to the exact rational a/(a+b).
+        let a = f64::from_bits(0x4b18_5f64_cee3_79c6);
+        let b = f64::from_bits(0x4ae1_f9d1_568c_8566);
+        let expected = f64::from_bits(0x3fed_4c81_d7e1_b240);
+        assert_eq!(crossing_fraction(a, -b)?, expected);
+        assert_eq!(crossing_fraction(-a, b)?, expected);
         Ok(())
     }
 
