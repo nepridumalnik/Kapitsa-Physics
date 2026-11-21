@@ -332,9 +332,12 @@ to zero SHALL return `PrecisionLoss`.
 ### Requirement: Preserve representable numeric intersections
 
 Crossing fractions SHALL use the smaller-to-larger absolute distance ratio
-and fused residual corrections. Subnormal distance magnitudes SHALL share a
-power-of-two scale during residual calculation. Finite coordinate differences
-SHALL use fused multiply-add. Unrepresentable results SHALL return an error.
+and fused residual corrections. Distance magnitudes SHALL share a common
+power-of-two scale during residual calculation, selected from the larger
+magnitude's binary64 exponent; if scaling down would erase the smaller
+magnitude, the original residual operands SHALL be retained. Finite coordinate
+differences SHALL use fused multiply-add. Unrepresentable results SHALL return
+an error.
 
 #### Scenario: Finite distances have an overflowing difference
 
@@ -391,6 +394,18 @@ SHALL use fused multiply-add. Unrepresentable results SHALL return an error.
 - **AND** this is a synthetic regression assertion, not test execution evidence
   or independent physical validation; this reference does not establish
   universally correct rounding or exact geometry
+
+#### Scenario: Normalized residual operands preserve a near-underflow correction
+
+- **WHEN** `crossing_fraction_corrects_normal_ratio_near_underflow` uses
+  `small = f64::from_bits(0x2a38_b9be_9e64_a7b4)` and
+  `large = f64::from_bits(0x6a04_e05d_a5d8_626a)`
+- **THEN** the common exponent-based scale retains the smaller magnitude and
+  `crossing_fraction(small, -large)` equals
+  `f64::from_bits(0x0022_f335_6d15_4415)`, the nearest binary64 to the exact
+  rational formed from those stored inputs
+- **AND** this is a synthetic regression assertion, not test execution evidence
+  or independent physical validation
 
 #### Scenario: Larger crossing fraction corrects the reciprocal residual
 

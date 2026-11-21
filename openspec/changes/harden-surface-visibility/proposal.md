@@ -20,7 +20,10 @@ fused residual correction of crossing fractions near binary rounding boundaries,
 and `3ef81e7` for reciprocal residual correction in the larger endpoint-order
 branch and its rational-reference regression, and `b3ab97b` for shared
 power-of-two scaling of two subnormal crossing distances before fused ratio
-residual correction and its exact rational-reference regression.
+residual correction and its exact rational-reference regression, plus
+ `791d0e4` for exponent-based power-of-two normalization of the FMA residual
+ operands, retaining the smaller magnitude when scaling down would erase it,
+ and its exact rational-reference regression.
 
 ## Scope
 
@@ -140,12 +143,14 @@ This change covers:
   error without forming an overflowing distance sum or a separately rounded,
   potentially underflowing residual product; `S` and `L` are the residual
   operands selected by the shared scaling below;
-- applying `b3ab97b` shared exact binary scaling before the FMA ratio residual:
-  when `large < f64::MIN_POSITIVE`, both magnitudes are subnormal and
-  `(S,L) = (small*2^52, large*2^52)`; otherwise `(S,L) = (small,large)`;
-  the common scale preserves the mathematical ratio and keeps the subnormal
-  operands and fused residual representable before division by `L`; the
-  initial `r`, `d` and `f` remain computed from the unscaled ratio, and the
+- applying `b3ab97b` and `791d0e4` shared exact binary scaling before the FMA
+  ratio residual: choose a common power-of-two shift from the binary64
+  exponent of `large`, scaling toward the normal range; apply it to both
+  residual operands when the shift is upward, and when the shift is downward
+  retain `(S,L) = (small,large)` if scaling the smaller magnitude would erase
+  information needed by the FMA. The common scale preserves the mathematical
+  ratio and keeps the residual operands representable before division by `L`;
+  the initial `r`, `d` and `f` remain computed from the unscaled ratio, and the
   resulting `q` is shared by the smaller and larger endpoint-order corrections;
 - recording `b3ab97b` synthetic regression
   `crossing_fraction_corrects_two_subnormal_distances`: with
@@ -155,6 +160,14 @@ This change covers:
   rational `small/(small+large) = 0x5d/(0x5d + 0x3c_f738)` formed from
   those stored inputs; the common subnormal unit cancels exactly; this is not
   test execution evidence or independent physical validation;
+- recording `791d0e4` synthetic regression
+  `crossing_fraction_corrects_normal_ratio_near_underflow`: with
+  `small = f64::from_bits(0x2a38_b9be_9e64_a7b4)` and
+  `large = f64::from_bits(0x6a04_e05d_a5d8_626a)`, the crossing fraction for
+  `(small, -large)` equals `f64::from_bits(0x0022_f335_6d15_4415)`, the
+  nearest binary64 to the exact rational formed from those stored inputs;
+  this is a synthetic assertion only, not test execution evidence or
+  independent physical validation;
 - applying `3ef81e7` reciprocal residual correction in the larger endpoint-order
   branch: with the same `r`, `d`, `e` and `q`, compute `u = 1/d` and
   `v = (-u).mul_add(d, 1.0)`, then use `u + (v - u*(e + q))/d` instead

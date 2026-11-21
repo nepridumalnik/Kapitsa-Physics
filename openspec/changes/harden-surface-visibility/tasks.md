@@ -201,3 +201,13 @@
   universal correct-rounding guarantee, exact geometry or global error bound;
   possible fraction rounding to one, zero smaller-fraction `PrecisionLoss`
   and non-finite-point `ArithmeticOverflow` remain unchanged.
+- [x] Record `791d0e4`: derive a common power-of-two residual scale from the
+  larger crossing magnitude's binary64 exponent; preserve the smaller operand
+  pair when scaling down would erase the smaller magnitude.
+- [x] Document `crossing_fraction_corrects_normal_ratio_near_underflow` with
+  its exact rational-reference result for the stored binary64 inputs, without
+  claiming test execution or independent physical validation.
+- [x] Retain binary64 rounding limits for the ratio, residual, reciprocal,
+  fraction and constructed intersection, including `PrecisionLoss` for a
+  smaller fraction that rounds to zero and `ArithmeticOverflow` for a
+  non-finite constructed point.
