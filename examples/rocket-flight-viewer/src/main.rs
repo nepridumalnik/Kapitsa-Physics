@@ -1,6 +1,7 @@
 mod camera;
 mod flight;
 mod gif_export;
+mod hull_fixture;
 mod renderer;
 
 #[cfg(test)]
@@ -40,6 +41,12 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    if std::env::args().skip(1).eq(["--hull-fixture-trace"]) {
+        return hull_fixture::trace(std::io::stdout().lock());
+    }
+    if std::env::args().skip(1).eq(["--hull-world-trace"]) {
+        return hull_fixture::world_trace(std::io::stdout().lock());
+    }
     let args = arguments()?;
     let runtime = Builder::new_multi_thread()
         .worker_threads(4)

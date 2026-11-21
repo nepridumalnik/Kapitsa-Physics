@@ -92,13 +92,21 @@ pub(super) fn resolve_shared_shape<'a>(
         && cluster.parts().len() == binding.parts().len()
         && shape.revision() == binding.revision()
         && shape.oriented_cavities() == oriented_cavities
-        && binding.parts().iter().all(|part| {
-            cluster.parts().contains(part)
-                && matches!(
-                    geometry.and_then(|items| items.get(part)),
-                    Some(super::assembly_aerodynamics::PartGeometry::Mesh(_))
-                )
-        })
+        && binding.parts().len() == shape.sources().len()
+        && binding
+            .parts()
+            .iter()
+            .zip(shape.sources())
+            .all(|(part, source)| {
+                cluster.parts().contains(part)
+                    && parts.get(part.dense).is_some_and(|live| {
+                        live.body() == body_id && live.local_transform() == source.local_transform
+                    })
+                    && matches!(
+                        geometry.and_then(|items| items.get(part)),
+                        Some(super::assembly_aerodynamics::PartGeometry::Mesh(_))
+                    )
+            })
     {
         return Some((binding, shape));
     }
@@ -115,7 +123,210 @@ pub(super) fn resolve_shared_shape<'a>(
     Some((binding, shape))
 }
 
+pub(super) struct CookedPrimaryHull {
+    pub(super) geometry: Box<crate::aerodynamics::geometry::PreparedGeometry>,
+    identity: std::sync::Arc<()>,
+}
+
+impl CookedPrimaryHull {
+    fn matches(&self, entry: &BodyEntry) -> bool {
+        entry.cluster.is_none()
+            && entry
+                .body
+                .aerodynamic_geometry_identity
+                .as_ref()
+                .is_some_and(|identity| std::sync::Arc::ptr_eq(identity, &self.identity))
+    }
+}
+
+pub(super) fn require_cooked_pressure(
+    model: crate::aerodynamics::MeshPressureModel,
+    body_id: BodyId,
+    entry: &BodyEntry,
+    geometry: Option<&HashMap<PartId, super::assembly_aerodynamics::PartGeometry>>,
+    parts: &DensePool<ClusterPart>,
+    has_binding: bool,
+) -> Result<(), crate::Error> {
+    use super::assembly_aerodynamics::PartGeometry;
+    use crate::aerodynamics::{Aerodynamics, MeshPressureModel};
+    if model == MeshPressureModel::ModifiedNewtonianTriangleQuadrature
+        && (matches!(
+            entry.body.aerodynamics(),
+            Aerodynamics::Mesh(_) | Aerodynamics::Colliders
+        ) && !entry
+            .cooked_primary_hull
+            .as_ref()
+            .is_some_and(|hull| hull.matches(entry))
+            || !has_binding && super::assembly_aerodynamics::configured(entry, geometry))
+    {
+        return Err(super::StepError::Aerodynamics {
+            body_id,
+            cause: ShapeRegistryError::InvalidBinding.into(),
+        }
+        .into());
+    }
+    if model == MeshPressureModel::ModifiedNewtonianTriangleQuadrature
+        && has_binding
+        && entry.cluster.as_ref().is_some_and(|cluster| {
+            cluster.parts().iter().any(|part| {
+                let has_wings = parts
+                    .get(part.dense)
+                    .is_some_and(|live| !live.aerodynamic_wings.is_empty());
+                match geometry.and_then(|sources| sources.get(part)) {
+                    Some(PartGeometry::Mesh(_)) => has_wings,
+                    Some(PartGeometry::WingShieldingMesh(_)) => !has_wings,
+                    _ => false,
+                }
+            })
+        })
+    {
+        return Err(super::StepError::Aerodynamics {
+            body_id,
+            cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel.into(),
+        }
+        .into());
+    }
+    if model == MeshPressureModel::ModifiedNewtonianTriangleQuadrature
+        && has_binding
+        && let (Some(cluster), Some(geometry)) = (&entry.cluster, geometry)
+    {
+        use crate::aerodynamics::{geometry::GeometryError, wing::WingError};
+        const MAX_OVERLAP_WORK: usize = 1_000_000;
+        let mut remaining = MAX_OVERLAP_WORK;
+        let context = |cause| crate::Error::from(super::StepError::Aerodynamics { body_id, cause });
+        let budget = || context(GeometryError::WorkBudgetExceeded.into());
+        for wing_id in cluster.parts() {
+            remaining = remaining.checked_sub(1).ok_or_else(budget)?;
+            let Some(owner) = parts.get(wing_id.dense) else {
+                continue;
+            };
+            for wing in &owner.aerodynamic_wings {
+                remaining = remaining.checked_sub(1).ok_or_else(budget)?;
+                if wing.footprint_signature().is_none() {
+                    continue;
+                }
+                let to_wing = owner
+                    .local_transform()
+                    .compose(&wing.local_transform())
+                    .and_then(|t| t.inverse())
+                    .map_err(|_| context(WingError::ArithmeticOverflow.into()))?;
+                for hull_id in cluster.parts() {
+                    remaining = remaining.checked_sub(1).ok_or_else(budget)?;
+                    let Some(PartGeometry::Mesh(mesh)) = geometry.get(hull_id) else {
+                        continue;
+                    };
+                    remaining = remaining
+                        .checked_sub(mesh.triangles().len())
+                        .ok_or_else(budget)?;
+                    let hull = parts
+                        .get(hull_id.dense)
+                        .ok_or_else(|| context(ShapeRegistryError::InvalidBinding.into()))?;
+                    let transform = to_wing
+                        .compose(&hull.local_transform())
+                        .map_err(|_| context(WingError::ArithmeticOverflow.into()))?;
+                    for indices in mesh.triangles() {
+                        if wing
+                            .overlaps_footprint(transform, indices.map(|i| mesh.vertices()[i]))
+                            .map_err(context)?
+                        {
+                            return Err(context(
+                                crate::aerodynamics::AerodynamicsError::UnsupportedModel.into(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl PhysicsWorld {
+    /// Cooks the standalone body's explicit primary mesh outside the step.
+    /// Replacing the mesh or changing the cavity policy requires a new cook.
+    pub fn cook_primary_hull(&mut self, body: BodyId) -> Result<(), crate::Error> {
+        use crate::aerodynamics::Aerodynamics;
+        let entry = self
+            .body_entry_for_shape_status(body)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        let Aerodynamics::Mesh(mesh) = entry.body.aerodynamics() else {
+            return Err(ShapeRegistryError::UnsupportedSource.into());
+        };
+        if entry.cluster.is_some() {
+            return Err(ShapeRegistryError::UnsupportedSource.into());
+        }
+        let identity = entry
+            .body
+            .aerodynamic_geometry_identity
+            .clone()
+            .ok_or(ShapeRegistryError::InvalidBinding)?;
+        use crate::aerodynamics::geometry::{GeometryInstance, GeometryOwner, PreparedGeometry};
+        let instances = [GeometryInstance {
+            mesh,
+            local_transform: crate::transform::Transform::identity(),
+            owner: GeometryOwner::Body,
+        }];
+        let geometry = if self.preserve_body_mesh_cavities {
+            PreparedGeometry::prepare_with_oriented_cavities(
+                &instances,
+                assembly_pressure_config(),
+            )?
+        } else {
+            PreparedGeometry::prepare(&instances, assembly_pressure_config())?
+        };
+        let entry = self
+            .bodies
+            .get_mut(body.dense)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        entry.cooked_primary_hull = Some(CookedPrimaryHull {
+            geometry: Box::new(geometry),
+            identity,
+        });
+        Ok(())
+    }
+    /// Queries exposed physical patches of a currently bound cooked assembly.
+    ///
+    /// `upstream` points toward oncoming air in the body-local cook frame;
+    /// `epsilon` is the exposure distance tolerance in metres. Returned patch
+    /// owners are live parts, not cook slots. This opt-in geometry query does
+    /// not cook, apply forces, or change the active aerodynamic model. It
+    /// rejects missing or stale bindings, including during replacement cooks
+    /// when a previous binding no longer matches the live sources.
+    pub fn bound_shape_exposure(
+        &self,
+        body: BodyId,
+        upstream: kapitsa_math::Vec3,
+        epsilon: f64,
+    ) -> Result<crate::aerodynamics::geometry::PreparedSurfacePatches, crate::Error> {
+        let entry = self
+            .body_entry_for_shape_status(body)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        let binding = self
+            .shape_binding(body)
+            .ok_or(ShapeRegistryError::InvalidBinding)?;
+        let shape = self
+            .shape_registry()
+            .get(binding.shape())
+            .ok_or(ShapeRegistryError::StaleShape)?;
+        super::assembly_aerodynamics::binding_matches(
+            body,
+            entry,
+            &self.parts,
+            self.part_aerodynamic_geometry.as_ref(),
+            self.preserve_assembly_mesh_cavities,
+            shape,
+            binding,
+        )?;
+        let mut instances = Vec::new();
+        binding.write_instances(shape, &mut instances)?;
+        shape.geometry().exposed_surface_patches(
+            &instances,
+            upstream,
+            epsilon,
+            shape.config().max_patch_work,
+        )
+    }
+
     /// Starts background preparation and automatically queues a replacement
     /// at a full step boundary when the installed binding becomes invalid.
     pub fn manage_body_shape(
@@ -714,6 +925,158 @@ mod tests {
         Ok(())
     }
 
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn splitting_assembly_rejects_pending_cook_for_old_topology(
+        #[case] sharded: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::shape_binding_tests::{cube, merge_weld};
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::super::test_atmosphere(
+            crate::aerodynamics::AtmosphericState::new(1.0, -Vec3::X * 1500.0)?,
+        ));
+        world.set_mesh_pressure_model(
+            crate::aerodynamics::MeshPressureModel::ModifiedNewtonianTriangleQuadrature,
+        );
+        let mut bodies = Vec::new();
+        let mut parts = Vec::new();
+        let mesh = Arc::new(cube()?);
+        for _ in 0..2 {
+            let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+                Transform::identity(),
+                crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+            )?)?;
+            let part = world.enable_cluster(body)?;
+            world.set_part_aerodynamic_mesh_shared(part, Some(Arc::clone(&mesh)))?;
+            bodies.push(body);
+            parts.push(part);
+        }
+        let body = bodies[0];
+        world.merge_clusters(body, bodies[1], merge_weld())?;
+        let weld = *world
+            .cluster(body)
+            .and_then(|cluster| cluster.welds().first())
+            .ok_or("missing weld")?;
+        let sources = [0, 1].map(|slot| CookedSource {
+            mesh: Arc::clone(&mesh),
+            local_transform: Transform::identity(),
+            slot: OwnerSlot::new(slot),
+        });
+        let previous = world.cook_shape(&sources, false)?;
+        world.bind_shape(body, previous, parts.clone())?;
+        let replacement = CookedShape::cook(&sources, assembly_pressure_config(), false)?;
+        let (sender, pending) = PendingShape::test_channel();
+        world.track_body_shape(body, parts, PendingAero::KeepPrevious, pending)?;
+        let step = |world: &mut PhysicsWorld| {
+            if sharded {
+                world.step_with_shards(
+                    1e-8,
+                    &mut [Vec::new(), Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    2,
+                )
+            } else {
+                world.step(1e-8)
+            }
+        };
+        step(&mut world)?;
+        assert!(world.owner_mesh_pressure(body).is_some());
+        let split = world.break_weld(weld)?;
+        assert_eq!(split.len(), 2);
+        sender
+            .send(Ok(replacement))
+            .map_err(|_| "pending receiver closed before publication")?;
+        let before = split
+            .iter()
+            .map(|&id| world.body(id).map(|body| body.state().linear_velocity()))
+            .collect::<Vec<_>>();
+        // The detached body is unmanaged and has no prepared hull yet. The
+        // prepared-only model must reject the step rather than cook it inline.
+        let detached = *split
+            .iter()
+            .find(|&&id| id != body)
+            .ok_or("detached body")?;
+        let error = step(&mut world)
+            .err()
+            .ok_or("unprepared hull allowed step")?;
+        assert!(matches!(
+            error.downcast_ref::<super::super::StepError>(),
+            Some(super::super::StepError::Aerodynamics { body_id, cause })
+                if *body_id == detached
+                    && cause.downcast_ref::<ShapeRegistryError>() == Some(&ShapeRegistryError::InvalidBinding)
+        ));
+        assert_eq!(world.shape_registry().len(), 1);
+        assert_eq!(
+            world
+                .body_shape_failure(body)
+                .and_then(|e| e.downcast_ref::<ShapeRegistryError>()),
+            Some(&ShapeRegistryError::StaleBinding)
+        );
+        for (body, velocity) in split.into_iter().zip(before) {
+            assert!(world.bound_shape_exposure(body, Vec3::X, 0.01).is_err());
+            assert_eq!(
+                world
+                    .body(body)
+                    .ok_or("split body")?
+                    .state()
+                    .linear_velocity(),
+                velocity.ok_or("pre-step velocity")?
+            );
+        }
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn removing_body_discards_ready_unpublished_cook(
+        #[case] sharded: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        let mesh = Arc::new(super::super::shape_binding_tests::cube()?);
+        world.set_part_aerodynamic_mesh_shared(part, Some(Arc::clone(&mesh)))?;
+        let shape = CookedShape::cook(
+            &[CookedSource {
+                mesh,
+                local_transform: Transform::identity(),
+                slot: OwnerSlot::new(0),
+            }],
+            assembly_pressure_config(),
+            false,
+        )?;
+        let (sender, pending) = PendingShape::test_channel();
+        world.track_body_shape(body, vec![part], PendingAero::KeepPrevious, pending)?;
+        sender
+            .send(Ok(shape))
+            .map_err(|_| "cook receiver closed early")?;
+        world.remove_body(body).ok_or("body removal failed")?;
+        let replacement = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        if sharded {
+            world.step_with_shards(
+                1e-8,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(1e-8)?;
+        }
+        assert!(world.shape_registry().is_empty());
+        assert!(world.shape_binding(replacement).is_none());
+        assert!(world.owner_mesh_pressure(replacement).is_none());
+        assert_eq!(world.body_shape_status(body), BodyShapeStatus::Unmanaged);
+        Ok(())
+    }
+
     #[test]
     fn cancelling_ready_result_preserves_live_binding_and_motion()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1051,11 +1414,20 @@ mod tests {
         #[case] sharded: bool,
         #[case] policy: PendingAero,
         #[case] merge: bool,
+        #[values(false, true)] prepared_only: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut world = PhysicsWorld::new();
         world.set_atmosphere(super::super::test_atmosphere(
-            crate::aerodynamics::AtmosphericState::new(1.0, Vec3::X * -2000.0)?,
+            crate::aerodynamics::AtmosphericState::new(
+                1.0,
+                Vec3::X * if prepared_only { -1500.0 } else { -2000.0 },
+            )?,
         ));
+        if prepared_only {
+            world.set_mesh_pressure_model(
+                crate::aerodynamics::MeshPressureModel::ModifiedNewtonianTriangleQuadrature,
+            );
+        }
         let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
             Transform::identity(),
             crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
@@ -1127,7 +1499,11 @@ mod tests {
                 second,
                 super::super::shape_binding_tests::merge_weld(),
             )?;
+            sender
+                .send(Ok(shape.take().ok_or("shape")?))
+                .map_err(|_| "pending receiver closed before merge result")?;
             advance(&mut world)?;
+            assert_eq!(world.shape_registry().len(), 1);
             assert!(world.owner_mesh_pressure(body).is_none());
             assert_eq!(
                 world

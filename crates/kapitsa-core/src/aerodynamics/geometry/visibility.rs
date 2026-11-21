@@ -538,6 +538,21 @@ impl Shadow {
     }
 }
 
+pub(super) fn incidence(normal: Vec3, velocity: Vec3) -> Result<f64, crate::Error> {
+    let value = normal
+        .checked_dot(velocity)
+        .ok_or(GeometryError::ArithmeticOverflow)?;
+    let magnitude = normal.abs().dot(velocity.abs());
+    // Filter cancellation, not grazing area: uncertain signs are evaluated
+    // from the exact products of the represented inputs.
+    const DOT_ROUNDOFF_BOUND: f64 = 8.0 * f64::EPSILON;
+    if magnitude != 0.0 && value.abs() <= magnitude * DOT_ROUNDOFF_BOUND {
+        exact_orientation::dot(normal, velocity)
+    } else {
+        Ok(value)
+    }
+}
+
 /// Restrict an affine rigid-body flow to its genuinely windward region.
 /// A stagnation point at the original centroid must not discard positive area.
 pub(super) fn windward_triangle(
@@ -546,9 +561,7 @@ pub(super) fn windward_triangle(
 ) -> Result<Option<Vec<Vec3>>, crate::Error> {
     let mut values = [0.0; 3];
     for (value, velocity) in values.iter_mut().zip(velocities) {
-        *value = normal
-            .checked_dot(velocity)
-            .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?;
+        *value = incidence(normal, velocity)?;
     }
     if !values.iter().any(|value| *value > 0.0) {
         return Ok(None);

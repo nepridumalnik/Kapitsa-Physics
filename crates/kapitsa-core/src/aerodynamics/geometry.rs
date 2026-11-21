@@ -922,17 +922,15 @@ impl PreparedGeometry {
                         .transform_point(instance.mesh.vertices()[i])
                 });
                 let (lower, upper) = triangle_grid_bounds(triangle, origin, h, dimensions);
+                // Work in grid coordinates, avoiding roundoff from rebuilding
+                // world-space cell centers at grid-aligned faces.
+                let grid_triangle = triangle.map(|point| (point - origin) / h);
                 for z in lower[2]..=upper[2] {
                     for y in lower[1]..=upper[1] {
                         for x in lower[0]..=upper[0] {
                             let i = index([x, y, z], dimensions);
-                            let center = origin
-                                + vector([
-                                    (x as f64 + 0.5) * h,
-                                    (y as f64 + 0.5) * h,
-                                    (z as f64 + 0.5) * h,
-                                ]);
-                            if intersects(triangle, center, h * 0.5)? {
+                            let center = vector([x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5]);
+                            if intersects(grid_triangle, center, 0.5)? {
                                 shell[i] = true;
                             }
                         }
@@ -1338,16 +1336,27 @@ impl PreparedGeometry {
                     .and_then(|v| velocity.checked_add(v))
                     .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?;
             }
-            let upstream = velocity
+            let mut upstream = velocity
                 .try_normalize()
                 .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?;
-            if triangle
-                .normal
-                .checked_dot(upstream)
-                .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?
-                <= 0.0
-            {
-                return Err(crate::Error::from(GeometryError::PrecisionLoss));
+            if visibility::incidence(triangle.normal, upstream)? <= 0.0 {
+                // A clipped sliver can move its barycentric representative
+                // exactly onto the source edge. Use an actually windward
+                // vertex as the ray direction; this preserves a real grazing
+                // rejection while avoiding a zero-incidence artifact created
+                // only by interpolation roundoff.
+                for velocity in velocities {
+                    if visibility::incidence(triangle.normal, velocity)? > 0.0
+                        && let Some(candidate) = velocity.try_normalize()
+                        && visibility::incidence(triangle.normal, candidate)? > 0.0
+                    {
+                        upstream = candidate;
+                        break;
+                    }
+                }
+                if visibility::incidence(triangle.normal, upstream)? <= 0.0 {
+                    return Err(crate::Error::from(GeometryError::PrecisionLoss));
+                }
             }
             let first_patch = patches.len();
             let mut any_blocked = false;

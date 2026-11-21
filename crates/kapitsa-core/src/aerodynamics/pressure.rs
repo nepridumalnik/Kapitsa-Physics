@@ -74,6 +74,10 @@ pub enum MeshPressureModel {
     /// with `Cp_max` from isentropic or Rayleigh-pitot stagnation pressure.
     /// Leeward suction, wake, friction, base flow and circulation are absent.
     ModifiedNewtonian,
+    /// Modified Newtonian compression with three-point fragment quadrature.
+    /// Uses the existing mesh geometry lifecycle and Mach guard; this is a
+    /// numerical option, not a validated extension of the physical domain.
+    ModifiedNewtonianTriangleQuadrature,
     /// Incompressible source-panel potential flow for a closed, isolated
     /// Mesh/Colliders body. Mach ≤ 0.2 and at most 256 mesh triangles.
     /// See [`crate::aerodynamics::potential::evaluate_closed_mesh`].
@@ -804,7 +808,10 @@ impl PressurePatch {
                 MeshPressureModel::Newtonian if mach < 5.0 => {
                     return Err(crate::Error::from(PressureError::UnsupportedMach));
                 }
-                MeshPressureModel::ModifiedNewtonian if mach > MODIFIED_NEWTONIAN_MAX_MACH => {
+                MeshPressureModel::ModifiedNewtonian
+                | MeshPressureModel::ModifiedNewtonianTriangleQuadrature
+                    if mach > MODIFIED_NEWTONIAN_MAX_MACH =>
+                {
                     return Err(crate::Error::from(PressureError::UnsupportedMach));
                 }
                 _ => {}
@@ -865,7 +872,8 @@ impl PressurePatch {
                 ],
                 1.0,
             ),
-            MeshPressureModel::ModifiedNewtonian => {
+            MeshPressureModel::ModifiedNewtonian
+            | MeshPressureModel::ModifiedNewtonianTriangleQuadrature => {
                 let cp_max = modified_newtonian_stagnation_cp(mach)?;
                 super::hull::scaled_product(
                     &[
@@ -966,6 +974,18 @@ pub fn evaluate_prepared_mesh_modified_newtonian(
     evaluate_prepared(patches, flow, None, MeshPressureModel::ModifiedNewtonian)
 }
 
+pub(crate) fn evaluate_prepared_triangle_quadrature(
+    patches: &PreparedSurfacePatches,
+    flow: PressureFlow,
+) -> Result<PressureWrench, crate::Error> {
+    evaluate_prepared(
+        patches,
+        flow,
+        None,
+        MeshPressureModel::ModifiedNewtonianTriangleQuadrature,
+    )
+}
+
 /// Returns the impact-pressure wrench of one geometry owner about the common
 /// body COM, in world coordinates. Geometry ownership reflects the prepared
 /// exposure and overlap policy; this is not a complete external or weld load.
@@ -989,8 +1009,7 @@ pub fn evaluate_prepared_mesh_owner_with_model(
     let mut total =
         PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate_with_model(flow, model)?;
     for patch in patches.iter().filter(|patch| patch.owner == owner) {
-        let load = PressurePatch::new(patch.center, patch.normal, patch.area)?
-            .evaluate_with_model(flow, model)?;
+        let load = evaluate_impact_fragment(patch, flow, model)?;
         total.force = total
             .force
             .checked_add(load.force)
@@ -1025,8 +1044,7 @@ pub fn evaluate_prepared_mesh_by_owner_with_model(
     let zero = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate_with_model(flow, model)?;
     let mut totals = std::collections::BTreeMap::new();
     for patch in patches.iter() {
-        let load = PressurePatch::new(patch.center, patch.normal, patch.area)?
-            .evaluate_with_model(flow, model)?;
+        let load = evaluate_impact_fragment(patch, flow, model)?;
         let total: &mut PressureWrench = totals.entry(patch.owner).or_insert(zero);
         total.force = total
             .force
@@ -1149,6 +1167,77 @@ impl OwnerPressureWorkspace {
         patches: &PreparedSurfacePatches,
         flow: PressureFlow,
     ) -> Result<(), crate::Error> {
+        self.prepare_with(patches, flow, evaluate_impact_fragment)
+    }
+
+    /// Stages loads using the symmetric three-point triangle rule on each
+    /// exposed fragment. Visibility is unchanged. The rule integrates
+    /// polynomials through degree two exactly; the rotating pressure moment
+    /// is not generally quadratic and still needs refinement checks.
+    /// This opt-in path performs three pressure evaluations per fragment
+    /// without allocating or changing the configured pressure model's domain.
+    pub fn prepare_triangle_quadrature(
+        &mut self,
+        patches: &PreparedSurfacePatches,
+        flow: PressureFlow,
+    ) -> Result<(), crate::Error> {
+        self.prepare_with(patches, flow, evaluate_triangle_fragment)
+    }
+}
+
+fn evaluate_impact_fragment(
+    patch: &super::geometry::PreparedSurfacePatch,
+    flow: PressureFlow,
+    model: MeshPressureModel,
+) -> Result<PressureWrench, crate::Error> {
+    if model == MeshPressureModel::ModifiedNewtonianTriangleQuadrature {
+        evaluate_triangle_fragment(patch, flow, model)
+    } else {
+        PressurePatch::new(patch.center, patch.normal, patch.area)?.evaluate_with_model(flow, model)
+    }
+}
+
+fn evaluate_triangle_fragment(
+    patch: &super::geometry::PreparedSurfacePatch,
+    flow: PressureFlow,
+    model: MeshPressureModel,
+) -> Result<PressureWrench, crate::Error> {
+    let mut total = PressureWrench {
+        force: Vec3::ZERO,
+        moment: Vec3::ZERO,
+    };
+    let area = patch.area / 3.0;
+    if area == 0.0 && patch.area != 0.0 {
+        return Err(PressureError::ArithmeticOverflow.into());
+    }
+    // Barycentric permutations of (2/3, 1/6, 1/6).
+    for vertex in patch.vertices {
+        let point = patch.center * 0.5 + vertex * 0.5;
+        let load =
+            PressurePatch::new(point, patch.normal, area)?.evaluate_with_model(flow, model)?;
+        total.force = total
+            .force
+            .checked_add(load.force)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        total.moment = total
+            .moment
+            .checked_add(load.moment)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+    }
+    Ok(total)
+}
+
+impl OwnerPressureWorkspace {
+    fn prepare_with(
+        &mut self,
+        patches: &PreparedSurfacePatches,
+        flow: PressureFlow,
+        evaluate: impl Fn(
+            &super::geometry::PreparedSurfacePatch,
+            PressureFlow,
+            MeshPressureModel,
+        ) -> Result<PressureWrench, crate::Error>,
+    ) -> Result<(), crate::Error> {
         self.prepared = false;
         let zero = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?
             .evaluate_with_model(flow, self.pressure_model)?;
@@ -1161,8 +1250,7 @@ impl OwnerPressureWorkspace {
                 .scratch
                 .binary_search_by_key(&patch.owner, |entry| entry.0)
                 .map_err(|_| crate::Error::from(PressureError::InvalidPatch))?;
-            let load = PressurePatch::new(patch.center, patch.normal, patch.area)?
-                .evaluate_with_model(flow, self.pressure_model)?;
+            let load = evaluate(patch, flow, self.pressure_model)?;
             self.scratch_total.force = self
                 .scratch_total
                 .force
@@ -1380,8 +1468,14 @@ fn evaluate_prepared(
     let mut total =
         PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate_with_model(flow, model)?;
     for patch in patches.iter() {
-        let load = PressurePatch::new(patch.center, patch.normal, patch.area)?
-            .evaluate_inner(flow, explicit, model)?;
+        let load = if explicit.is_none()
+            && model == MeshPressureModel::ModifiedNewtonianTriangleQuadrature
+        {
+            evaluate_triangle_fragment(patch, flow, model)?
+        } else {
+            PressurePatch::new(patch.center, patch.normal, patch.area)?
+                .evaluate_inner(flow, explicit, model)?
+        };
         total.force = total
             .force
             .checked_add(load.force)
@@ -1401,3 +1495,7 @@ mod tests;
 #[cfg(test)]
 #[path = "mesh_pressure_tests.rs"]
 mod mesh_tests;
+
+#[cfg(test)]
+#[path = "voxel_hull_acceptance_tests.rs"]
+mod voxel_hull_acceptance_tests;

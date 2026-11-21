@@ -288,6 +288,81 @@ fn clustered_shared_body(
 }
 
 #[test]
+fn bound_exposure_maps_cook_slots_and_rejects_stale_revision()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::geometry::GeometryOwner;
+    let mut world = wind_world()?;
+    let mesh = Arc::new(cube()?);
+    let (first, first_part) = clustered_shared_body(&mut world, Vec3::ZERO, &mesh)?;
+    let (second, second_part) = clustered_shared_body(&mut world, Vec3::X * 10.0, &mesh)?;
+    let sources = [source(&mesh, Vec3::ZERO, 0)?];
+    let shape = world.cook_shape(&sources, false)?;
+    world.bind_shape(first, shape, vec![first_part])?;
+    world.bind_shape(second, shape, vec![second_part])?;
+    for (body, part) in [(first, first_part), (second, second_part)] {
+        let patches = world.bound_shape_exposure(body, Vec3::X, 0.01)?;
+        assert!(!patches.is_empty());
+        assert!(
+            patches
+                .iter()
+                .all(|patch| patch.owner == GeometryOwner::Part(part))
+        );
+    }
+    world.replace_shape(shape, 1, &sources)?;
+    assert!(matches!(world.bound_shape_exposure(first, Vec3::X, 0.01),
+        Err(error) if error.downcast_ref::<ShapeRegistryError>() == Some(&ShapeRegistryError::StaleBinding)));
+    Ok(())
+}
+
+#[test]
+fn bound_exposure_respects_noncanonical_slot_order_and_rejects_split()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::geometry::GeometryOwner;
+    let mut world = wind_world()?;
+    let (body, root) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
+    let offset = Vec3::Y * 4.0;
+    let mut desc = part_desc(MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?);
+    desc.local_transform = Transform::new(offset, Quat::IDENTITY)?;
+    let child = world.add_cluster_part(
+        root,
+        desc,
+        WeldDesc {
+            frame_a: JointFrame::new(offset, Quat::IDENTITY),
+            ..merge_weld()
+        },
+    )?;
+    world.set_part_aerodynamic_mesh(child, Some(cube()?))?;
+    let sources = [
+        source(&part_mesh(&world, child)?, offset, 0)?,
+        source(&part_mesh(&world, root)?, Vec3::ZERO, 1)?,
+    ];
+    let shape = world.cook_shape(&sources, false)?;
+    world.bind_shape(body, shape, vec![child, root])?;
+    let patches = world.bound_shape_exposure(body, Vec3::X, 0.01)?;
+    for (part, upper) in [(root, false), (child, true)] {
+        let mut owned = patches
+            .iter()
+            .filter(|patch| patch.owner == GeometryOwner::Part(part))
+            .peekable();
+        assert!(owned.peek().is_some());
+        assert!(owned.all(|patch| (patch.center.y > offset.y / 2.0) == upper));
+    }
+    let weld = *world
+        .cluster(body)
+        .ok_or("missing cluster")?
+        .welds()
+        .first()
+        .ok_or("missing weld")?;
+    let split = world.break_weld(weld)?;
+    assert_eq!(split.len(), 2);
+    for body in split {
+        assert!(matches!(world.bound_shape_exposure(body, Vec3::X, 0.01),
+            Err(error) if error.downcast_ref::<ShapeRegistryError>() == Some(&ShapeRegistryError::InvalidBinding)));
+    }
+    Ok(())
+}
+
+#[test]
 fn two_bodies_share_one_cooked_shape() -> Result<(), Box<dyn std::error::Error>> {
     let mut world = wind_world()?;
     let shared_mesh = Arc::new(cube()?);
@@ -553,6 +628,273 @@ fn unstaged_shards_apply_bound_mesh_pressure(
 }
 
 const TOPOLOGY_DT: f64 = 1e-8;
+
+#[test]
+fn standalone_cooked_hull_matches_both_step_paths() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::{AtmosphericState, MeshPressureModel, geometry::GeometryOwner};
+    fn run(
+        sharded: bool,
+        assembly: bool,
+    ) -> Result<(Vec3, crate::aerodynamics::pressure::PressureWrench), Box<dyn std::error::Error>>
+    {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            -Vec3::X * 1500.0,
+        )?));
+        world.set_mesh_pressure_model(MeshPressureModel::ModifiedNewtonianTriangleQuadrature);
+        let body = add_body(&mut world, Aerodynamics::Mesh(cube()?))?;
+        if assembly {
+            let part = world.enable_cluster(body)?;
+            let mesh = part_mesh(&world, part)?;
+            let shape = world.cook_shape(&[source(&mesh, Vec3::ZERO, 0)?], false)?;
+            world.bind_shape(body, shape, vec![part])?;
+            topology_step(&mut world, sharded)?;
+            let [(GeometryOwner::Part(owner), wrench)] =
+                world.owner_mesh_pressure(body).ok_or("assembly pressure")?
+            else {
+                return Err("expected assembly owner".into());
+            };
+            assert_eq!(*owner, part);
+            return Ok((body_velocity(&world, body)?, *wrench));
+        }
+        let before = world.body(body).ok_or("body")?.motion();
+        assert!(topology_step(&mut world, sharded).is_err());
+        assert_eq!(world.body(body).ok_or("body")?.motion(), before);
+        world.cook_primary_hull(body)?;
+        topology_step(&mut world, sharded)?;
+        let [(GeometryOwner::Body, wrench)] = world.owner_mesh_pressure(body).ok_or("pressure")?
+        else {
+            return Err("expected standalone hull wrench".into());
+        };
+        assert!(wrench.force.x < 0.0);
+        let result = (body_velocity(&world, body)?, *wrench);
+        let before = world.body(body).ok_or("body")?.motion();
+        world.set_body_mesh_oriented_cavities(true);
+        assert!(topology_step(&mut world, sharded).is_err());
+        assert_eq!(world.body(body).ok_or("body")?.motion(), before);
+        world.cook_primary_hull(body)?;
+        world.set_aerodynamics(body, Aerodynamics::Mesh(cube()?))?;
+        assert!(topology_step(&mut world, sharded).is_err());
+        Ok(result)
+    }
+    let baseline = run(false, false)?;
+    assert_eq!(baseline, run(true, false)?);
+    for sharded in [false, true] {
+        let (velocity, wrench) = run(sharded, true)?;
+        let force_scale = baseline.1.force.length();
+        assert!((wrench.force - baseline.1.force).length() < 1e-10 * force_scale);
+        // The reference length is the 1 m cube edge.
+        assert!((wrench.moment - baseline.1.moment).length() < 1e-10 * force_scale);
+        assert!((velocity - baseline.0).length() < 1e-10 * baseline.0.length());
+    }
+    Ok(())
+}
+
+#[test]
+fn cooked_hull_and_controlled_wing_loads_do_not_overlap() -> Result<(), Box<dyn std::error::Error>>
+{
+    use crate::aerodynamics::{
+        AtmosphericState, MeshPressureModel,
+        wing::{FiniteWing, WingControl, WingSurface},
+    };
+    for (sharded, associated) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mesh = Arc::new(cube()?);
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            -Vec3::X * 100.0,
+        )?));
+        world.set_mesh_pressure_model(MeshPressureModel::ModifiedNewtonianTriangleQuadrature);
+        let (body, root) = clustered_shared_body(&mut world, Vec3::ZERO, &mesh)?;
+        let offset = if associated { Vec3::X } else { Vec3::Y } * 4.0;
+        let mut desc = part_desc(MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?);
+        desc.local_transform = Transform::new(offset, Quat::IDENTITY)?;
+        let wing = world.add_cluster_part(
+            root,
+            desc,
+            WeldDesc {
+                frame_a: JointFrame::new(offset, Quat::IDENTITY),
+                ..merge_weld()
+            },
+        )?;
+        assert!(
+            world
+                .set_part_wing_shielding_mesh_shared(wing, Arc::clone(&mesh))
+                .is_err()
+        );
+        world.set_part_aerodynamic_wings(
+            wing,
+            vec![
+                WingSurface::new(
+                    FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?,
+                    if associated {
+                        Transform::identity()
+                    } else {
+                        Transform::new(Vec3::Y * 4.0, Quat::IDENTITY)?
+                    },
+                    1.0,
+                )?
+                .with_control(WingControl::new(0.0, 0.2, 1.0)?)
+                .with_spanwise_projection(0.01)?,
+            ],
+        )?;
+        // Use geometry-only input for the independent wing's part too: the
+        // displaced mesh does not represent the wing or overlap its footprint.
+        if associated {
+            world.set_part_wing_shielding_mesh_shared(wing, Arc::clone(&mesh))?;
+        } else {
+            world.set_part_wave_source_mesh_shared(wing, Some(Arc::clone(&mesh)))?;
+        }
+        let shape = world.cook_shape(
+            &[source(&mesh, Vec3::ZERO, 0)?, source(&mesh, offset, 1)?],
+            false,
+        )?;
+        world.bind_shape(body, shape, vec![root, wing])?;
+        if !associated {
+            let original = world
+                .cluster_part(wing)
+                .ok_or("wing part")?
+                .aerodynamic_wings
+                .clone();
+            let surface = |z| -> Result<WingSurface, crate::Error> {
+                WingSurface::new(
+                    FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?,
+                    Transform::new(Vec3::new(0.5, 0.5 - offset.y, z), Quat::IDENTITY)?,
+                    0.25,
+                )?
+                .with_rectangular_footprint(Vec3::ZERO, 0.5, 0.5)
+            };
+            world.set_part_aerodynamic_wings(wing, vec![surface(1.0)?])?;
+            let before = world.body(body).ok_or("body")?.motion();
+            let error = topology_step(&mut world, sharded)
+                .err()
+                .ok_or("expected cross-part overlap rejection")?;
+            assert!(
+                matches!(error.downcast_ref::<super::StepError>(), Some(super::StepError::Aerodynamics { cause, .. }) if matches!(cause.downcast_ref::<crate::aerodynamics::AerodynamicsError>(), Some(crate::aerodynamics::AerodynamicsError::UnsupportedModel)))
+            );
+            assert_eq!(world.body(body).ok_or("body")?.motion(), before);
+            world.set_part_aerodynamic_wings(wing, vec![surface(1.125)?])?;
+            topology_step(&mut world, sharded)?;
+            assert_eq!(world.part_wing_wrenches().len(), 1);
+            world.set_part_aerodynamic_wings(wing, original)?;
+        }
+        let exposed = world.bound_shape_exposure(body, Vec3::X, 0.01)?;
+        assert!(!exposed.is_empty());
+        if associated {
+            assert!(exposed.iter().all(
+                |patch| patch.owner == crate::aerodynamics::geometry::GeometryOwner::Part(wing)
+            ));
+        }
+        let id = world.part_wing_id(wing, 0).ok_or("missing wing ID")?;
+        let mut initial_lift = 0.0;
+        for deflection in [0.0, 0.1] {
+            world.set_part_wing_deflection(id, deflection)?;
+            topology_step(&mut world, sharded)?;
+            let loads = world.owner_mesh_pressure(body).unwrap_or_default();
+            if associated {
+                assert!(loads.is_empty());
+            } else {
+                assert_eq!(loads.len(), 1);
+                assert_eq!(
+                    loads[0].0,
+                    crate::aerodynamics::geometry::GeometryOwner::Part(root)
+                );
+                assert!(loads[0].1.force.x < 0.0);
+            }
+            let [load] = world.part_wing_wrenches() else {
+                return Err("expected one wing wrench".into());
+            };
+            assert!(load.wrench.force.x < 0.0);
+            let lift = load.wrench.force.z.abs();
+            if deflection == 0.0 {
+                initial_lift = lift;
+            } else {
+                assert!(lift > initial_lift);
+            }
+        }
+        if associated {
+            world.set_part_aerodynamic_wings(wing, Vec::new())?;
+            let before = world.body(body).ok_or("body")?.motion();
+            let error = topology_step(&mut world, sharded)
+                .err()
+                .ok_or("expected orphaned wing association rejection")?;
+            assert!(
+                matches!(error.downcast_ref::<super::StepError>(), Some(super::StepError::Aerodynamics { cause, .. }) if matches!(cause.downcast_ref::<crate::aerodynamics::AerodynamicsError>(), Some(crate::aerodynamics::AerodynamicsError::UnsupportedModel)))
+            );
+            assert_eq!(world.body(body).ok_or("body")?.motion(), before);
+            // The same mesh can still serve as intentionally load-free geometry.
+            world.set_part_wave_source_mesh_shared(wing, Some(Arc::clone(&mesh)))?;
+            world.bind_shape(body, shape, vec![root, wing])?;
+            topology_step(&mut world, sharded)?;
+            assert!(world.part_wing_wrenches().is_empty());
+            assert!(
+                world
+                    .owner_mesh_pressure(body)
+                    .unwrap_or_default()
+                    .iter()
+                    .all(|(owner, _)| *owner
+                        == crate::aerodynamics::geometry::GeometryOwner::Part(root))
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn bound_triangle_quadrature_step_parity_and_rollback() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::MeshPressureModel;
+    fn run(sharded: bool) -> Result<(Vec3, Vec3), Box<dyn std::error::Error>> {
+        let mesh = Arc::new(cube()?);
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(crate::world::test_atmosphere(
+            crate::aerodynamics::AtmosphericState::new(1.0, -Vec3::X * 1500.0)?,
+        ));
+        world.set_mesh_pressure_model(MeshPressureModel::ModifiedNewtonianTriangleQuadrature);
+        let (body, part) = clustered_shared_body(&mut world, Vec3::ZERO, &mesh)?;
+        let shape = world.cook_shape(&[source(&mesh, Vec3::ZERO, 0)?], false)?;
+        world.bind_shape(body, shape, vec![part])?;
+        topology_step(&mut world, sharded)?;
+        let before = world.body(body).ok_or("body")?.motion();
+        let loads = world.owner_mesh_pressure(body).ok_or("pressure")?.to_vec();
+        assert_eq!(loads.len(), 1);
+        assert!(loads[0].1.force.x < 0.0);
+        world.set_mesh_sound_speed(200.0)?;
+        assert!(topology_step(&mut world, sharded).is_err());
+        assert_eq!(world.body(body).ok_or("body")?.motion(), before);
+        assert_eq!(world.owner_mesh_pressure(body), Some(loads.as_slice()));
+        world.set_mesh_sound_speed(340.0)?;
+        use crate::aerodynamics::wing::{FiniteWing, WingSurface};
+        world.set_part_aerodynamic_wings(
+            part,
+            vec![WingSurface::new(
+                FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?,
+                Transform::identity(),
+                1.0,
+            )?],
+        )?;
+        let error = topology_step(&mut world, sharded)
+            .err()
+            .ok_or("expected ambiguous geometry rejection")?;
+        assert!(
+            matches!(error.downcast_ref::<super::StepError>(), Some(super::StepError::Aerodynamics { cause, .. }) if matches!(cause.downcast_ref::<crate::aerodynamics::AerodynamicsError>(), Some(crate::aerodynamics::AerodynamicsError::UnsupportedModel)))
+        );
+        assert_eq!(world.body(body).ok_or("body")?.motion(), before);
+        world.set_part_aerodynamic_wings(part, Vec::new())?;
+        world.replace_shape(shape, 1, &[source(&mesh, Vec3::ZERO, 0)?])?;
+        let error = topology_step(&mut world, sharded)
+            .err()
+            .ok_or("expected stale-binding rejection")?;
+        assert!(
+            matches!(error.downcast_ref::<super::StepError>(), Some(super::StepError::Aerodynamics { cause, .. }) if cause.downcast_ref::<ShapeRegistryError>() == Some(&ShapeRegistryError::InvalidBinding))
+        );
+        assert_eq!(world.body(body).ok_or("body")?.motion(), before);
+        assert_eq!(world.owner_mesh_pressure(body), Some(loads.as_slice()));
+        Ok((body_velocity(&world, body)?, loads[0].1.force))
+    }
+    assert_eq!(run(false)?, run(true)?);
+    Ok(())
+}
 
 fn topology_step(world: &mut PhysicsWorld, sharded: bool) -> Result<(), crate::Error> {
     if sharded {

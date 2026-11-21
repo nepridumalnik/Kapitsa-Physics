@@ -25,6 +25,7 @@ pub(super) enum PartGeometry {
     Colliders,
     Wave(Box<crate::aerodynamics::wave::VoxelWave>),
     WaveSourceMesh(Arc<TriangleMesh>),
+    WingShieldingMesh(Arc<TriangleMesh>),
     WaveSourceColliders,
 }
 
@@ -457,6 +458,29 @@ impl PhysicsWorld {
         self.replace_part_wave_geometry(part, mesh.map(PartGeometry::WaveSourceMesh))
     }
 
+    /// Associates this part's entire mesh with its explicit aerodynamic wings.
+    ///
+    /// The mesh stays in the cooked union as shielding and wave-source geometry,
+    /// but receives no direct mesh pressure. Use a separate part for geometry
+    /// that should still receive hull pressure. This replaces the part's current
+    /// geometry configuration; bind or recook the assembly as needed. Like other
+    /// solid sources, the mesh can shield wing footprints, including its own.
+    /// In the cooked hull model, removing all wings requires replacing this
+    /// association before the next step. This is a part-wide declaration,
+    /// not a geometric match between individual wings and triangles.
+    pub fn set_part_wing_shielding_mesh_shared(
+        &mut self,
+        part: PartId,
+        mesh: Arc<TriangleMesh>,
+    ) -> Result<(), Error> {
+        let owner = self.cluster_part(part).ok_or(ClusterError::InvalidPartId)?;
+        if owner.aerodynamic_wings.is_empty() {
+            return Err(crate::aerodynamics::AerodynamicsError::UnsupportedModel.into());
+        }
+        self.replace_part_wave_geometry(part, Some(PartGeometry::WingShieldingMesh(mesh)))?;
+        Ok(())
+    }
+
     /// Selects part-owned colliders as geometry-only input to the wave union.
     /// `false` removes only this mode; it leaves other geometry selections intact.
     pub fn set_part_wave_source_colliders(
@@ -507,7 +531,9 @@ impl PhysicsWorld {
     pub fn part_aerodynamic_mesh_arc(&self, part: PartId) -> Option<&Arc<TriangleMesh>> {
         self.cluster_part(part)?;
         match self.part_aerodynamic_geometry.as_ref()?.get(&part)? {
-            PartGeometry::Mesh(mesh) | PartGeometry::WaveSourceMesh(mesh) => Some(mesh),
+            PartGeometry::Mesh(mesh)
+            | PartGeometry::WaveSourceMesh(mesh)
+            | PartGeometry::WingShieldingMesh(mesh) => Some(mesh),
             PartGeometry::Wave(model) => Some(&model.mesh),
             PartGeometry::Colliders | PartGeometry::WaveSourceColliders => None,
         }
@@ -700,7 +726,11 @@ pub(super) fn prepare(
             for &part in shared.0.parts() {
                 if matches!(
                     geometry.get(&part),
-                    Some(PartGeometry::Wave(_) | PartGeometry::WaveSourceMesh(_))
+                    Some(
+                        PartGeometry::Wave(_)
+                            | PartGeometry::WaveSourceMesh(_)
+                            | PartGeometry::WingShieldingMesh(_)
+                    )
                 ) {
                     cache
                         .wave_only_parts
@@ -742,7 +772,10 @@ pub(super) fn prepare(
                                 && cached.wave_only_parts.binary_search(part).is_err()
                                 && Arc::ptr_eq(mesh, current)
                         }
-                        Some(PartGeometry::WaveSourceMesh(current)) => {
+                        Some(
+                            PartGeometry::WaveSourceMesh(current)
+                            | PartGeometry::WingShieldingMesh(current),
+                        ) => {
                             cached.wave_only_parts.binary_search(part).is_ok()
                                 && Arc::ptr_eq(mesh, current)
                         }
@@ -786,6 +819,7 @@ pub(super) fn prepare(
             Some(
                 PartGeometry::Wave(_)
                     | PartGeometry::WaveSourceMesh(_)
+                    | PartGeometry::WingShieldingMesh(_)
                     | PartGeometry::WaveSourceColliders
             )
         ) {
@@ -795,7 +829,11 @@ pub(super) fn prepare(
             wave_only_parts.push(part);
         }
         let mesh = match geometry.get(&part) {
-            Some(PartGeometry::Mesh(mesh) | PartGeometry::WaveSourceMesh(mesh)) => mesh.clone(),
+            Some(
+                PartGeometry::Mesh(mesh)
+                | PartGeometry::WaveSourceMesh(mesh)
+                | PartGeometry::WingShieldingMesh(mesh),
+            ) => mesh.clone(),
             Some(PartGeometry::Wave(model)) => Arc::clone(&model.mesh),
             Some(PartGeometry::Colliders | PartGeometry::WaveSourceColliders) => {
                 let owner = parts
@@ -1159,7 +1197,11 @@ pub(super) fn binding_matches(
             return Err(invalid());
         }
         let mesh = match geometry.and_then(|items| items.get(&part)) {
-            Some(PartGeometry::Mesh(mesh) | PartGeometry::WaveSourceMesh(mesh)) => mesh,
+            Some(
+                PartGeometry::Mesh(mesh)
+                | PartGeometry::WaveSourceMesh(mesh)
+                | PartGeometry::WingShieldingMesh(mesh),
+            ) => mesh,
             Some(PartGeometry::Wave(model)) => &model.mesh,
             _ => return Err(ShapeRegistryError::UnsupportedSource.into()),
         };

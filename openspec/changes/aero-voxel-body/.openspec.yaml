@@ -1,0 +1,34 @@
+
+schema: spec-driven
+created: "2026-11-21"
+
+goal: >-
+  Complete FAR-inspired geometry-based aerodynamics for individual RigidBody
+  instances and rigid assemblies. Reuse the existing PreparedGeometry,
+  CookedShape, ShapeRegistry, and asynchronous cooking infrastructure to
+  represent each aerodynamics-enabled body as a voxelized aerodynamic entity.
+  For assemblies, evaluate the union of connected parts rather than treating
+  internal or shielded surfaces as independently exposed.
+
+  Derive distributed aerodynamic forces and torques from body geometry,
+  relative airflow, angle of attack, angular velocity, and atmospheric
+  conditions. Support physically plausible rocket drag, passive stability,
+  instability, oscillation, tumbling, and aerodynamic damping.
+
+  Integrate existing controllable WingSurface stabilizers without
+  double-counting forces. Enable test scenarios for rocket launch, atmospheric
+  maneuvering, descent, and landing, including configurations with and
+  without stabilizers.
+
+  Define explicit applicability limits for aerodynamic models, preserve
+  correct center-of-mass moments, and validate behavior using analytical
+  references and reproducible regression scenarios. Do not claim full FAR
+  equivalence or unrestricted accuracy across all Mach numbers.
+
+affected_areas:
+  - crates/kapitsa-core/src/aerodynamics
+  - crates/kapitsa-core/src/world
+  - crates/kapitsa/src/runtime
+  - examples/rocket-flight-viewer
+  - docs/aerodynamics.md
+  - docs/reviews/voxel-aero-acceptance.md

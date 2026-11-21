@@ -82,6 +82,8 @@ A preparation entry compares instance membership, mesh identity and part-local t
 
 Part pressure retains COM atmosphere sampling and centroid rotational-flow quadrature; the world-selected Mesh/Colliders closure applies to primary and part geometry, with the default Newtonian Mach >= 5 policy and the opt-in modified Newtonian `0 <= Mach <= 5` model. Vacuum skips preparation. Tests cover ordinary/sharded paths, mixed Mesh/Colliders assemblies, merge/split, overlap ownership, triangle budgets, configuration replacement, preparation errors, cleanup, and runtime commands on Tokio/Rayon. General physical equivalence to FAR is not established; the explicit subsonic hull and wing models below do not supply transonic hull physics.
 
+The opt-in `ModifiedNewtonianTriangleQuadrature` model uses compatible cooked geometry. If a local pressure sample exceeds the model's Mach guard, the step reports `StepError::Aerodynamics` with a pressure cause of `PressureError::UnsupportedMach`. If visibility evaluation exhausts its geometry work budget, the same step error carries a geometry cause of `GeometryError::WorkBudgetExceeded`. Neither ordinary nor sharded stepping commits motion or replaces the last published pressure wrenches on these failures. The Mach guard is an implementation limit, not a validated flight envelope.
+
 ### Shared cooked vessel shapes
 
 Several bodies with the same vessel design can reuse one prepared part-geometry union. `PhysicsWorld::cook_shape(sources, oriented_cavities)` cooks a `CookedShape` with slot-based owners and registers it under a registry-scoped `ShapeId`; `bind_shape(body, shape, parts)` maps slot `i` to `parts[i]`. The shape stores occupancy, sections and volume, so cooking is the only voxelization step; evaluation re-derives patches from the cooked occupancy.
@@ -117,6 +119,54 @@ unpublished result from installing and leaves the installed binding unchanged.
 a weld-graph or membership change. `BlockStep` waits at the full step boundary;
 status polling itself never waits for a cook. Failed or stale results do not
 replace the last installed binding. Colliders are not accepted as cook sources.
+
+### Voxel hull model: reuse and scope
+
+The opt-in `ModifiedNewtonianTriangleQuadrature` hull model reuses
+`PreparedGeometry` and its bounded union
+visibility queries, with `CookedShape`/`ShapeRegistry` retaining occupancy and
+deterministic source slots across evaluations. Existing shape workers and the
+revision/topology-checked binding lifecycle are the preparation path; the
+legacy mesh fallback to synchronous preparation is not part of the hull path.
+Use exposed physical patches for pressure, not voxel faces or section areas:
+the latter do not preserve the physical normals required by impact pressure.
+
+The first closure is compression-only. The existing `PressurePatch` model
+supplies point-relative velocity, pressure force and COM moment. Its numeric
+Mach guard is not a flight envelope. The [hull acceptance review](voxel-hull-acceptance.md#acceptance-boundary-12)
+separates numerical fixtures from the much narrower experimental evidence
+for steady, zero-incidence blunt-nose compression. The section-based wave
+model is a separate load term, not a substitute for directional exposure and
+not added by this hull model. Skin friction, attached-flow suction, base/wake
+pressure, transonic wave drag and automatic regime blending are excluded.
+
+Explicit `WingSurface` models retain their coefficient source, control and
+local atmosphere sampling. Volume-based wing shielding and pressure load
+attribution are separate: a wing's associated geometry can occlude other
+surfaces without also receiving hull pressure. Legacy independent wing and
+pressure configurations are not changed by the opt-in path.
+
+For a cooked assembly, ownership is declared per part. Use
+`PhysicsWorld::set_part_wing_shielding_mesh_shared` when the part's entire mesh
+represents its explicit wings. The mesh still participates in occlusion, but
+none of its triangles receive direct hull pressure. Keep any pressure-bearing
+geometry on separate parts. At least one wing must remain on the associated
+part; before stepping after removing the last wing, replace the geometry
+configuration (for instance, with a wave-only source if the mesh should still
+shield without receiving pressure) and ensure the shape binding is current.
+
+An independent wing must not represent any surface in a pressure-bearing
+mesh. The cooked path rejects a pressure-bearing mesh on a part with wings,
+even if the wing appears displaced. Across parts it also rejects detected
+positive-area coplanar overlap between a configured rectangular footprint and
+a pressure-bearing source triangle, subject to floating-point tolerances and
+a bounded work budget. This check uses the configured footprint, not a swept
+volume during control deflection. It does not infer a footprint for wings
+without one, detect arbitrary 3D overlap or establish physical ownership from
+proximity. The caller must declare shared geometry and keep independent
+wing and pressure representations disjoint even when a configuration passes
+these checks. Declaring wing ownership does not exempt that mesh from the
+separate volume-shielding test for a wing with a footprint, including its own.
 
 ## Conventions
 

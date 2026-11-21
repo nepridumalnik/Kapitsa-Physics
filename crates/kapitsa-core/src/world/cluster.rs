@@ -1904,6 +1904,7 @@ impl PhysicsWorld {
                 let mut body = RigidBody::from_motion(motion);
                 body.aerodynamic_surfaces = aerodynamics;
                 BodyEntry {
+                    cooked_primary_hull: None,
                     body,
                     first_collider: None,
                     cluster: None,
