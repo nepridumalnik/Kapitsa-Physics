@@ -216,6 +216,29 @@ global numeric error bound.
 - **AND** this is a synthetic assertion, not execution evidence or independent
   physical validation
 
+### Requirement: Normalize stored half-spaces reversibly
+
+Shadow coefficients and windward values SHALL use power-of-two
+normalization. Reversing the scaling SHALL reproduce each input value exactly.
+A mismatch SHALL return `PrecisionLoss`.
+
+#### Scenario: Normalization is not exactly reversible
+
+- **WHEN** any component fails `original == scaled * power` after normalization
+  of shadow coefficients or windward values
+- **THEN** preparation returns `PrecisionLoss`, including for nonzero-to-zero
+  loss and subnormal rounding that leaves a nonzero scaled value
+- **AND** the check is not limited to detecting erased components
+
+#### Scenario: Synthetic binary normalization preserves an exact boundary
+
+- **WHEN** `binary_normalization_preserves_exact_boundary` normalizes
+  `[3.0,-1.0,0.0]` as recorded in `efedd1d`
+- **THEN** the divisor is `2.0`, the normalized values are `[1.5,-0.5,0.0]`,
+  and the affine distance at `X*0.75` is exactly `0.0`
+- **AND** this is a synthetic regression assertion, not test execution evidence
+  or independent physical validation
+
 ### Requirement: Recover uncertain affine distances exactly
 
 Cancellation near correction rounding, possible product low-bit underflow or

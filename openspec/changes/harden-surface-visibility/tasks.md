@@ -129,3 +129,14 @@
   `affine_distance_precharges_exact_recovery_of_subnormal_sum`, including the
   912-unit charge and rejected precharge, as synthetic assertions only, without
   claiming test execution or independent physical validation.
+- [x] Record `efedd1d`: normalize shadow depth and projected-edge coefficients
+  and windward clipping values by a common positive power of two selected from
+  the maximum absolute value's exponent; use `f64::MIN_POSITIVE` for a
+  subnormal maximum and leave all-zero triples unchanged.
+- [x] Record exact componentwise reversibility `a == scaled * power`, without
+  a tolerance; any mismatch returns `PrecisionLoss`, including rounding that
+  does not erase a nonzero value. Limit boundary preservation to stored inputs.
+- [x] Document `binary_normalization_preserves_exact_boundary`: `[3,-1,0]`
+  becomes `[1.5,-0.5,0]` with exactly zero affine distance at `X*0.75`, as a
+  synthetic assertion only, without claiming execution or independent physical
+  validation.

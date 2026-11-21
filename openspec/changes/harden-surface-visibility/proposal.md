@@ -12,7 +12,9 @@ fallback, `d5624ae` for exact projection from original vertex coordinates, and
 `b449468` for early exact projection when subtraction erases a nonzero operand,
 `e3cb8b5` for selective exact rechecks of zero projected determinants, and
 `3144d7c` for selective exact affine coefficients and amortized carry charges,
-and `8607c83` for precharged exact evaluation of uncertain affine distances.
+`8607c83` for precharged exact evaluation of uncertain affine distances, and
+`efedd1d` for reversible power-of-two normalization that preserves stored
+shadow boundaries and windward values.
 
 ## Scope
 
@@ -105,6 +107,20 @@ This change covers:
   binary64 and accepted fast paths have no global numeric error bound;
 - excluding all charged exact evaluation work from the area consistency
   tolerance, including affine distance work;
+- normalizing shadow depth and projected-edge coefficients and windward
+  clipping values by a common positive power of two instead of their maximum
+  absolute value; selecting the power from that maximum's binary64 exponent,
+  with `f64::MIN_POSITIVE` for a subnormal maximum, and leaving all-zero
+  triples unchanged;
+- requiring exact reversibility for every normalized component: original
+  `a == scaled * power` with no tolerance; returning `PrecisionLoss` on any
+  mismatch, including nonzero-to-zero loss or rounded subnormal scaling,
+  rather than shifting the stored affine half-space boundary;
+- recording `efedd1d` synthetic regression
+  `binary_normalization_preserves_exact_boundary`: `[3,-1,0]` normalizes to
+  `[1.5,-0.5,0]` and its affine distance at `X*0.75` is exactly zero; this
+  preserves the boundary of the stored coefficients, not unrounded geometry,
+  and is not test execution evidence or independent physical validation;
 - preserving representable shadow intersections when finite floating-point
   distance or coordinate differences would overflow during intersection
   arithmetic;
