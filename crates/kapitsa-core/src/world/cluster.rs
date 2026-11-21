@@ -1123,7 +1123,12 @@ impl PhysicsWorld {
         self.parts
             .remove(part.dense)
             .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
-
+        // Part geometry is keyed by PartId and outlives no destroyed part:
+        // leaving it behind would keep a detached mesh reachable until the
+        // whole body is removed.
+        if let Some(geometry) = &mut self.part_aerodynamic_geometry {
+            geometry.remove(&part);
+        }
         let root = if original_root == part {
             remaining_parts
                 .iter()

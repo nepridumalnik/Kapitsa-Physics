@@ -9,7 +9,7 @@ use crate::{
     joint::{FixedJoint, Joint, JointCommon, JointFrame},
     mass::MassProperties,
     rigid_body::RigidBody,
-    shape::{Shape, Sphere},
+    shape::{Shape, Sphere, TriangleMesh},
     transform::Transform,
     world::{ForceSource, ForceTarget, JointTarget},
 };
@@ -1174,6 +1174,53 @@ fn removing_non_root_part_preserves_cluster_root() {
     assert_eq!(world.remove_cluster_part(child), Ok(()));
     assert_eq!(world.cluster(body).map(RigidCluster::root), Some(root));
     assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
+fn destroying_cluster_part_removes_its_aerodynamic_geometry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+    let root = world.enable_cluster(body)?;
+    let child = world.add_cluster_part(
+        root,
+        ClusterPartDesc {
+            local_transform: Transform::identity(),
+            mass,
+            colliders: Vec::new(),
+            linear_velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+        },
+        WeldDesc {
+            frame_a: JointFrame::IDENTITY,
+            frame_b: JointFrame::IDENTITY,
+            strength: WeldStrength::Unbreakable,
+            stiffness: WeldStiffness {
+                linear: 1.0,
+                angular: 1.0,
+            },
+        },
+    )?;
+    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]])?;
+    world.set_part_aerodynamic_mesh(child, Some(mesh))?;
+    assert!(
+        world
+            .part_aerodynamic_geometry
+            .as_ref()
+            .is_some_and(|geometry| geometry.contains_key(&child))
+    );
+    world.destroy_cluster_part(child)?;
+    assert!(
+        !world
+            .part_aerodynamic_geometry
+            .as_ref()
+            .is_some_and(|geometry| geometry.contains_key(&child)),
+        "destroyed part must not leave aerodynamic geometry behind"
+    );
+    assert!(world.part_aerodynamic_mesh(child).is_none());
+    assert!(world.cluster_part(child).is_none());
+    Ok(())
 }
 
 #[test]
