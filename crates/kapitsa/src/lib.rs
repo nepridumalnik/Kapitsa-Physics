@@ -8,7 +8,6 @@
 // are checked with `deny(missing_docs)`.
 #[allow(missing_docs)]
 mod runtime;
-pub use runtime::{PhysicsSystem, PhysicsSystemBuilder};
 #[allow(missing_docs)]
 mod unified_error;
 
