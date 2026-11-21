@@ -330,6 +330,29 @@ fn two_bodies_share_one_cooked_shape() -> Result<(), Box<dyn std::error::Error>>
     );
     assert!((first_velocity - second_velocity).length() < 1e-12);
     assert!((first_velocity - local_velocity).length() < 1e-12);
+    use crate::aerodynamics::geometry::GeometryOwner;
+    let first_load = world.owner_mesh_pressure(first).ok_or("first pressure")?;
+    let second_load = world.owner_mesh_pressure(second).ok_or("second pressure")?;
+    assert_eq!(first_load.len(), 1);
+    assert_eq!(
+        second_load,
+        &[(GeometryOwner::Part(second_part), first_load[0].1)]
+    );
+    assert_eq!(first_load[0].0, GeometryOwner::Part(first_part));
+    world.set_part_aerodynamic_mesh(first_part, Some(taller_cube()?))?;
+    world.step(1e-8)?;
+    assert!(world.shape_binding(first).is_none());
+    assert_eq!(
+        world
+            .shape_binding(second)
+            .ok_or("unaffected binding")?
+            .shape(),
+        shape
+    );
+    assert_eq!(
+        body_velocity(&world, second)?,
+        body_velocity(&world, local)?
+    );
     Ok(())
 }
 
