@@ -185,7 +185,15 @@ pub(super) fn crossing_fraction(a: f64, b: f64) -> Result<f64, crate::Error> {
     let b = b.abs();
     let (small, large) = if a <= b { (a, b) } else { (b, a) };
     let ratio = finite(small / large)?;
-    let smaller_fraction = ratio / (1.0 + ratio);
+    let denominator = 1.0 + ratio;
+    let denominator_error = ratio - (denominator - 1.0);
+    let fraction = ratio / denominator;
+    // Correct the rounded ratio and the rounded sum without forming an
+    // underflowing product. All quantities in this correction are bounded.
+    let ratio_error = (-ratio).mul_add(large, small) / large;
+    let residual = (-fraction).mul_add(denominator, ratio);
+    let smaller_fraction =
+        fraction + ((residual + ratio_error) - fraction * denominator_error) / denominator;
     if smaller_fraction == 0.0 {
         return Err(crate::Error::from(GeometryError::PrecisionLoss));
     }
@@ -713,6 +721,17 @@ mod tests {
         let m = f64::from_bits(1);
         assert_eq!(crossing_fraction(2.0 * m, -m)?, 2.0 / 3.0);
         assert_eq!(crossing_fraction(m, -2.0 * m)?, 1.0 / 3.0);
+        Ok(())
+    }
+
+    #[test]
+    fn crossing_fraction_corrects_ratio_at_rounding_boundary() -> Result<(), crate::Error> {
+        let small = f64::from_bits(1);
+        let large = f64::MIN_POSITIVE * 2.0;
+        assert_eq!(
+            crossing_fraction(small, -large)?,
+            2.0_f64.powi(-53).next_down()
+        );
         Ok(())
     }
 
