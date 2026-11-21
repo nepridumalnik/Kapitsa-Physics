@@ -520,7 +520,11 @@ mod tests {
             let previous = world.cook_shape(&sources, false)?;
             world.bind_shape(body, previous, vec![part])?;
         }
-        let (sender, pending) = PendingShape::test_channel();
+        let (sender, mut pending) = PendingShape::test_channel();
+        let (entered, wait_started) = std::sync::mpsc::channel();
+        if policy == PendingAero::BlockStep {
+            pending.on_wait = Some(entered);
+        }
         world.track_body_shape(body, vec![part], policy, pending)?;
         let mesh = if policy == PendingAero::KeepPrevious {
             let replacement = Arc::new(super::super::shape_binding_tests::cube()?);
@@ -600,10 +604,21 @@ mod tests {
                 Vec3::ZERO
             );
         }
-        sender
-            .send(Ok(shape.take().ok_or("shape")?))
-            .map_err(|_| "disconnected")?;
-        advance(&mut world)?;
+        let shape = shape.take().ok_or("shape")?;
+        if policy == PendingAero::BlockStep {
+            let producer = std::thread::spawn(move || {
+                wait_started
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(|_| "step never entered wait")?;
+                sender.send(Ok(shape)).map_err(|_| "disconnected")
+            });
+            let result = advance(&mut world);
+            producer.join().map_err(|_| "producer panicked")??;
+            result?;
+        } else {
+            sender.send(Ok(shape)).map_err(|_| "disconnected")?;
+            advance(&mut world)?;
+        }
         assert!(world.shape_binding(body).is_some());
         assert!(
             world

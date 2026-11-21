@@ -77,6 +77,8 @@ impl PendingAero {
 
 /// One pending cook. Dropping it discards the result without blocking.
 pub struct PendingShape {
+    #[cfg(test)]
+    pub(crate) on_wait: Option<mpsc::Sender<()>>,
     cancelled: Arc<AtomicBool>,
     result: std::sync::Mutex<mpsc::Receiver<Result<CookedShape, crate::Error>>>,
 }
@@ -94,12 +96,17 @@ impl PendingShape {
         (
             sender,
             Self {
+                on_wait: None,
                 cancelled: Arc::new(AtomicBool::new(false)),
                 result: std::sync::Mutex::new(receiver),
             },
         )
     }
     pub(crate) fn wait(&mut self) -> Result<Result<CookedShape, crate::Error>, mpsc::TryRecvError> {
+        #[cfg(test)]
+        if let Some(signal) = self.on_wait.take() {
+            let _ = signal.send(());
+        }
         self.result
             .get_mut()
             .map_err(|_| mpsc::TryRecvError::Disconnected)?
@@ -164,6 +171,8 @@ impl ShapeWorker {
                 mpsc::TrySendError::Disconnected(_) => SubmitError::Disconnected,
             })?;
         Ok(PendingShape {
+            #[cfg(test)]
+            on_wait: None,
             cancelled,
             result: std::sync::Mutex::new(receiver),
         })
