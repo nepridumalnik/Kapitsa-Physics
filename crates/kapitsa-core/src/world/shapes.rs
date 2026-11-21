@@ -170,6 +170,7 @@ impl PhysicsWorld {
                 result: Ok(cook),
             },
         );
+        self.body_revision = self.body_revision.wrapping_add(1);
         Ok(())
     }
 
@@ -182,9 +183,14 @@ impl PhysicsWorld {
     /// Stops tracking the latest request without changing the installed binding.
     /// An in-flight result for that request can no longer be published.
     pub fn cancel_body_shape(&mut self, body: BodyId) -> bool {
-        self.pending_shapes
+        let cancelled = self
+            .pending_shapes
             .as_mut()
-            .is_some_and(|jobs| jobs.remove(&body).is_some())
+            .is_some_and(|jobs| jobs.remove(&body).is_some());
+        if cancelled {
+            self.body_revision = self.body_revision.wrapping_add(1);
+        }
+        cancelled
     }
 
     /// Returns the state of the latest request, or of the installed binding.
@@ -393,6 +399,7 @@ impl PhysicsWorld {
             self.shapes.remove(id);
             return Err(error);
         }
+        self.body_revision = self.body_revision.wrapping_add(1);
         Ok(id)
     }
 
