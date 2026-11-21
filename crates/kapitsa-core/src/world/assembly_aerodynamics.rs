@@ -476,37 +476,6 @@ pub(super) fn hull_configured(entry: &BodyEntry, parts: &DensePool<ClusterPart>)
     })
 }
 
-pub(super) fn wave_configured(
-    entry: &BodyEntry,
-    geometry: Option<&HashMap<PartId, PartGeometry>>,
-) -> bool {
-    entry.cluster.as_ref().is_some_and(|cluster| {
-        cluster.parts().iter().any(|part| {
-            matches!(
-                geometry.and_then(|items| items.get(part)),
-                Some(PartGeometry::Wave(_))
-            )
-        })
-    })
-}
-
-pub(super) fn shielding_configured(
-    entry: &BodyEntry,
-    parts: &DensePool<ClusterPart>,
-    geometry: Option<&HashMap<PartId, PartGeometry>>,
-) -> bool {
-    configured(entry, geometry)
-        && entry.cluster.as_ref().is_some_and(|cluster| {
-            cluster.parts().iter().any(|id| {
-                parts.get(id.dense).is_some_and(|part| {
-                    part.aerodynamic_wings
-                        .iter()
-                        .any(|wing| wing.has_footprint())
-                })
-            })
-        })
-}
-
 pub(super) fn configured(
     entry: &BodyEntry,
     geometry: Option<&HashMap<PartId, PartGeometry>>,

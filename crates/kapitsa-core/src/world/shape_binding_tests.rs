@@ -520,6 +520,38 @@ fn part_desc(mass: MassProperties) -> ClusterPartDesc {
     }
 }
 
+#[rstest::rstest]
+#[case::current(false)]
+#[case::stale(true)]
+fn unstaged_shards_apply_bound_mesh_pressure(
+    #[case] stale: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mesh = Arc::new(cube()?);
+    let mut world = wind_world()?;
+    let (body, part) = clustered_shared_body(&mut world, Vec3::ZERO, &mesh)?;
+    let sources = [source(&mesh, Vec3::ZERO, 0)?];
+    let shape = world.cook_shape(&sources, false)?;
+    world.bind_shape(body, shape, vec![part])?;
+    if stale {
+        world.set_part_aerodynamic_mesh(part, Some(taller_cube()?))?;
+    }
+    let mut shards = [Vec::new()];
+    world.fill_step_shards(&mut shards)?;
+    assert!(
+        world.shape_binding(body).is_some(),
+        "snapshot fill must not mutate bindings"
+    );
+    let step = shards[0].first_mut().ok_or("missing body snapshot")?;
+    step.integrate(TOPOLOGY_DT)?;
+    let predicted = step.predicted.ok_or("missing prediction")?;
+    assert!(predicted.linear_velocity().length() > 1e-6);
+    world.step(TOPOLOGY_DT)?;
+    let actual = world.body(body).ok_or("missing body")?.state();
+    assert_eq!(predicted.linear_velocity(), actual.linear_velocity());
+    assert_eq!(predicted.angular_velocity(), actual.angular_velocity());
+    Ok(())
+}
+
 const TOPOLOGY_DT: f64 = 1e-8;
 
 fn topology_step(world: &mut PhysicsWorld, sharded: bool) -> Result<(), crate::Error> {

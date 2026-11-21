@@ -6245,14 +6245,10 @@ impl PhysicsWorld {
                             let mut temporary_assembly = None;
                             let shared = self.shared_shape(step.body_id, entry);
                             let local_assembly = if staged.is_none()
-                                && (assembly_aerodynamics::wave_configured(
+                                && assembly_aerodynamics::configured(
                                     entry,
                                     self.part_aerodynamic_geometry.as_ref(),
-                                ) || assembly_aerodynamics::shielding_configured(
-                                    entry,
-                                    &self.parts,
-                                    self.part_aerodynamic_geometry.as_ref(),
-                                )) {
+                                ) {
                                 assembly_aerodynamics::prepare(
                                     step.body_id,
                                     entry,
