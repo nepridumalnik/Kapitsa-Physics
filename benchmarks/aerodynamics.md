@@ -297,3 +297,7 @@ The subnormal crossing-ratio revision `98036f8` completed both benchmark
 targets. Small partial visibility measured 21.54 us median and wide
 projected edges 6.25 us median. A workspace test build ran concurrently;
 these values are not an isolated performance comparison.
+
+The crossing residual correction on `a633369` completed both benchmark
+targets. Small partial visibility measured 21.43 us median. The workspace
+test suite was active concurrently, so this is not an isolated comparison.
