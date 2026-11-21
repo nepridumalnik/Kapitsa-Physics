@@ -113,10 +113,15 @@ impl PhysicsWorld {
             .cluster_part(part)
             .ok_or(ClusterError::InvalidPartId)?
             .body();
-        self.parts
+        let entry = self
+            .parts
             .get_mut(part.dense)
-            .ok_or(ClusterError::InvalidPartId)?
-            .aerodynamic_wings = wings;
+            .ok_or(ClusterError::InvalidPartId)?;
+        entry.wing_revision = entry
+            .wing_revision
+            .checked_add(1)
+            .ok_or(ClusterError::ArithmeticOverflow)?;
+        entry.aerodynamic_wings = wings;
         self.invalidate_body_edit(body);
         Ok(())
     }
@@ -127,6 +132,39 @@ impl PhysicsWorld {
         part: PartId,
     ) -> Option<&[crate::aerodynamics::wing::WingSurface]> {
         Some(&self.cluster_part(part)?.aerodynamic_wings)
+    }
+
+    /// Returns the identity of a wing in the current part configuration.
+    /// Replacing the wing list invalidates all previously issued identities.
+    pub fn part_wing_id(&self, part: PartId, index: usize) -> Option<super::PartWingId> {
+        let entry = self.cluster_part(part)?;
+        entry.aerodynamic_wings.get(index)?;
+        Some(super::PartWingId {
+            part,
+            index,
+            revision: entry.wing_revision,
+        })
+    }
+
+    /// Changes control deflection in radians without invalidating shielding.
+    pub fn set_part_wing_deflection(
+        &mut self,
+        wing: super::PartWingId,
+        deflection: f64,
+    ) -> Result<(), Error> {
+        let entry = self
+            .cluster_part(wing.part)
+            .ok_or(ClusterError::InvalidPartId)?;
+        if entry.wing_revision != wing.revision {
+            return Err(crate::aerodynamics::wing::WingError::InvalidWingId.into());
+        }
+        self.parts
+            .get_mut(wing.part.dense)
+            .and_then(|part| part.aerodynamic_wings.get_mut(wing.index))
+            .ok_or(crate::aerodynamics::wing::WingError::InvalidWingId)?
+            .set_control_deflection(deflection)?;
+        self.body_revision = self.body_revision.wrapping_add(1);
+        Ok(())
     }
 
     /// Replaces explicit hull sections in the stable part-local frame.

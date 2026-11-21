@@ -201,6 +201,8 @@ pub enum WingError {
     InvalidParameters,
     /// The wing has no configured control to deflect.
     ControlNotConfigured,
+    /// The wing identity no longer resolves to a configured wing.
+    InvalidWingId,
     InvalidFlow,
     UnsupportedFlow,
     ArithmeticOverflow,

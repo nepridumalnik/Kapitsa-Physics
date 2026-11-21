@@ -627,6 +627,7 @@ impl PhysicsWorld {
                 local_transform: Transform::identity(),
                 mass,
                 colliders,
+                wing_revision: 0,
                 aerodynamic_wings: Vec::new(),
                 aerodynamic_hull: Vec::new(),
             })
@@ -868,6 +869,7 @@ impl PhysicsWorld {
                 local_transform: desc.local_transform,
                 mass: desc.mass,
                 colliders: Vec::new(),
+                wing_revision: 0,
                 aerodynamic_wings: Vec::new(),
                 aerodynamic_hull: Vec::new(),
             })

@@ -15,6 +15,42 @@ use kapitsa_math::{Mat3, Quat};
 fn wing(local: Transform) -> Result<WingSurface, crate::Error> {
     WingSurface::new(FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?, local, 1.0)
 }
+
+#[test]
+fn wing_control_ids_survive_deflection_but_not_replacement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?)?;
+    let part = world.enable_cluster(body)?;
+    let surface = wing(Transform::identity())?.with_control(WingControl::new(0.0, 0.2, 1.0)?);
+    world.set_part_aerodynamic_wings(part, vec![surface.clone()])?;
+    let id = world.part_wing_id(part, 0).ok_or("missing wing")?;
+    world.set_part_wing_deflection(id, 0.1)?;
+    assert_eq!(world.part_wing_id(part, 0), Some(id));
+    let revision = world.body_revision;
+    assert!(world.set_part_wing_deflection(id, f64::NAN).is_err());
+    assert_eq!(world.body_revision, revision);
+    world.set_part_aerodynamic_wings(part, vec![surface])?;
+    assert_ne!(world.part_wing_id(part, 0), Some(id));
+    let error = world
+        .set_part_wing_deflection(id, 0.1)
+        .err()
+        .ok_or("stale ID accepted")?;
+    use crate::aerodynamics::wing::WingError;
+    assert_eq!(
+        error.downcast_ref::<WingError>(),
+        Some(&WingError::InvalidWingId)
+    );
+    assert!(
+        PhysicsWorld::new()
+            .set_part_wing_deflection(id, 0.1)
+            .is_err()
+    );
+    Ok(())
+}
 fn weld() -> WeldDesc {
     WeldDesc {
         frame_a: JointFrame::new(Vec3::ZERO, Quat::IDENTITY),

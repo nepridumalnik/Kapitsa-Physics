@@ -304,6 +304,14 @@ pub struct PartWingWrench {
     pub wrench: crate::aerodynamics::pressure::PressureWrench,
 }
 
+/// Identifies one wing in a part's current wing configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PartWingId {
+    part: PartId,
+    index: usize,
+    revision: u64,
+}
+
 /// Diagnostic witness for one CCD solver event, not a certificate of a complete
 /// impact history. Time is in seconds from the start of the step; states are
 /// ordered before/after, then by the contact pair's A/B sides. The after state
