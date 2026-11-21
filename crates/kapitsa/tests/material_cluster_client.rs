@@ -428,6 +428,7 @@ async fn part_aerodynamic_geometry_commands_apply_loads_on_both_executors()
             BodyShapeStatus::Ready(published)
         );
         client.set_part_aerodynamic_colliders(part, true).await?;
+        assert_eq!(client.poll_body_shape(id).await?, BodyShapeStatus::Unmanaged);
         client
             .set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1024)?)
             .await?;
