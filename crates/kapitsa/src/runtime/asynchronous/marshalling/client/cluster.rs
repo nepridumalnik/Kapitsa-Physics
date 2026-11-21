@@ -122,6 +122,33 @@ impl PhysicsClient {
                 .await?,
         )
     }
+    /// Changes an existing wing's control deflection in radians.
+    pub async fn set_part_wing_deflection(
+        &self,
+        wing: kapitsa_core::world::PartWingId,
+        deflection: f64,
+    ) -> Result<(), Error> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartWingDeflection { wing, deflection })
+                .await?,
+        )
+    }
+
+    /// Reads a wing identity at the request's position in the command queue.
+    pub async fn part_wing_id(
+        &self,
+        part: PartId,
+        index: usize,
+    ) -> Result<Option<kapitsa_core::world::PartWingId>, Error> {
+        match self
+            .submit(PhysicsCommand::GetPartWingId { part, index })
+            .await?
+        {
+            PhysicsCommandResult::PartWingId(id) => Ok(id),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
+        }
+    }
+
     /// Replaces explicit hull sections in the stable part-local frame; empty clears.
     /// Takes owned configuration (including shared immutable Mach data) and applies
     /// it in queue order, even while paused. Loads remain additive; no coefficients

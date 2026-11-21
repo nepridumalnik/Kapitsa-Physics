@@ -874,6 +874,17 @@ remain subject to their documented domains and double-counting constraints.
 
 ### Explicit wing polars and control deflection
 
+To actuate an existing part wing, obtain its `PartWingId` with
+`PhysicsWorld::part_wing_id(part, index)` or the queued
+`PhysicsClient::part_wing_id` query, then call `set_part_wing_deflection` on
+the world or client. Deflections are in radians. The wing must already have a
+`WingControl`; invalid angles and stale identities are rejected. Replacing the
+part's wing list invalidates its old identities, but changing deflection does
+not rebuild the wing or its shielding. `SetPartWingDeflection` can also be
+included in an atomic command batch. Published `PartWingWrench` entries carry
+the same wing identity and report the applied world-space force and moment
+about the body COM.
+
 `WingPolar::new(mach, angles, coefficients)` validates a rectangular grid:
 there must be at least two finite strictly increasing knots on each axis,
 Mach is nonnegative, and values have exactly `mach.len() * angles.len()` entries.

@@ -162,6 +162,17 @@ pub struct WingControl {
 }
 
 impl WingControl {
+    /// Current deflection, in radians.
+    pub fn deflection(&self) -> f64 {
+        self.deflection
+    }
+
+    /// Changes the deflection in radians, leaving the control unchanged on error.
+    pub fn set_deflection(&mut self, deflection: f64) -> Result<(), crate::Error> {
+        *self = Self::new(deflection, self.max_deflection, self.effectiveness)?;
+        Ok(())
+    }
+
     pub fn new(
         deflection: f64,
         max_deflection: f64,
@@ -188,6 +199,10 @@ impl WingControl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WingError {
     InvalidParameters,
+    /// The wing has no configured control to deflect.
+    ControlNotConfigured,
+    /// The wing identity no longer resolves to a configured wing.
+    InvalidWingId,
     InvalidFlow,
     UnsupportedFlow,
     ArithmeticOverflow,
@@ -522,6 +537,18 @@ impl WingSurface {
     pub fn with_control(mut self, control: WingControl) -> Self {
         self.control = Some(control);
         self
+    }
+
+    /// Changes an existing control's deflection without modifying wing geometry.
+    pub fn set_control_deflection(&mut self, deflection: f64) -> Result<(), crate::Error> {
+        self.control
+            .as_mut()
+            .ok_or(WingError::ControlNotConfigured)?
+            .set_deflection(deflection)
+    }
+
+    pub(crate) fn control(&self) -> Option<WingControl> {
+        self.control
     }
 
     /// Evaluate at physical AoA, with an optional configured incidence shift.
@@ -1511,6 +1538,57 @@ mod tests {
         }
         assert!(WingControl::new(0.21, 0.2, 1.0).is_err());
         assert!(WingControl::new(0.0, 0.2, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn runtime_deflection_uses_periodic_polar_at_forward_and_reverse_incidence()
+    -> Result<(), crate::Error> {
+        let row = [0.0, -1.0, 0.0, 1.0, 0.0].map(|lift| WingCoefficients { lift, drag: 0.1 });
+        let polar = WingPolar::new(
+            vec![0.5, 2.0, 8.0],
+            vec![-PI, -PI / 2.0, 0.0, PI / 2.0, PI],
+            row.repeat(3),
+        )?;
+        let mut wing = WingSurface::new(
+            FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
+            crate::transform::Transform::identity(),
+            1.0,
+        )?
+        .with_polar(std::sync::Arc::new(polar))
+        .with_periodic_full_angle_polar()?
+        .with_control(WingControl::new(0.0, 0.2, 1.0)?);
+        for mach in [0.5, 2.0, 8.0] {
+            for (angle, sign) in [(0.0, 1.0), (PI, -1.0)] {
+                let neutral = wing.coefficients(angle, mach)?;
+                assert_eq!(neutral.lift, 0.0);
+                for deflection in [-0.1, 0.1] {
+                    wing.set_control_deflection(deflection)?;
+                    let lift = wing.coefficients(angle, mach)?.lift;
+                    assert!((lift - sign * deflection / (PI / 2.0)).abs() < 1e-14);
+                }
+                wing.set_control_deflection(0.0)?;
+                assert_eq!(wing.coefficients(angle, mach)?, neutral);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_deflection_validation_preserves_previous_value() -> Result<(), crate::Error> {
+        let mut control = WingControl::new(0.0, 0.2, 1.0)?;
+        control.set_deflection(-0.2)?;
+        for invalid in [f64::NAN, f64::INFINITY, 0.21, -0.21] {
+            let err = control.set_deflection(invalid).err();
+            assert_eq!(
+                err.as_ref()
+                    .and_then(|error| error.downcast_ref::<WingError>()),
+                Some(&WingError::InvalidParameters)
+            );
+            assert_eq!(control.deflection(), -0.2);
+        }
+        control.set_deflection(0.0)?;
+        assert_eq!(control.deflection(), 0.0);
+        Ok(())
     }
 
     #[test]

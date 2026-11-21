@@ -113,10 +113,15 @@ impl PhysicsWorld {
             .cluster_part(part)
             .ok_or(ClusterError::InvalidPartId)?
             .body();
-        self.parts
+        let entry = self
+            .parts
             .get_mut(part.dense)
-            .ok_or(ClusterError::InvalidPartId)?
-            .aerodynamic_wings = wings;
+            .ok_or(ClusterError::InvalidPartId)?;
+        entry.wing_revision = entry
+            .wing_revision
+            .checked_add(1)
+            .ok_or(ClusterError::ArithmeticOverflow)?;
+        entry.aerodynamic_wings = wings;
         self.invalidate_body_edit(body);
         Ok(())
     }
@@ -127,6 +132,59 @@ impl PhysicsWorld {
         part: PartId,
     ) -> Option<&[crate::aerodynamics::wing::WingSurface]> {
         Some(&self.cluster_part(part)?.aerodynamic_wings)
+    }
+
+    /// Returns the identity of a wing in the current part configuration.
+    /// Replacing the wing list invalidates all previously issued identities.
+    pub fn part_wing_id(&self, part: PartId, index: usize) -> Option<super::PartWingId> {
+        let entry = self.cluster_part(part)?;
+        entry.aerodynamic_wings.get(index)?;
+        Some(super::PartWingId {
+            part,
+            index,
+            revision: entry.wing_revision,
+        })
+    }
+
+    /// Changes control deflection in radians without invalidating shielding.
+    pub fn set_part_wing_deflection(
+        &mut self,
+        wing: super::PartWingId,
+        deflection: f64,
+    ) -> Result<(), Error> {
+        let entry = self
+            .cluster_part(wing.part)
+            .ok_or(ClusterError::InvalidPartId)?;
+        if entry.wing_revision != wing.revision {
+            return Err(crate::aerodynamics::wing::WingError::InvalidWingId.into());
+        }
+        self.parts
+            .get_mut(wing.part.dense)
+            .and_then(|part| part.aerodynamic_wings.get_mut(wing.index))
+            .ok_or(crate::aerodynamics::wing::WingError::InvalidWingId)?
+            .set_control_deflection(deflection)?;
+        self.body_revision = self.body_revision.wrapping_add(1);
+        Ok(())
+    }
+
+    pub(crate) fn validate_part_wing_deflection(
+        &self,
+        wing: super::PartWingId,
+        deflection: f64,
+    ) -> Result<(), Error> {
+        use crate::aerodynamics::wing::WingError;
+        let entry = self
+            .cluster_part(wing.part)
+            .ok_or(ClusterError::InvalidPartId)?;
+        let surface = entry
+            .aerodynamic_wings
+            .get(wing.index)
+            .filter(|_| entry.wing_revision == wing.revision)
+            .ok_or(WingError::InvalidWingId)?;
+        surface
+            .control()
+            .ok_or(WingError::ControlNotConfigured)?
+            .set_deflection(deflection)
     }
 
     /// Replaces explicit hull sections in the stable part-local frame.
@@ -2060,6 +2118,67 @@ mod tests {
             let clear = *gains.get(2).ok_or("clear")?;
             assert!(blocked.abs() < 1e-12, "{gains:?}");
             assert!(partial > 0.0 && partial < clear, "{gains:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_deflection_reuses_shielding_cache() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::wing::{FiniteWing, WingControl, WingSurface};
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::X * -50.0,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+            let part = world.enable_cluster(body)?;
+            world.set_part_wave_source_mesh(
+                part,
+                Some(super::super::shape_binding_tests::cube()?),
+            )?;
+            let wing = WingSurface::new(
+                FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
+                Transform::identity(),
+                4.0,
+            )?
+            .with_rectangular_footprint(Vec3::splat(0.5), 2.0, 2.0)?
+            .with_spanwise_projection(0.1)?
+            .with_control(WingControl::new(0.0, 0.2, 1.0)?);
+            world.set_part_aerodynamic_wings(part, vec![wing])?;
+            let id = world.part_wing_id(part, 0).ok_or("missing wing")?;
+            let mut shards = [Vec::new(), Vec::new()];
+            let mut step = |world: &mut PhysicsWorld| {
+                if sharded {
+                    world.step_with_shards(1e-8, &mut shards, &SequentialExecutor, 2)
+                } else {
+                    world.step(1e-8)
+                }
+            };
+            let cache_address = |world: &PhysicsWorld| {
+                world
+                    .assembly_aerodynamics
+                    .as_ref()?
+                    .get(&body)
+                    .map(|entry| entry.wing_cache.as_ptr())
+            };
+            step(&mut world)?;
+            let neutral = *world
+                .part_wing_wrenches()
+                .first()
+                .ok_or("missing neutral load")?;
+            let cached = cache_address(&world).ok_or("missing shielding cache")?;
+            world.set_part_wing_deflection(id, 0.1)?;
+            assert_eq!(cache_address(&world), Some(cached));
+            step(&mut world)?;
+            assert_eq!(cache_address(&world), Some(cached));
+            let deflected = world
+                .part_wing_wrenches()
+                .first()
+                .ok_or("missing deflected load")?;
+            assert_eq!(deflected.wing, id);
+            assert!(deflected.wrench.force.z > neutral.wrench.force.z);
         }
         Ok(())
     }

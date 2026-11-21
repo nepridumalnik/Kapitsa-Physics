@@ -25,6 +25,7 @@ fn part(world: &mut PhysicsWorld, body: BodyId) -> PartId {
         local_transform: Transform::identity(),
         mass,
         colliders: Vec::new(),
+        wing_revision: 0,
         aerodynamic_wings: Vec::new(),
         aerodynamic_hull: Vec::new(),
     }) {

@@ -19,6 +19,7 @@ pub struct ClusterPartDesc {
 /// A part and the body and colliders currently representing it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClusterPart {
+    pub(crate) wing_revision: u64,
     pub(crate) body: BodyId,
     pub(crate) local_transform: Transform,
     pub(crate) mass: MassProperties,

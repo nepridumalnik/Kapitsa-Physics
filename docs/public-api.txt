@@ -125,6 +125,8 @@ MaterialId
 MeshPressureModel
 OverlapHit
 PartId
+PartWingId
+PartWingWrench
 PhysicsBatchResult
 PhysicsBatchResults
 PhysicsClient

@@ -41,3 +41,9 @@ one cooked occupancy serves several mesh vessels, with lazy binding validation
 and body-local fallback. It adds no pressure closure or experimental validation
 and therefore does not change any acceptance gap. This document does not
 change those priorities, grant merge authorization, or imply stage 3 is complete.
+
+Runtime part-wing actuation adds revisioned wing identities, atomic deflection
+batches, and per-wing load attribution. Synthetic polar tests cover Mach 0.5,
+2 and 8, forward and reverse flow, and both step paths. An isolated allocator
+test recorded zero allocations and zero bytes for 128 warmed control batches;
+this is not a claim that an entire physics step is allocation-free.

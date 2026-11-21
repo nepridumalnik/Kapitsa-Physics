@@ -15,6 +15,81 @@ use kapitsa_math::{Mat3, Quat};
 fn wing(local: Transform) -> Result<WingSurface, crate::Error> {
     WingSurface::new(FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?, local, 1.0)
 }
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "Run alone: process-wide allocation counter"]
+fn wing_control_batch_adds_no_allocations() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::command::{BatchScratch, PhysicsCommand, apply_command_batch};
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?)?;
+    let part = world.enable_cluster(body)?;
+    world.set_part_aerodynamic_wings(
+        part,
+        vec![wing(Transform::identity())?.with_control(WingControl::new(0.0, 0.2, 1.0)?)],
+    )?;
+    let wing = world.part_wing_id(part, 0).ok_or("missing wing")?;
+    let mut scratch = BatchScratch::default();
+    let commands =
+        [-0.1, 0.1].map(|deflection| PhysicsCommand::SetPartWingDeflection { wing, deflection });
+    apply_command_batch(&mut world, &commands, &mut scratch)?;
+    let counts = super::tests::tracked_world_allocations(|| {
+        for _ in 0..128 {
+            assert!(apply_command_batch(&mut world, &commands, &mut scratch).is_ok());
+        }
+    });
+    println!("128 warm wing control batches: {counts:?} (allocations, bytes)");
+    assert_eq!(counts, (0, 0));
+    Ok(())
+}
+
+#[test]
+fn wing_control_ids_survive_deflection_but_not_replacement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?)?;
+    let part = world.enable_cluster(body)?;
+    let surface = wing(Transform::identity())?.with_control(WingControl::new(0.0, 0.2, 1.0)?);
+    world.set_part_aerodynamic_wings(part, vec![surface.clone()])?;
+    let id = world.part_wing_id(part, 0).ok_or("missing wing")?;
+    use crate::command::{PhysicsCommand, PhysicsCommandResult};
+    assert_eq!(
+        world.apply_command(PhysicsCommand::GetPartWingId { part, index: 0 })?,
+        PhysicsCommandResult::PartWingId(Some(id))
+    );
+    world.set_part_wing_deflection(id, 0.1)?;
+    assert_eq!(world.part_wing_id(part, 0), Some(id));
+    let revision = world.body_revision;
+    assert!(world.set_part_wing_deflection(id, f64::NAN).is_err());
+    assert_eq!(world.body_revision, revision);
+    world.set_part_aerodynamic_wings(part, vec![surface])?;
+    assert_ne!(world.part_wing_id(part, 0), Some(id));
+    assert_eq!(
+        world.apply_command(PhysicsCommand::GetPartWingId { part, index: 1 })?,
+        PhysicsCommandResult::PartWingId(None)
+    );
+    let error = world
+        .set_part_wing_deflection(id, 0.1)
+        .err()
+        .ok_or("stale ID accepted")?;
+    use crate::aerodynamics::wing::WingError;
+    assert_eq!(
+        error.downcast_ref::<WingError>(),
+        Some(&WingError::InvalidWingId)
+    );
+    assert!(
+        PhysicsWorld::new()
+            .set_part_wing_deflection(id, 0.1)
+            .is_err()
+    );
+    Ok(())
+}
 fn weld() -> WeldDesc {
     WeldDesc {
         frame_a: JointFrame::new(Vec3::ZERO, Quat::IDENTITY),
@@ -25,6 +100,41 @@ fn weld() -> WeldDesc {
             angular: 1.0,
         },
     }
+}
+
+#[test]
+fn wing_deflection_batch_validates_before_mutating() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::command::{BatchScratch, PhysicsCommand, apply_command_batch};
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?)?;
+    let part = world.enable_cluster(body)?;
+    let surface = wing(Transform::identity())?.with_control(WingControl::new(0.0, 0.2, 1.0)?);
+    world.set_part_aerodynamic_wings(part, vec![surface.clone(), surface])?;
+    let command = |index, deflection| -> Result<_, Box<dyn std::error::Error>> {
+        Ok(PhysicsCommand::SetPartWingDeflection {
+            wing: world.part_wing_id(part, index).ok_or("missing wing")?,
+            deflection,
+        })
+    };
+    let invalid = [command(0, 0.1)?, command(1, 0.3)?];
+    let valid = [command(0, 0.1)?, command(1, -0.1)?];
+    let values = |world: &PhysicsWorld| -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+        world
+            .part_aerodynamic_wings(part)
+            .ok_or("missing wings")?
+            .iter()
+            .map(|surface| Ok(surface.control().ok_or("missing control")?.deflection()))
+            .collect()
+    };
+    let mut scratch = BatchScratch::default();
+    assert!(apply_command_batch(&mut world, &invalid, &mut scratch).is_err());
+    assert_eq!(values(&world)?, [0.0, 0.0]);
+    apply_command_batch(&mut world, &valid, &mut scratch)?;
+    assert_eq!(values(&world)?, [0.1, -0.1]);
+    Ok(())
 }
 fn advance(world: &mut PhysicsWorld, sharded: bool) -> Result<(), crate::Error> {
     if sharded {
@@ -37,6 +147,64 @@ fn advance(world: &mut PhysicsWorld, sharded: bool) -> Result<(), crate::Error> 
     } else {
         world.step(1e-5)
     }
+}
+
+#[test]
+fn runtime_wing_loads_match_in_both_step_paths() -> Result<(), Box<dyn std::error::Error>> {
+    use std::{f64::consts::PI, sync::Arc};
+    let row = [0.0, -1.0, 0.0, 1.0, 0.0].map(|lift| WingCoefficients { lift, drag: 0.1 });
+    let polar = Arc::new(WingPolar::new(
+        vec![0.25, 9.0],
+        vec![-PI, -PI / 2.0, 0.0, PI / 2.0, PI],
+        row.repeat(2),
+    )?);
+    for mach in [0.5, 2.0, 8.0] {
+        for direction in [-1.0, 1.0] {
+            let mut expected = Vec::new();
+            for sharded in [false, true] {
+                let mut world = PhysicsWorld::new();
+                world.set_atmosphere(test_atmosphere(AtmosphericState::new(
+                    1.0,
+                    Vec3::X * (-340.0 * mach * direction),
+                )?));
+                let pose = Transform::identity();
+                let body = world.add_body(RigidBody::new_dynamic(
+                    pose,
+                    MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?,
+                )?)?;
+                let part = world.enable_cluster(body)?;
+                let surface = wing(Transform::new(Vec3::X, Quat::IDENTITY)?)?
+                    .with_polar(Arc::clone(&polar))
+                    .with_periodic_full_angle_polar()?
+                    .with_control(WingControl::new(0.0, 0.2, 1.0)?);
+                world.set_part_aerodynamic_wings(part, vec![surface])?;
+                let id = world.part_wing_id(part, 0).ok_or("missing wing")?;
+                let mut loads = Vec::new();
+                for deflection in [0.0, -0.1, 0.1, 0.0] {
+                    world.edit_body(body, |motion| {
+                        motion.set_transform(pose)?;
+                        motion.set_linear_velocity(Vec3::ZERO)?;
+                        motion.set_angular_velocity(Vec3::ZERO)
+                    })?;
+                    world.set_part_wing_deflection(id, deflection)?;
+                    advance(&mut world, sharded)?;
+                    let load = world.part_wing_wrenches().first().ok_or("missing load")?;
+                    assert_eq!(load.wing, id);
+                    let force_z = 0.5 * (340.0 * mach).powi(2) * deflection / (PI / 2.0);
+                    assert!((load.wrench.force.z - force_z).abs() < 1e-9 * (1.0 + force_z.abs()));
+                    assert_eq!(load.wrench.moment, Vec3::X.cross(load.wrench.force));
+                    loads.push(load.wrench);
+                }
+                assert_eq!(loads[0], loads[3]);
+                if sharded {
+                    assert_eq!(loads, expected);
+                } else {
+                    expected = loads;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -185,6 +353,9 @@ fn part_wing_snapshot_sums_force_and_moment_and_reuses_buffers()
         assert_eq!(loads.len(), 2);
         assert_eq!(loads[0].wrench, a);
         assert_eq!(loads[1].wrench, b);
+        assert_eq!(Some(loads[0].wing), world.part_wing_id(part, 0));
+        assert_eq!(Some(loads[1].wing), world.part_wing_id(part, 1));
+        assert_ne!(loads[0].wing, loads[1].wing);
         let sum = loads[0].wrench.force + loads[1].wrench.force;
         let moment = loads[0].wrench.moment + loads[1].wrench.moment;
         assert!(moment.length() < 1e-12);

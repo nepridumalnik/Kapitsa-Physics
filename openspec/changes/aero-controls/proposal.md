@@ -1,9 +1,7 @@
 # Aero controls: runtime-controllable aerodynamic surfaces
 
-Status: **planned, not started**. Branch: `feat/aero_controls`, created from the
-updated `master` after `feat/aero_rest` merges. It is independent of
-`aero-shapes` and `aero-async`. The spec deltas and unchecked tasks record the
-agreed acceptance criteria; they are refined when the change starts.
+Status: **implemented on `feat/aero_controls`**. This change is independent of
+`aero-shapes` and `aero-async`.
 
 ## Summary
 

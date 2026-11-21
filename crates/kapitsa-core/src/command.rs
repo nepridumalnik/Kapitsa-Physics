@@ -215,6 +215,16 @@ pub enum PhysicsCommand {
         part: PartId,
         wings: Vec<crate::aerodynamics::wing::WingSurface>,
     },
+    /// Changes an existing part wing's control deflection in radians.
+    SetPartWingDeflection {
+        wing: crate::world::PartWingId,
+        deflection: f64,
+    },
+    /// Reads the identity of the current wing at this part-local index.
+    GetPartWingId {
+        part: PartId,
+        index: usize,
+    },
     /// Replaces owned hull sections in the stable part-local frame; empty clears.
     /// Applied in queue order, including while paused; not an atomic-motion command.
     SetPartAerodynamicHull {
@@ -691,6 +701,8 @@ pub enum PhysicsCommandResult {
     Material(Option<PhysicsMaterial>),
     /// A newly created cluster part ID.
     Part(PartId),
+    /// A wing identity returned by a read-only query.
+    PartWingId(Option<crate::world::PartWingId>),
     /// Component body IDs after a split.
     Bodies(Vec<BodyId>),
     /// Cluster found by a read-only query.
@@ -789,6 +801,15 @@ fn apply_command_batch_staged(
     scratch: &mut BatchScratch,
 ) -> Result<(), crate::Error> {
     for (command_index, command) in commands.iter().enumerate() {
+        if let PhysicsCommand::SetPartWingDeflection { wing, deflection } = command {
+            world
+                .validate_part_wing_deflection(*wing, *deflection)
+                .map_err(|error| CommandBatchError {
+                    command_index: Some(command_index),
+                    error: CommandError::from_unified(error),
+                })?;
+            continue;
+        }
         if let PhysicsCommand::SetForceSource {
             id,
             local_point,
@@ -959,6 +980,17 @@ fn apply_command_batch_staged(
                 })
             })?;
     }
+    // No staged command changes wing identity or control limits.
+    for (command_index, command) in commands.iter().enumerate() {
+        if let PhysicsCommand::SetPartWingDeflection { wing, deflection } = command {
+            world
+                .set_part_wing_deflection(*wing, *deflection)
+                .map_err(|error| CommandBatchError {
+                    command_index: Some(command_index),
+                    error: CommandError::from_unified(error),
+                })?;
+        }
+    }
     Ok(())
 }
 
@@ -1081,6 +1113,8 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::AddClusterPart { .. }
         | PhysicsCommand::AddPartCollider { .. }
         | PhysicsCommand::SetPartAerodynamicWings { .. }
+        | PhysicsCommand::SetPartWingDeflection { .. }
+        | PhysicsCommand::GetPartWingId { .. }
         | PhysicsCommand::SetPartAerodynamicHull { .. }
         | PhysicsCommand::SetPartAerodynamicMesh { .. }
         | PhysicsCommand::SetPartAerodynamicColliders { .. }
@@ -1163,6 +1197,8 @@ fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result
         | PhysicsCommand::AddClusterPart { .. }
         | PhysicsCommand::AddPartCollider { .. }
         | PhysicsCommand::SetPartAerodynamicWings { .. }
+        | PhysicsCommand::SetPartWingDeflection { .. }
+        | PhysicsCommand::GetPartWingId { .. }
         | PhysicsCommand::SetPartAerodynamicHull { .. }
         | PhysicsCommand::SetPartAerodynamicMesh { .. }
         | PhysicsCommand::SetPartAerodynamicColliders { .. }
@@ -1261,6 +1297,13 @@ pub(crate) fn apply_command_inner(
         }
         PhysicsCommand::AddPartCollider { part, collider } => {
             PhysicsCommandResult::Collider(world.add_part_collider(part, collider)?)
+        }
+        PhysicsCommand::SetPartWingDeflection { wing, deflection } => {
+            world.set_part_wing_deflection(wing, deflection)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::GetPartWingId { part, index } => {
+            PhysicsCommandResult::PartWingId(world.part_wing_id(part, index))
         }
         PhysicsCommand::SetPartAerodynamicWings { part, wings } => {
             world.set_part_aerodynamic_wings(part, wings)?;
