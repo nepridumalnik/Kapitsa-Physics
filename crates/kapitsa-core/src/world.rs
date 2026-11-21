@@ -6792,6 +6792,7 @@ impl PhysicsWorld {
         if let Some(bindings) = &mut self.shape_bindings {
             bindings.remove(&id);
         }
+        self.cancel_body_shape(id);
         Some(removed)
     }
 
