@@ -79,7 +79,84 @@ fn wing_load(wings: &[WingSurface], flow: PressureFlow) -> PressureWrench {
     total
 }
 
-fn main() -> Result<(), kapitsa_core::Error> {
+fn post_edit_steps() -> Result<(), Box<dyn std::error::Error>> {
+    use kapitsa_core::aerodynamics::{
+        Atmosphere, SphericalAtmosphere,
+        shape::worker::{PendingAero, ShapeWorker},
+    };
+    use kapitsa_core::{mass::MassProperties, world::BodyShapeStatus};
+    let worker = ShapeWorker::new(2)?;
+    let atmosphere = Atmosphere::Sphere(
+        SphericalAtmosphere::builder()
+            .center(Vec3::X * -100.0)
+            .reference_radius(100.0)
+            .reference_density(1.0)
+            .height(100.0)
+            .profile(kapitsa_core::aerodynamics::DensityProfile::Exponential {
+                scale_height: 100.0,
+            })
+            .wind(Vec3::X * -2000.0)
+            .build()?,
+    );
+    let mut samples = [Vec::new(), Vec::new()];
+    for sample in 0..(SAMPLES + 3) {
+        let mut loads = [None, None];
+        for route in [sample % 2, 1 - sample % 2] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(atmosphere);
+            let body = world.add_body(RigidBody::new_dynamic(
+                Transform::identity(),
+                MassProperties::new(100.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY * 100.0)?,
+            )?)?;
+            let part = world.enable_cluster(body)?;
+            world.set_part_aerodynamic_mesh(part, Some(plates(1)))?;
+            if route == 1 {
+                world.manage_body_shape(body, PendingAero::BlockStep, &worker)?;
+            }
+            world.step(1e-8)?;
+            world.set_part_aerodynamic_mesh(part, Some(plates(16)))?;
+            let start = Instant::now();
+            world.step(1e-8)?;
+            let elapsed = start.elapsed();
+            if route == 1 {
+                assert!(matches!(
+                    world.body_shape_status(body),
+                    BodyShapeStatus::Ready(_)
+                ));
+            }
+            let wrench = world
+                .owner_mesh_pressure(body)
+                .and_then(|loads| loads.first())
+                .ok_or("missing post-edit pressure")?
+                .1;
+            assert!(wrench.force.length() > 0.0);
+            loads[route] = Some(wrench);
+            if sample >= 3 {
+                samples[route].push(elapsed.as_secs_f64() * 1e6);
+            }
+        }
+        assert_eq!(loads[0], loads[1]);
+    }
+    for (label, values) in ["synchronous local", "background BlockStep"]
+        .into_iter()
+        .zip(&mut samples)
+    {
+        values.sort_by(f64::total_cmp);
+        println!(
+            "post-edit {label}: median={:.2} us range={:.2}..{:.2} ({} samples)",
+            values[SAMPLES / 2],
+            values[0],
+            values[SAMPLES - 1],
+            SAMPLES
+        );
+    }
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("KAPITSA_POST_EDIT_BENCH").is_some() {
+        return post_edit_steps();
+    }
     println!(
         "kapitsa-core scalar aerodynamic baseline; samples={SAMPLES}; median and min/max; 3 warmup operations"
     );

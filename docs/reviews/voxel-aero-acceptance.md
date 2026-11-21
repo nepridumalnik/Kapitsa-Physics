@@ -47,3 +47,12 @@ batches, and per-wing load attribution. Synthetic polar tests cover Mach 0.5,
 2 and 8, forward and reverse flow, and both step paths. An isolated allocator
 test recorded zero allocations and zero bytes for 128 warmed control batches;
 this is not a claim that an entire physics step is allocation-free.
+
+Background shape preparation covers managed explicit-mesh assemblies. The
+post-edit benchmark reports 7.529 ms median for synchronous preparation and
+7.413 ms for `BlockStep`, with equal nonzero pressure wrenches and overlapping
+ranges. It establishes no speedup: the blocking step still waits for the
+worker. Separately, the oversized-mesh regression checks that a nonblocking
+managed step does not fall back to synchronous preparation, and the isolated
+pending-state check measured zero allocations over 128 checks. These results
+do not cover collider-derived geometry, queue contention, or physical validation.
