@@ -211,3 +211,15 @@
   fraction and constructed intersection, including `PrecisionLoss` for a
   smaller fraction that rounds to zero and `ArithmeticOverflow` for a
   non-finite constructed point.
+- [x] Record `b1a963c` and
+  `crossing_fraction_wide_range_stays_within_one_ulp`: stored normal inputs
+  `small = f64::from_bits(0x3f9b_7e1e_cdef_1832)` and
+  `large = f64::from_bits(0x7f49_8322_6928_7812)`, signed pair
+  `(small, -large)`, and rational-reference result
+  `f64::from_bits(0x0041_3df4_c5af_7ddf)` for exact `small/(small+large)`.
+- [x] Distinguish the regression assertion
+  `actual.to_bits().abs_diff(expected.to_bits()) <= 1` from the observed
+  one-ULP difference recorded in the accompanying documentation; neither
+  establishes a universal one-ULP bound or correct-rounding guarantee.
+  Record a synthetic assertion only, not test execution evidence or
+  independent physical validation.

@@ -407,6 +407,25 @@ an error.
 - **AND** this is a synthetic regression assertion, not test execution evidence
   or independent physical validation
 
+#### Scenario: Synthetic wide-range crossing retains an observed rounding difference
+
+- **WHEN** `crossing_fraction_wide_range_stays_within_one_ulp` in `b1a963c`
+  evaluates `crossing_fraction(small, -large)` with
+  `small = f64::from_bits(0x3f9b_7e1e_cdef_1832)` and
+  `large = f64::from_bits(0x7f49_8322_6928_7812)`
+- **THEN** its reference is `f64::from_bits(0x0041_3df4_c5af_7ddf)`, the
+  nearest binary64 to exact rational `small/(small+large)` formed from
+  those stored inputs, and the regression asserts
+  `actual.to_bits().abs_diff(expected.to_bits()) <= 1`
+- **AND** the accompanying documentation records an observed one-ULP
+  difference for this widely separated normal-distance pair; the assertion
+  permits either equality or a one-ULP difference for this pair only
+- **AND** this does not establish a universal one-ULP rounding bound or
+  guarantee correctly rounded crossing fractions, exact geometry or a global
+  numeric error bound
+- **AND** this records a synthetic regression and its documented observation,
+  not test execution evidence or independent physical validation
+
 #### Scenario: Larger crossing fraction corrects the reciprocal residual
 
 - **WHEN** the first endpoint has the larger absolute distance and

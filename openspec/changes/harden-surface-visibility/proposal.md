@@ -23,7 +23,9 @@ power-of-two scaling of two subnormal crossing distances before fused ratio
 residual correction and its exact rational-reference regression, plus
  `791d0e4` for exponent-based power-of-two normalization of the FMA residual
  operands, retaining the smaller magnitude when scaling down would erase it,
- and its exact rational-reference regression.
+ and its exact rational-reference regression, plus `b1a963c` for a wide-range
+ rational-reference regression recording an observed one-ULP difference,
+ not a universal rounding bound.
 
 ## Scope
 
@@ -168,6 +170,18 @@ This change covers:
   nearest binary64 to the exact rational formed from those stored inputs;
   this is a synthetic assertion only, not test execution evidence or
   independent physical validation;
+- recording `b1a963c` synthetic regression
+  `crossing_fraction_wide_range_stays_within_one_ulp`: with
+  `small = f64::from_bits(0x3f9b_7e1e_cdef_1832)` and
+  `large = f64::from_bits(0x7f49_8322_6928_7812)`, evaluate
+  `crossing_fraction(small, -large)` against
+  `f64::from_bits(0x0041_3df4_c5af_7ddf)`, the nearest binary64 to exact
+  rational `small/(small+large)` formed from those stored inputs; the test
+  asserts `actual.to_bits().abs_diff(expected.to_bits()) <= 1`, while the
+  accompanying documentation records an observed one-ULP difference for this
+  widely separated normal-distance pair. This does not establish a universal
+  one-ULP bound or correctly rounded fractions and is not test execution
+  evidence or independent physical validation;
 - applying `3ef81e7` reciprocal residual correction in the larger endpoint-order
   branch: with the same `r`, `d`, `e` and `q`, compute `u = 1/d` and
   `v = (-u).mul_add(d, 1.0)`, then use `u + (v - u*(e + q))/d` instead
