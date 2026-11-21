@@ -490,6 +490,17 @@ fn part_desc(mass: MassProperties) -> ClusterPartDesc {
 #[test]
 fn merging_bodies_drops_absorbed_binding_and_stales_the_survivor()
 -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::geometry::GeometryOwner;
+    let mut control = wind_world()?;
+    let (reference, reference_part) = clustered_mesh_body(&mut control, Vec3::ZERO)?;
+    control.step(1e-8)?;
+    let reference_load = control
+        .owner_mesh_pressure(reference)
+        .ok_or("reference load")?;
+    assert_eq!(reference_load.len(), 1);
+    assert_eq!(reference_load[0].0, GeometryOwner::Part(reference_part));
+    let expected = reference_load[0].1;
+    assert!(expected.force.length() > 1.0);
     let mut world = wind_world()?;
     let (first, first_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
     let (second, second_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
@@ -520,6 +531,8 @@ fn merging_bodies_drops_absorbed_binding_and_stales_the_survivor()
         "merged cluster must still receive pressure, got {velocity:?}"
     );
     assert!(world.body(second).is_none());
+    let loads = world.owner_mesh_pressure(first).ok_or("merged loads")?;
+    assert_eq!(loads, &[(GeometryOwner::Part(first_part), expected)]);
     Ok(())
 }
 
@@ -547,6 +560,15 @@ fn splitting_a_cluster_drops_binding_and_presses_both_bodies()
     assert!(body_velocity(&world, first)?.length() > 1e-6);
     assert!(body_velocity(&world, new_body)?.length() > 1e-6);
     assert_eq!(world.part_body(second_part), Some(new_body));
+    let first_load = world.owner_mesh_pressure(first).ok_or("first load")?;
+    let second_load = world.owner_mesh_pressure(new_body).ok_or("split load")?;
+    use crate::aerodynamics::geometry::GeometryOwner;
+    assert_eq!(first_load.len(), 1);
+    assert_eq!(second_load.len(), 1);
+    assert_eq!(first_load[0].0, GeometryOwner::Part(first_part));
+    assert_eq!(second_load[0].0, GeometryOwner::Part(second_part));
+    assert!(first_load[0].1.force.length() > 1.0);
+    assert_eq!(first_load[0].1, second_load[0].1);
     Ok(())
 }
 
