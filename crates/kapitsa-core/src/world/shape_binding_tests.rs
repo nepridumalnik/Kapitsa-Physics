@@ -520,13 +520,27 @@ fn part_desc(mass: MassProperties) -> ClusterPartDesc {
     }
 }
 
-#[test]
-fn merging_bodies_drops_absorbed_binding_and_stales_the_survivor()
--> Result<(), Box<dyn std::error::Error>> {
+const TOPOLOGY_DT: f64 = 1e-8;
+
+fn topology_step(world: &mut PhysicsWorld, sharded: bool) -> Result<(), crate::Error> {
+    if sharded {
+        world.step_with_shards(
+            TOPOLOGY_DT,
+            &mut [Vec::new(), Vec::new()],
+            &SequentialExecutor,
+            2,
+        )
+    } else {
+        world.step(TOPOLOGY_DT)
+    }
+}
+
+fn standalone_pressure()
+-> Result<crate::aerodynamics::pressure::PressureWrench, Box<dyn std::error::Error>> {
     use crate::aerodynamics::geometry::GeometryOwner;
     let mut control = wind_world()?;
     let (reference, reference_part) = clustered_mesh_body(&mut control, Vec3::ZERO)?;
-    control.step(1e-8)?;
+    topology_step(&mut control, false)?;
     let reference_load = control
         .owner_mesh_pressure(reference)
         .ok_or("reference load")?;
@@ -534,6 +548,18 @@ fn merging_bodies_drops_absorbed_binding_and_stales_the_survivor()
     assert_eq!(reference_load[0].0, GeometryOwner::Part(reference_part));
     let expected = reference_load[0].1;
     assert!(expected.force.length() > 1.0);
+    assert!(expected.moment.length() > 1.0);
+    Ok(expected)
+}
+
+#[rstest::rstest]
+#[case::ordinary(false)]
+#[case::sharded(true)]
+fn merging_bodies_drops_absorbed_binding_and_stales_the_survivor(
+    #[case] sharded: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::geometry::GeometryOwner;
+    let expected = standalone_pressure()?;
     let mut world = wind_world()?;
     let (first, first_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
     let (second, second_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
@@ -553,7 +579,7 @@ fn merging_bodies_drops_absorbed_binding_and_stales_the_survivor()
         world.shape_binding(first).is_some(),
         "binding is stored until the next step validates it"
     );
-    world.step(1e-8)?;
+    topology_step(&mut world, sharded)?;
     assert!(
         world.shape_binding(first).is_none(),
         "membership change must stale the surviving binding"
@@ -569,9 +595,12 @@ fn merging_bodies_drops_absorbed_binding_and_stales_the_survivor()
     Ok(())
 }
 
-#[test]
-fn splitting_a_cluster_drops_binding_and_presses_both_bodies()
--> Result<(), Box<dyn std::error::Error>> {
+#[rstest::rstest]
+#[case::ordinary(false)]
+#[case::sharded(true)]
+fn splitting_a_cluster_preserves_pressure_owners(
+    #[case] sharded: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut world = wind_world()?;
     let (first, first_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
     let (second, second_part) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
@@ -585,7 +614,7 @@ fn splitting_a_cluster_drops_binding_and_presses_both_bodies()
     let new_body = *bodies.get(1).ok_or("split body")?;
     assert!(world.shape_binding(first).is_some());
     assert!(world.shape_binding(new_body).is_none());
-    world.step(1e-8)?;
+    topology_step(&mut world, sharded)?;
     assert!(
         world.shape_binding(first).is_some(),
         "the surviving cluster is exactly the bound part, so sharing stays valid"
@@ -600,14 +629,18 @@ fn splitting_a_cluster_drops_binding_and_presses_both_bodies()
     assert_eq!(second_load.len(), 1);
     assert_eq!(first_load[0].0, GeometryOwner::Part(first_part));
     assert_eq!(second_load[0].0, GeometryOwner::Part(second_part));
-    assert!(first_load[0].1.force.length() > 1.0);
-    assert_eq!(first_load[0].1, second_load[0].1);
+    let expected = standalone_pressure()?;
+    assert_eq!(first_load[0].1, expected);
+    assert_eq!(second_load[0].1, expected);
     Ok(())
 }
 
-#[test]
-fn removing_the_root_part_transfers_root_and_stales_binding()
--> Result<(), Box<dyn std::error::Error>> {
+#[rstest::rstest]
+#[case::ordinary(false)]
+#[case::sharded(true)]
+fn removing_the_root_part_transfers_root_and_stales_binding(
+    #[case] sharded: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut world = wind_world()?;
     let (body, root) = clustered_mesh_body(&mut world, Vec3::ZERO)?;
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
@@ -626,7 +659,7 @@ fn removing_the_root_part_transfers_root_and_stales_binding()
         world.cluster(body).map(|cluster| cluster.root()),
         Some(child)
     );
-    world.step(1e-8)?;
+    topology_step(&mut world, sharded)?;
     assert!(
         world.shape_binding(body).is_none(),
         "part removal must stale the binding"
@@ -640,6 +673,11 @@ fn removing_the_root_part_transfers_root_and_stales_binding()
         "destroyed root must not leave geometry behind"
     );
     assert!(world.cluster_part(root).is_none());
+    use crate::aerodynamics::geometry::GeometryOwner;
+    assert_eq!(
+        world.owner_mesh_pressure(body),
+        Some(&[(GeometryOwner::Part(child), standalone_pressure()?)][..])
+    );
     Ok(())
 }
 
