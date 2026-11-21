@@ -650,6 +650,31 @@ mod tests {
     use kapitsa_math::Vec3;
     use std::sync::Arc;
 
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Run alone: process-wide allocation counter"]
+    fn pending_shape_status_and_collection_do_not_allocate() -> Result<(), crate::Error> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        let (producer, pending) = PendingShape::test_channel();
+        world.track_body_shape(body, vec![part], PendingAero::ZeroForce, pending)?;
+        world.finish_pending_shapes()?;
+        let counts = super::super::tests::tracked_world_allocations(|| {
+            for _ in 0..128 {
+                assert!(world.finish_pending_shapes().is_ok());
+                assert_eq!(world.body_shape_status(body), BodyShapeStatus::Cooking);
+            }
+        });
+        drop(producer);
+        println!("128 pending checks: {counts:?} (allocations, bytes)");
+        assert_eq!(counts, (0, 0));
+        Ok(())
+    }
+
     #[test]
     fn polling_rejects_edited_inputs_before_the_worker_finishes()
     -> Result<(), Box<dyn std::error::Error>> {
