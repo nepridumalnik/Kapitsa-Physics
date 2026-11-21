@@ -223,3 +223,6 @@
   establishes a universal one-ULP bound or correct-rounding guarantee.
   Record a synthetic assertion only, not test execution evidence or
   independent physical validation.
+- [x] Record the stabilization-head verification, the CI workflow and the
+  final benchmark measurements; close the change with `Status` and `Deferred`
+  sections pointing at the aerodynamics roadmap.
