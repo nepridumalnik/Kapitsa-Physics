@@ -179,18 +179,21 @@ fn finite(value: f64) -> Result<f64, crate::Error> {
 // underflow detection is independent of endpoint order. A ratio can still
 // round to one; rejecting that requires separate geometric analysis.
 pub(super) fn crossing_fraction(a: f64, b: f64) -> Result<f64, crate::Error> {
-    let difference = a - b;
-    let (a, b, denominator) = if difference.is_infinite() && a.is_finite() && b.is_finite() {
-        // Halving both distances preserves their ratio when their difference
-        // would exceed the finite range.
-        (a * 0.5, b * 0.5, a * 0.5 - b * 0.5)
-    } else {
-        (a, b, finite(difference)?)
-    };
-    if (a.abs().min(b.abs()) / denominator.abs()) == 0.0 {
+    // Work with the smaller ratio to avoid overflowing the sum and to
+    // preserve representable fractions when the distance scales differ.
+    let a = a.abs();
+    let b = b.abs();
+    let (small, large) = if a <= b { (a, b) } else { (b, a) };
+    let ratio = finite(small / large)?;
+    let smaller_fraction = ratio / (1.0 + ratio);
+    if smaller_fraction == 0.0 {
         return Err(crate::Error::from(GeometryError::PrecisionLoss));
     }
-    let fraction = finite(a / denominator)?;
+    let fraction = if a <= b {
+        smaller_fraction
+    } else {
+        1.0 / (1.0 + ratio)
+    };
     Ok(fraction)
 }
 
@@ -702,6 +705,14 @@ mod tests {
         let point = crossing_point(near, far, 1.0, -3.0)?;
         assert_eq!(point, Vec3::ZERO);
         assert_eq!(point, crossing_point(far, near, -3.0, 1.0)?);
+        Ok(())
+    }
+
+    #[test]
+    fn crossing_fraction_handles_subnormal_denominator_rounding() -> Result<(), crate::Error> {
+        let m = f64::from_bits(1);
+        assert_eq!(crossing_fraction(2.0 * m, -m)?, 2.0 / 3.0);
+        assert_eq!(crossing_fraction(m, -2.0 * m)?, 1.0 / 3.0);
         Ok(())
     }
 
