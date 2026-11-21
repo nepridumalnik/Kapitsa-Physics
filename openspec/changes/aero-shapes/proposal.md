@@ -1,9 +1,9 @@
 # Aero shapes: shared prepared vessel geometry
 
-Status: **in progress** on `feat/aero_shapes`, created from the updated
-`master` after the `feat/aero_rest` merge. The spec deltas and unchecked
-tasks record the agreed acceptance criteria; they are refined when the change
-starts.
+Status: **complete** on `feat/aero_shapes`, created from the updated `master`
+after the `feat/aero_rest` merge. The spec deltas and tasks record the agreed
+acceptance criteria; the amendments below record where implementation details
+differ from the initial plan.
 
 ## Summary
 
@@ -21,8 +21,9 @@ their current guarantees.
 - `ShapeBinding`: binds a shape to a body and maps `OwnerSlot -> PartId` with
   the per-part transforms, so the same shape serves different assemblies.
 - Reuse the existing `PreparedGeometry`, `GeometryPreparation` and caching
-  machinery; generalize the cache key from `BodyId` to an opaque shape identity
-  instead of building a parallel cache.
+  machinery; the registry owns cooked geometry directly instead of deepening
+  the `BodyId`-keyed cache. Cache-key generalization is deferred to
+  `aero-async`.
 - Atomic shape installation and replacement with identity and revision checks;
   stale or foreign results are rejected without partial application.
 - Correct invalidation when part geometry or assembly topology changes; a
@@ -50,7 +51,9 @@ their current guarantees.
 - Merge/split and root transfer preserve load ownership; ordinary and sharded
   step paths agree.
 - No per-body heap-resident shape duplicate; steady-state steps perform no
-  shape-related allocation.
+  body-local shape preparation or voxel-storage allocation. Temporary
+  instance/patch buffers and the wing-visibility cache are unchanged from the
+  body-local path.
 - Regression tests cover sharing, invalidation, stale tickets, topology
   changes and rollback; docs and public API snapshots are updated.
 
@@ -110,10 +113,13 @@ Decisions:
    the bound parts' existence and cook-frame transforms; a binding whose
    transforms differ is rejected and requires a re-cook. No silent re-framing
    of baked occupancy.
-4. **Cache reuse.** The existing `PreparedGeometryCache` and incarnation
-   tickets are reused for shape preparation/publication; the cache key is
-   generalized from `BodyId` to the shape identity. The primary single-body
-   mesh path keeps its current behavior in this change.
+4. **Registry-owned geometry, no cache-key generalization.** A `CookedShape`
+   owns its `PreparedGeometry` directly, and bound evaluation feeds that
+   geometry to pressure and wing shielding instead of calling
+   `PreparedGeometryCache::prepare_instances`. The `PreparedGeometryCache`
+   keeps its `BodyId` key for body-local and wave preparation. Generalizing
+   the cache key is deferred to `aero-async`, where the worker boundary needs
+   it; this change neither generalizes the key nor adds a parallel cache.
 5. **Binding resolution at evaluation.** The binding resolves slots to
    `PartId` when constructing evaluation instances, so weld-reaction dispatch,
    `OwnerPressureWorkspace` and public load accessors keep operating on part
@@ -121,6 +127,28 @@ Decisions:
 6. **Determinism.** Slot order is fixed by the cooked shape; bindings never
    alter cooked data. Ordinary and sharded paths must agree, and a geometry
    edit on one vessel must not invalidate another vessel's shared shape.
+7. **Lazy binding invalidation.** A `ShapeBinding` stores `{shape, revision,
+   slot-ordered parts}`. Every evaluation re-validates revision, preparation
+   configuration, cavity policy, cluster membership, part meshes and part
+   transforms without allocating; a mismatch makes the mutable paths drop the
+   binding and fall back to body-local preparation, which computes the same
+   physics without sharing. `replace_shape` advances the revision, so previous
+   bindings fail verification. Pruning runs before the ordinary step loop; the
+   sharded path validates without mutating world state.
+8. **Bindings require a shared mesh allocation.** Mesh checks use
+   `Arc::ptr_eq` plus the part transform, so the reused occupancy is
+   unambiguous. `set_part_aerodynamic_mesh_shared` installs one
+   `Arc<TriangleMesh>` on several parts; the owning
+   `set_part_aerodynamic_mesh` still creates a private allocation per part, and
+   structurally equal but distinct meshes are rejected with `InvalidBinding`.
+   Collider-tessellated and wave sources are rejected with `UnsupportedSource`.
+9. **Scope of sharing.** Sharing covers the pressure union and wing shielding,
+   which consume one occupancy. The wave union stays body-local because it is
+   expressed in the wave part's local frame with the model's own geometry
+   configuration. Bound vessels therefore contain mesh parts only. Topology
+   changes either keep a binding valid (a split leaving exactly the bound
+   parts) or stale it (membership changed), in which case evaluation falls back
+   until the body is re-bound.
 
 ## Non-goals
 

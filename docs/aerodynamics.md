@@ -82,6 +82,16 @@ A preparation entry compares instance membership, mesh identity and part-local t
 
 Part pressure retains COM atmosphere sampling and centroid rotational-flow quadrature; the world-selected Mesh/Colliders closure applies to primary and part geometry, with the default Newtonian Mach >= 5 policy and the opt-in modified Newtonian `0 <= Mach <= 5` model. Vacuum skips preparation. Tests cover ordinary/sharded paths, mixed Mesh/Colliders assemblies, merge/split, overlap ownership, triangle budgets, configuration replacement, preparation errors, cleanup, and runtime commands on Tokio/Rayon. General physical equivalence to FAR is not established; the explicit subsonic hull and wing models below do not supply transonic hull physics.
 
+### Shared cooked vessel shapes
+
+Several bodies with the same vessel design can reuse one prepared part-geometry union. `PhysicsWorld::cook_shape(sources, oriented_cavities)` cooks a `CookedShape` with slot-based owners and registers it under a registry-scoped `ShapeId`; `bind_shape(body, shape, parts)` maps slot `i` to `parts[i]`. The shape stores occupancy, sections and volume, so cooking is the only voxelization step; evaluation re-derives patches from the cooked occupancy.
+
+Bindings validate revision, preparation configuration, the world's cavity policy, exact cluster membership, part ownership, mesh identity and part-local transforms. Mesh identity is `Arc` identity: use `set_part_aerodynamic_mesh_shared(part, Some(Arc<TriangleMesh>))` to install one allocation on several parts. Structurally equal but distinct allocations are rejected with `InvalidBinding`, because reused occupancy would be ambiguous. Collider-tessellated and wave parts are rejected with `UnsupportedSource`; sharing therefore covers vessels made of explicit mesh parts.
+
+Validation is repeated on every evaluation without allocating. A mismatch drops the binding on the next ordinary step and evaluation falls back to body-local preparation, which computes the same physics without sharing; `replace_shape(shape, sources)` advances the revision and stales previous bindings the same way. Merge and part destruction change membership and stale the binding; a split that leaves exactly the bound parts keeps sharing valid. `remove_body` and merge drop absorbed bindings. The wave union remains body-local because it is expressed in the wave part's local frame with the model's own geometry configuration. Evaluation still allocates the same temporary instance and patch buffers as the body-local path, and wing visibility keeps its per-body cache.
+
+Tests compare shared and body-local forces, cover geometry-edit and replacement fallback, merge/split/root transfer, and assert ordinary/sharded agreement. A cold-step allocation comparison (four vessels) records 91 allocations/48.5 KB shared versus 131/194 KB body-local.
+
 ## Conventions
 
 Use SI units. Let `v = v_COM + omega × (x - x_COM) - wind(x)` be the body's velocity relative to the atmosphere at a force application point. The incoming fluid velocity is `-v`. Surface normals point outwards. Forces and torques are accumulated in world coordinates; geometry is prepared in body-local coordinates, independent of the center of mass.
