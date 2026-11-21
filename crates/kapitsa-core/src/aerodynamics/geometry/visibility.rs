@@ -190,7 +190,15 @@ pub(super) fn crossing_fraction(a: f64, b: f64) -> Result<f64, crate::Error> {
     let fraction = ratio / denominator;
     // Correct the rounded ratio and the rounded sum without forming an
     // underflowing product. All quantities in this correction are bounded.
-    let ratio_error = (-ratio).mul_add(large, small) / large;
+    // Exact binary scaling keeps subnormal operands and their fused residual
+    // representable during the ratio correction.
+    let (scaled_small, scaled_large) = if large < f64::MIN_POSITIVE {
+        const SUBNORMAL_SCALE: f64 = 4_503_599_627_370_496.0; // 2^52
+        (small * SUBNORMAL_SCALE, large * SUBNORMAL_SCALE)
+    } else {
+        (small, large)
+    };
+    let ratio_error = (-ratio).mul_add(scaled_large, scaled_small) / scaled_large;
     let residual = (-fraction).mul_add(denominator, ratio);
     let smaller_fraction =
         fraction + ((residual + ratio_error) - fraction * denominator_error) / denominator;
@@ -746,6 +754,17 @@ mod tests {
         let expected = f64::from_bits(0x3fed_4c81_d7e1_b240);
         assert_eq!(crossing_fraction(a, -b)?, expected);
         assert_eq!(crossing_fraction(-a, b)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn crossing_fraction_corrects_two_subnormal_distances() -> Result<(), crate::Error> {
+        // Expected from the exact rational formed by the two binary64 inputs.
+        let small = f64::from_bits(0x5d);
+        let large = f64::from_bits(0x3c_f738);
+        let expected = f64::from_bits(0x3ef8_6816_e38d_5625);
+        assert_eq!(crossing_fraction(small, -large)?, expected);
+        assert_eq!(crossing_fraction(-small, large)?, expected);
         Ok(())
     }
 
