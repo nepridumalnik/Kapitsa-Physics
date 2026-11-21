@@ -95,6 +95,20 @@ mod aerodynamics {
                     world: world.world_id,
                     dense,
                 };
+                let shared = world.shared_shape(body_id, entry);
+                if world
+                    .managed_shapes
+                    .as_ref()
+                    .is_some_and(|jobs| jobs.contains_key(&body_id))
+                    && shared.is_none()
+                    || super::shapes::suppress_pending_shape(
+                        world.pending_shapes.as_ref(),
+                        body_id,
+                        || shared.is_some(),
+                    )
+                {
+                    continue;
+                }
                 if !entry.body.base_pressure_patches.is_empty()
                     || entry.body.potential_sphere.is_some()
                 {
@@ -105,7 +119,6 @@ mod aerodynamics {
                         ),
                     }));
                 }
-                let shared = world.shared_shape(body_id, entry);
                 let patches = super::assembly_aerodynamics::prepare(
                     body_id,
                     entry,

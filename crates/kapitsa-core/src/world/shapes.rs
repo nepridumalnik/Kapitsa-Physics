@@ -655,6 +655,8 @@ mod tests {
                 vec![[0, 1, 2]],
             )?),
         )?;
+        use crate::aerodynamics::AerodynamicsTask;
+        AerodynamicsTask.execute(&world)?;
         let mut snapshots = [Vec::new()];
         world.fill_step_shards(&mut snapshots)?;
         let snapshot = snapshots[0].first_mut().ok_or("missing snapshot")?;
