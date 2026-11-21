@@ -1634,6 +1634,7 @@ impl PhysicsWorld {
             bindings.remove(&second);
         }
         self.cancel_body_shape(second);
+        self.stop_managing_body_shape(second);
         self.synchronize_cluster_physics_state(&[first]);
         Ok(())
     }

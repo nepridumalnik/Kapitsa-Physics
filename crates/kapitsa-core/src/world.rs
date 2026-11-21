@@ -874,6 +874,7 @@ pub struct PhysicsWorld {
     shapes: crate::aerodynamics::shape::ShapeRegistry,
     shape_bindings: Option<HashMap<BodyId, crate::aerodynamics::shape::ShapeBinding>>,
     pending_shapes: Option<HashMap<BodyId, shapes::PendingBodyShape>>,
+    managed_shapes: Option<HashMap<BodyId, shapes::ManagedBodyShape>>,
     welds: DensePool<Weld>,
     colliders: DensePool<ColliderEntry>,
     chunks: DensePool<chunk::ChunkEntry>,
@@ -1615,6 +1616,7 @@ impl PhysicsWorld {
             shapes: crate::aerodynamics::shape::ShapeRegistry::new(),
             shape_bindings: None,
             pending_shapes: None,
+            managed_shapes: None,
             welds: DensePool::new(),
             colliders: DensePool::new(),
             chunks: DensePool::new(),
@@ -6793,6 +6795,7 @@ impl PhysicsWorld {
             bindings.remove(&id);
         }
         self.cancel_body_shape(id);
+        self.stop_managing_body_shape(id);
         Some(removed)
     }
 

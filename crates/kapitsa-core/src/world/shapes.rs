@@ -19,6 +19,11 @@ pub(super) struct PendingBodyShape {
     completion: Option<BodyShapeCompletion>,
 }
 
+pub(super) struct ManagedBodyShape {
+    policy: PendingAero,
+    worker: crate::aerodynamics::shape::worker::ShapeWorker,
+}
+
 /// Sends the outcome once the world publishes or rejects a background result.
 pub type BodyShapeCompletion = std::sync::mpsc::Sender<Result<ShapeId, crate::Error>>;
 
@@ -110,6 +115,57 @@ pub(super) fn resolve_shared_shape<'a>(
 }
 
 impl PhysicsWorld {
+    /// Starts background preparation and automatically queues a replacement
+    /// at a full step boundary when the installed binding becomes invalid.
+    pub fn manage_body_shape(
+        &mut self,
+        body: BodyId,
+        policy: PendingAero,
+        worker: &crate::aerodynamics::shape::worker::ShapeWorker,
+    ) -> Result<(), crate::Error> {
+        self.queue_body_shape(body, policy, worker)?;
+        self.managed_shapes.get_or_insert_with(HashMap::new).insert(
+            body,
+            ManagedBodyShape {
+                policy,
+                worker: worker.clone(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Disables automatic preparation and cancels any pending request.
+    pub fn stop_managing_body_shape(&mut self, body: BodyId) {
+        if let Some(managed) = &mut self.managed_shapes {
+            managed.remove(&body);
+        }
+        self.cancel_body_shape(body);
+    }
+
+    fn schedule_managed_shapes(&mut self) -> Result<(), crate::Error> {
+        let Some(managed) = self.managed_shapes.take() else {
+            return Ok(());
+        };
+        let result = managed.iter().try_for_each(|(&body, control)| {
+            if self
+                .pending_shapes
+                .as_ref()
+                .is_some_and(|jobs| jobs.contains_key(&body))
+                || matches!(self.body_shape_status(body), BodyShapeStatus::Ready(_))
+            {
+                return Ok(());
+            }
+            self.queue_body_shape(body, control.policy, &control.worker)
+                .map_err(|cause| {
+                    crate::Error::from(super::StepError::Aerodynamics {
+                        body_id: body,
+                        cause,
+                    })
+                })
+        });
+        self.managed_shapes = Some(managed);
+        result
+    }
     /// Queues preparation of the assembly's current explicit meshes.
     pub fn queue_body_shape(
         &mut self,
@@ -245,6 +301,7 @@ impl PhysicsWorld {
     }
 
     pub(super) fn finish_pending_shapes(&mut self) -> Result<(), crate::Error> {
+        self.schedule_managed_shapes()?;
         self.collect_pending_shapes(true);
         // Choose a stable error when multiple requests fail at one boundary.
         if let Some((body_id, cause)) = self
@@ -553,6 +610,97 @@ mod tests {
     use crate::{shape::TriangleMesh, transform::Transform};
     use kapitsa_math::Vec3;
     use std::sync::Arc;
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn managed_mesh_edit_does_not_cook_on_step_thread(
+        #[case] sharded: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::super::test_atmosphere(
+            crate::aerodynamics::AtmosphericState::new(1.0, Vec3::X * -2000.0)?,
+        ));
+        let body = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        world.set_part_aerodynamic_mesh(part, Some(super::super::shape_binding_tests::cube()?))?;
+        let worker = ShapeWorker::new(2)?;
+        world.manage_body_shape(body, PendingAero::BlockStep, &worker)?;
+        world.finish_pending_shapes()?;
+        let installed = world
+            .shape_binding(body)
+            .ok_or("missing initial shape")?
+            .shape();
+        world.manage_body_shape(body, PendingAero::ZeroForce, &worker)?;
+        world.cancel_body_shape(body);
+        // Local preparation would fail the geometry budget and abort this step.
+        world.set_part_aerodynamic_mesh(
+            part,
+            Some(TriangleMesh::new(
+                vec![Vec3::ZERO, Vec3::Y * 1e6, Vec3::Z * 1e6],
+                vec![[0, 1, 2]],
+            )?),
+        )?;
+        if sharded {
+            world.step_with_shards(
+                1e-8,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(1e-8)?;
+        }
+        assert!(world.owner_mesh_pressure(body).is_none());
+        assert!(matches!(
+            world.body_shape_status(body),
+            BodyShapeStatus::Cooking | BodyShapeStatus::Failed(_)
+        ));
+        assert_eq!(
+            world.shape_binding(body).map(ShapeBinding::shape),
+            Some(installed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn managed_merge_recooks_the_surviving_assembly() -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let mass = crate::mass::MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)?;
+        let first = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            mass,
+        )?)?;
+        let second = world.add_body(crate::rigid_body::RigidBody::new_dynamic(
+            Transform::identity(),
+            mass,
+        )?)?;
+        let a = world.enable_cluster(first)?;
+        let b = world.enable_cluster(second)?;
+        for part in [a, b] {
+            world.set_part_aerodynamic_mesh(
+                part,
+                Some(super::super::shape_binding_tests::cube()?),
+            )?;
+        }
+        let worker = ShapeWorker::new(2)?;
+        world.manage_body_shape(first, PendingAero::BlockStep, &worker)?;
+        world.step(1e-8)?;
+        let initial = world.shape_binding(first).ok_or("initial binding")?.shape();
+        world.merge_clusters(
+            first,
+            second,
+            super::super::shape_binding_tests::merge_weld(),
+        )?;
+        world.step(1e-8)?;
+        let current = world.shape_binding(first).ok_or("merged binding")?;
+        assert_ne!(initial, current.shape());
+        assert_eq!(current.parts(), &[a, b]);
+        Ok(())
+    }
 
     #[rstest::rstest]
     #[case(false)]
