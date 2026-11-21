@@ -2029,10 +2029,9 @@ fn manufactured_smooth_solution_iteration_convergence() -> Result<(), String> {
             .iterate_with_forcing(TOLERANCE, 100_000, forcing)
             .map_err(|value| format!("n={n} residual={value}"))?;
         let mut error = 0.0_f64;
-        for i in 2..n {
-            for k in 0..n {
-                error =
-                    error.max((grid.phi[i][k] - exact(i as f64 * h, (k as f64 + 0.5) * h)).abs());
+        for (i, row) in grid.phi.iter().enumerate().take(n).skip(2) {
+            for (k, &phi) in row.iter().enumerate().take(n) {
+                error = error.max((phi - exact(i as f64 * h, (k as f64 + 0.5) * h)).abs());
             }
         }
         assert!(
