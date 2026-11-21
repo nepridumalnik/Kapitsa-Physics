@@ -13,4 +13,4 @@
 ## 3. Public integration
 
 - [x] 3.1 Document feature flags, pool ownership and result lifetimes in `docs/runtime.md` and provide runnable sequential and parallel examples.
-- [ ] 3.2 Review release-version policy, regenerate and check the public API baseline, and verify the async service remains compatible.
+- [x] 3.2 Review release-version policy, regenerate and check the public API baseline, and verify the async service remains compatible.
