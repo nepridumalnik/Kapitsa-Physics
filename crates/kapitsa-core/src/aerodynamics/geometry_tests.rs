@@ -743,6 +743,134 @@ fn part_overlap_ownership_is_order_independent() {
 }
 
 #[test]
+fn slot_overlap_ties_resolve_to_lowest_slot_independent_of_order() -> Result<(), crate::Error> {
+    let mesh = cube();
+    let base = instance(&mesh, Vec3::ZERO);
+    let high = GeometryInstance {
+        owner: GeometryOwner::Slot(OwnerSlot::new(1)),
+        ..base
+    };
+    let low = GeometryInstance {
+        owner: GeometryOwner::Slot(OwnerSlot::new(0)),
+        ..base
+    };
+    let first = PreparedGeometry::prepare(&[high, low], config(0.25))?;
+    let second = PreparedGeometry::prepare(&[low, high], config(0.25))?;
+    assert_eq!(first, second);
+    assert!(
+        first
+            .occupancy()
+            .iter()
+            .flatten()
+            .all(|owner| *owner == GeometryOwner::Slot(OwnerSlot::new(0)))
+    );
+    let with_body = PreparedGeometry::prepare(&[high, base], config(0.25))?;
+    assert!(
+        with_body
+            .occupancy()
+            .iter()
+            .flatten()
+            .all(|owner| *owner == GeometryOwner::Body)
+    );
+    Ok(())
+}
+
+#[test]
+fn slot_patches_are_order_independent_and_carry_slot_owners() -> Result<(), crate::Error> {
+    let mesh = cube();
+    let base = instance(&mesh, Vec3::ZERO);
+    let a = GeometryInstance {
+        owner: GeometryOwner::Slot(OwnerSlot::new(0)),
+        ..base
+    };
+    let b = GeometryInstance {
+        owner: GeometryOwner::Slot(OwnerSlot::new(1)),
+        local_transform: Transform::new(Vec3::Y * 3.0, Quat::IDENTITY)?,
+        ..base
+    };
+    let first = PreparedGeometry::prepare(&[a, b], config(0.25))?;
+    let second = PreparedGeometry::prepare(&[b, a], config(0.25))?;
+    let first_patches = first.exposed_surface_patches(&[a, b], Vec3::X, 0.01, 100_000)?;
+    let second_patches = second.exposed_surface_patches(&[b, a], Vec3::X, 0.01, 100_000)?;
+    assert_eq!(first_patches, second_patches);
+    assert!(
+        first_patches
+            .iter()
+            .any(|patch| patch.owner == GeometryOwner::Slot(OwnerSlot::new(0)))
+    );
+    assert!(
+        first_patches
+            .iter()
+            .any(|patch| patch.owner == GeometryOwner::Slot(OwnerSlot::new(1)))
+    );
+    Ok(())
+}
+
+#[test]
+fn slot_preparation_matches_part_preparation_except_attribution() -> Result<(), crate::Error> {
+    use crate::{mass::MassProperties, rigid_body::RigidBody, world::PhysicsWorld};
+    use kapitsa_math::Mat3;
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?)?;
+    let part = world.enable_cluster(body)?;
+    let mesh = cube();
+    let base = instance(&mesh, Vec3::ZERO);
+    let part_instance = GeometryInstance {
+        owner: GeometryOwner::Part(part),
+        ..base
+    };
+    let slot_instance = GeometryInstance {
+        owner: GeometryOwner::Slot(OwnerSlot::new(0)),
+        ..base
+    };
+    let with_part = PreparedGeometry::prepare(&[part_instance], config(0.25))?;
+    let with_slot = PreparedGeometry::prepare(&[slot_instance], config(0.25))?;
+    assert_eq!(with_part.occupancy().len(), with_slot.occupancy().len());
+    assert!(
+        with_part
+            .occupancy()
+            .iter()
+            .zip(with_slot.occupancy())
+            .all(|(part_owner, slot_owner)| part_owner.is_some() == slot_owner.is_some())
+    );
+    assert_eq!(with_part.sections(), with_slot.sections());
+    assert_eq!(with_part.volume(), with_slot.volume());
+    assert!(
+        with_part
+            .occupancy()
+            .iter()
+            .flatten()
+            .all(|owner| *owner == GeometryOwner::Part(part))
+    );
+    assert!(
+        with_slot
+            .occupancy()
+            .iter()
+            .flatten()
+            .all(|owner| *owner == GeometryOwner::Slot(OwnerSlot::new(0)))
+    );
+    let part_faces: Vec<GeometryFace> = with_part.exposed_faces().collect();
+    let slot_faces: Vec<GeometryFace> = with_slot.exposed_faces().collect();
+    assert_eq!(part_faces.len(), slot_faces.len());
+    assert!(
+        part_faces
+            .iter()
+            .zip(&slot_faces)
+            .all(|(part_face, slot_face)| {
+                part_face.center == slot_face.center
+                    && part_face.normal == slot_face.normal
+                    && part_face.area == slot_face.area
+                    && part_face.owner == GeometryOwner::Part(part)
+                    && slot_face.owner == GeometryOwner::Slot(OwnerSlot::new(0))
+            })
+    );
+    Ok(())
+}
+
+#[test]
 fn nested_solid_has_no_internal_exposed_faces() {
     let outer = cube();
     let inner = TriangleMesh::new(

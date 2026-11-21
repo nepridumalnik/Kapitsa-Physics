@@ -35,5 +35,9 @@ and 2.6–2.8 are identified there as post-merge roadmap. The agreed post-merge
 aerodynamics roadmap (shared prepared shapes, asynchronous cooking, runtime
 control surfaces) is tracked in `openspec/roadmap/aerodynamics.md` and its
 planned changes; it is infrastructure and control work, not new physical
-models, and it does not close the validation gaps above. This document does not
+models, and it does not close the validation gaps above. The first roadmap
+change, shared prepared vessel shapes, is implemented on `feat/aero_shapes`:
+one cooked occupancy serves several mesh vessels, with lazy binding validation
+and body-local fallback. It adds no pressure closure or experimental validation
+and therefore does not change any acceptance gap. This document does not
 change those priorities, grant merge authorization, or imply stage 3 is complete.

@@ -7,6 +7,7 @@ pub mod geometry;
 pub mod hull;
 pub mod potential;
 pub mod pressure;
+pub mod shape;
 pub mod slender;
 pub mod sphere_drag;
 pub mod vlm;

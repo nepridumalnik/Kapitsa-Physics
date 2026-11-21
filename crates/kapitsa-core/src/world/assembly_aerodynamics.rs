@@ -37,6 +37,31 @@ pub(super) struct AssemblyAerodynamics {
     wing_cache: Vec<CachedWingVisibility>,
 }
 
+impl AssemblyAerodynamics {
+    /// Number of body-local union sources; zero when a shared shape is used.
+    #[cfg(test)]
+    pub(super) fn local_source_count(&self) -> usize {
+        self.sources.len()
+    }
+
+    /// Entry used by bound bodies: instances and pressure geometry come from
+    /// the cooked shape, so only the wing-visibility cache is retained.
+    fn empty(oriented_cavities: bool) -> Self {
+        let mut cache = PreparedGeometryCache::default();
+        cache.set_oriented_cavities(oriented_cavities);
+        let mut wave_cache = PreparedGeometryCache::default();
+        wave_cache.set_oriented_cavities(oriented_cavities);
+        Self {
+            sources: Vec::new(),
+            collider_parts: Vec::new(),
+            wave_only_parts: Vec::new(),
+            cache,
+            wave_cache,
+            wing_cache: Vec::new(),
+        }
+    }
+}
+
 pub(super) struct PreparedAssembly {
     pub patches: Option<PreparedSurfacePatches>,
     pub wave: Option<(PartId, crate::aerodynamics::hull::HullSection)>,
@@ -157,6 +182,28 @@ impl PhysicsWorld {
         part: PartId,
         mesh: Option<TriangleMesh>,
     ) -> Result<(), ClusterError> {
+        self.install_part_mesh(part, mesh.map(Arc::new))
+    }
+
+    /// Replaces the part's geometry with a shared mesh allocation.
+    ///
+    /// Bodies whose parts receive the same `Arc` can bind one cooked shape:
+    /// binding validates mesh identity by pointer, so a shared allocation is
+    /// what makes the reused occupancy unambiguous. [`Self::part_aerodynamic_mesh`]
+    /// and `None` behave as for [`Self::set_part_aerodynamic_mesh`].
+    pub fn set_part_aerodynamic_mesh_shared(
+        &mut self,
+        part: PartId,
+        mesh: Option<Arc<TriangleMesh>>,
+    ) -> Result<(), Error> {
+        self.install_part_mesh(part, mesh).map_err(Error::from)
+    }
+
+    fn install_part_mesh(
+        &mut self,
+        part: PartId,
+        mesh: Option<Arc<TriangleMesh>>,
+    ) -> Result<(), ClusterError> {
         let body = self
             .cluster_part(part)
             .ok_or(ClusterError::InvalidPartId)?
@@ -168,7 +215,7 @@ impl PhysicsWorld {
             geometry
                 .try_reserve(1)
                 .map_err(|_| ClusterError::StorageCapacityExceeded)?;
-            geometry.insert(part, PartGeometry::Mesh(Arc::new(mesh)));
+            geometry.insert(part, PartGeometry::Mesh(mesh));
         } else if let Some(geometry) = &mut self.part_aerodynamic_geometry {
             geometry.remove(&part);
         }
@@ -318,6 +365,24 @@ impl PhysicsWorld {
         part: PartId,
         mesh: Option<TriangleMesh>,
     ) -> Result<(), ClusterError> {
+        self.install_part_wave_source_mesh(part, mesh.map(Arc::new))
+    }
+
+    /// Sets an explicitly shared mesh as a wave-only source for this part.
+    pub fn set_part_wave_source_mesh_shared(
+        &mut self,
+        part: PartId,
+        mesh: Option<Arc<TriangleMesh>>,
+    ) -> Result<(), Error> {
+        self.install_part_wave_source_mesh(part, mesh)
+            .map_err(Error::from)
+    }
+
+    fn install_part_wave_source_mesh(
+        &mut self,
+        part: PartId,
+        mesh: Option<Arc<TriangleMesh>>,
+    ) -> Result<(), ClusterError> {
         if self.cluster_part(part).is_none() {
             return Err(ClusterError::InvalidPartId);
         }
@@ -331,10 +396,7 @@ impl PhysicsWorld {
         {
             return Ok(());
         }
-        self.replace_part_wave_geometry(
-            part,
-            mesh.map(|mesh| PartGeometry::WaveSourceMesh(Arc::new(mesh))),
-        )
+        self.replace_part_wave_geometry(part, mesh.map(PartGeometry::WaveSourceMesh))
     }
 
     /// Selects part-owned colliders as geometry-only input to the wave union.
@@ -380,6 +442,11 @@ impl PhysicsWorld {
 
     /// Returns the configured physical mesh in the part's local frame.
     pub fn part_aerodynamic_mesh(&self, part: PartId) -> Option<&TriangleMesh> {
+        self.part_aerodynamic_mesh_arc(part).map(Arc::as_ref)
+    }
+
+    /// Borrows the mesh allocation for use in a cooked shape source.
+    pub fn part_aerodynamic_mesh_arc(&self, part: PartId) -> Option<&Arc<TriangleMesh>> {
         self.cluster_part(part)?;
         match self.part_aerodynamic_geometry.as_ref()?.get(&part)? {
             PartGeometry::Mesh(mesh) | PartGeometry::WaveSourceMesh(mesh) => Some(mesh),
@@ -409,37 +476,6 @@ pub(super) fn hull_configured(entry: &BodyEntry, parts: &DensePool<ClusterPart>)
     })
 }
 
-pub(super) fn wave_configured(
-    entry: &BodyEntry,
-    geometry: Option<&HashMap<PartId, PartGeometry>>,
-) -> bool {
-    entry.cluster.as_ref().is_some_and(|cluster| {
-        cluster.parts().iter().any(|part| {
-            matches!(
-                geometry.and_then(|items| items.get(part)),
-                Some(PartGeometry::Wave(_))
-            )
-        })
-    })
-}
-
-pub(super) fn shielding_configured(
-    entry: &BodyEntry,
-    parts: &DensePool<ClusterPart>,
-    geometry: Option<&HashMap<PartId, PartGeometry>>,
-) -> bool {
-    configured(entry, geometry)
-        && entry.cluster.as_ref().is_some_and(|cluster| {
-            cluster.parts().iter().any(|id| {
-                parts.get(id.dense).is_some_and(|part| {
-                    part.aerodynamic_wings
-                        .iter()
-                        .any(|wing| wing.has_footprint())
-                })
-            })
-        })
-}
-
 pub(super) fn configured(
     entry: &BodyEntry,
     geometry: Option<&HashMap<PartId, PartGeometry>>,
@@ -452,9 +488,16 @@ pub(super) fn configured(
     })
 }
 
-pub(super) struct AssemblyEnvironment {
+/// Per-evaluation inputs. `shared` carries a validated cooked shape and its
+/// binding; a bound body reuses that geometry instead of preparing a
+/// body-local union.
+pub(super) struct AssemblyEnvironment<'a> {
     pub atmosphere: Atmosphere,
     pub oriented_cavities: bool,
+    pub shared: Option<(
+        &'a crate::aerodynamics::shape::ShapeBinding,
+        &'a crate::aerodynamics::shape::CookedShape,
+    )>,
 }
 
 pub(super) fn prepare(
@@ -464,8 +507,9 @@ pub(super) fn prepare(
     geometry: Option<&HashMap<PartId, PartGeometry>>,
     colliders: &DensePool<super::ColliderEntry>,
     caches: &mut Option<HashMap<BodyId, AssemblyAerodynamics>>,
-    environment: AssemblyEnvironment,
+    environment: AssemblyEnvironment<'_>,
 ) -> Result<Option<PreparedAssembly>, Error> {
+    let shared = environment.shared;
     let atmosphere = environment.atmosphere;
     let error = || StepError::Aerodynamics {
         body_id,
@@ -588,6 +632,40 @@ pub(super) fn prepare(
     if pressure_wind.is_none() && wave_model.is_none() && wing_requests.is_empty() {
         return Ok(None);
     }
+    if let Some(shared) = shared {
+        let caches = caches.get_or_insert_with(HashMap::new);
+        if !caches.contains_key(&body_id) {
+            caches
+                .try_reserve(1)
+                .map_err(|_| geometry_error(GeometryError::AllocationFailed))?;
+            let mut cache = AssemblyAerodynamics::empty(environment.oriented_cavities);
+            for &part in shared.0.parts() {
+                if matches!(
+                    geometry.get(&part),
+                    Some(PartGeometry::Wave(_) | PartGeometry::WaveSourceMesh(_))
+                ) {
+                    cache
+                        .wave_only_parts
+                        .try_reserve(1)
+                        .map_err(|_| geometry_error(GeometryError::AllocationFailed))?;
+                    cache.wave_only_parts.push(part);
+                }
+            }
+            cache.wave_only_parts.sort_unstable();
+            caches.insert(body_id, cache);
+        }
+        let prepared = evaluate(
+            body_id,
+            entry,
+            pressure_wind,
+            wave_model,
+            &wing_requests,
+            caches.get_mut(&body_id).ok_or_else(error)?,
+            Some(shared),
+        )
+        .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }))?;
+        return Ok(Some(prepared));
+    }
     let caches = caches.get_or_insert_with(HashMap::new);
     let count = cluster
         .parts()
@@ -634,6 +712,7 @@ pub(super) fn prepare(
             wave_model,
             &wing_requests,
             caches.get_mut(&body_id).ok_or_else(error)?,
+            None,
         )
         .map(Some)
         .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }));
@@ -758,6 +837,7 @@ pub(super) fn prepare(
         wave_model,
         &wing_requests,
         &mut candidate,
+        None,
     )
     .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }))?;
     caches.insert(body_id, candidate);
@@ -776,24 +856,41 @@ fn evaluate(
         Transform,
     )],
     prepared: &mut AssemblyAerodynamics,
+    shared: Option<(
+        &crate::aerodynamics::shape::ShapeBinding,
+        &crate::aerodynamics::shape::CookedShape,
+    )>,
 ) -> Result<PreparedAssembly, crate::Error> {
     let mut instances = Vec::new();
-    instances.try_reserve(prepared.sources.len()).map_err(|_| {
-        crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(
-            GeometryError::AllocationFailed,
-        ))
-    })?;
-    for (part, mesh, local_transform) in &prepared.sources {
-        instances.push(GeometryInstance {
-            mesh,
-            local_transform: if prepared.collider_parts.binary_search(part).is_ok() {
-                Transform::identity()
-            } else {
-                *local_transform
-            },
-            owner: GeometryOwner::Part(*part),
-        });
+    if let Some((binding, shape)) = shared {
+        binding.write_instances(shape, &mut instances)?;
+    } else {
+        instances.try_reserve(prepared.sources.len()).map_err(|_| {
+            crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(
+                GeometryError::AllocationFailed,
+            ))
+        })?;
+        for (part, mesh, local_transform) in &prepared.sources {
+            instances.push(GeometryInstance {
+                mesh,
+                local_transform: if prepared.collider_parts.binary_search(part).is_ok() {
+                    Transform::identity()
+                } else {
+                    *local_transform
+                },
+                owner: GeometryOwner::Part(*part),
+            });
+        }
     }
+    // Shared sources cannot include collider tessellation. Wave-only sources
+    // still shield other parts but do not receive mesh pressure.
+    let shared_geometry = shared.map(|(_, shape)| shape.geometry());
+    let collider_parts: &[PartId] = if shared_geometry.is_some() {
+        &[]
+    } else {
+        &prepared.collider_parts
+    };
+    let wave_only_parts = &prepared.wave_only_parts;
     let wave = if let Some((part, model, local)) = wave_model {
         let inverse = local.inverse().map_err(|_| {
             crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(
@@ -817,6 +914,10 @@ fn evaluate(
                 local_transform,
                 owner: instance.owner,
             });
+        }
+        if shared.is_some() {
+            // The body-local wave union keeps PartId order, not cook slot order.
+            wave_instances.sort_unstable_by_key(|instance| instance.owner);
         }
         prepared
             .wave_cache
@@ -857,19 +958,22 @@ fn evaluate(
                 },
             );
         if !cache_matches {
-            let config = pressure_geometry_config(&prepared.collider_parts);
-            let geometry = prepared
-                .cache
-                .prepare_instances(
-                    GeometryCacheKey {
-                        body: body_id,
-                        geometry_version: 0,
-                        config_version: 1,
-                    },
-                    &instances,
-                    config,
-                )
-                .map_err(crate::aerodynamics::AerodynamicsError::Geometry)?;
+            let config = pressure_geometry_config(collider_parts);
+            let geometry = match shared_geometry {
+                Some(geometry) => geometry,
+                None => prepared
+                    .cache
+                    .prepare_instances(
+                        GeometryCacheKey {
+                            body: body_id,
+                            geometry_version: 0,
+                            config_version: 1,
+                        },
+                        &instances,
+                        config,
+                    )
+                    .map_err(crate::aerodynamics::AerodynamicsError::Geometry)?,
+            };
             let mut candidate = Vec::new();
             candidate
                 .try_reserve_exact(wing_requests.len())
@@ -928,18 +1032,24 @@ fn evaluate(
         wing_visibility.sort_unstable_by_key(|entry| (entry.part, entry.index));
     }
     let patches = match pressure_wind {
-        Some(wind) => Some(
-            evaluate_pressure(
-                body_id,
-                entry,
-                wind,
-                &instances,
-                &prepared.collider_parts,
-                &prepared.wave_only_parts,
-                &mut prepared.cache,
+        Some(wind) => {
+            let geometry = match shared_geometry {
+                Some(geometry) => PressureGeometry::Shared(geometry),
+                None => PressureGeometry::Cache(&mut prepared.cache),
+            };
+            Some(
+                evaluate_pressure(
+                    body_id,
+                    entry,
+                    wind,
+                    &instances,
+                    collider_parts,
+                    wave_only_parts,
+                    geometry,
+                )
+                .map_err(crate::aerodynamics::AerodynamicsError::Geometry)?,
             )
-            .map_err(crate::aerodynamics::AerodynamicsError::Geometry)?,
-        ),
+        }
         None => None,
     };
     Ok(PreparedAssembly {
@@ -949,19 +1059,77 @@ fn evaluate(
     })
 }
 
+/// Verifies that `binding` still describes `cooked` for `body_id` in the live
+/// world: revision, preparation configuration, cavity policy, cluster
+/// membership, part meshes and transforms.
+///
+/// The checks allocate nothing, so evaluation can repeat them every step and
+/// fall back to body-local preparation on any mismatch instead of using stale
+/// or foreign geometry.
+pub(super) fn binding_matches(
+    body_id: BodyId,
+    entry: &BodyEntry,
+    parts: &DensePool<ClusterPart>,
+    geometry: Option<&HashMap<PartId, PartGeometry>>,
+    oriented_cavities: bool,
+    cooked: &crate::aerodynamics::shape::CookedShape,
+    binding: &crate::aerodynamics::shape::ShapeBinding,
+) -> Result<(), crate::Error> {
+    use crate::aerodynamics::shape::{ShapeRegistryError, assembly_pressure_config};
+    let invalid = || crate::Error::from(ShapeRegistryError::InvalidBinding);
+    if cooked.revision() != binding.revision() {
+        return Err(ShapeRegistryError::StaleBinding.into());
+    }
+    if cooked.config() != assembly_pressure_config()
+        || cooked.oriented_cavities() != oriented_cavities
+    {
+        return Err(invalid());
+    }
+    let cluster = entry
+        .cluster
+        .as_ref()
+        .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?;
+    let sources = cooked.sources();
+    let bound = binding.parts();
+    if bound.len() != sources.len() || bound.len() != cluster.parts().len() {
+        return Err(invalid());
+    }
+    for (source, &part) in sources.iter().zip(bound) {
+        let live = parts.get(part.dense).ok_or_else(invalid)?;
+        if part.world != body_id.world || live.body() != body_id || !cluster.parts().contains(&part)
+        {
+            return Err(invalid());
+        }
+        let mesh = match geometry.and_then(|items| items.get(&part)) {
+            Some(PartGeometry::Mesh(mesh) | PartGeometry::WaveSourceMesh(mesh)) => mesh,
+            Some(PartGeometry::Wave(model)) => &model.mesh,
+            _ => return Err(ShapeRegistryError::UnsupportedSource.into()),
+        };
+        if !Arc::ptr_eq(mesh, &source.mesh) || live.local_transform() != source.local_transform {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
 fn pressure_geometry_config(collider_parts: &[PartId]) -> GeometryConfig {
+    if collider_parts.is_empty() {
+        return crate::aerodynamics::shape::assembly_pressure_config();
+    }
     GeometryConfig {
         cell_size: 0.125,
         max_cells: 1_048_576,
         max_work: 100_000_000,
         open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
-        weld_tolerance: if collider_parts.is_empty() {
-            None
-        } else {
-            Some(1e-10)
-        },
+        weld_tolerance: Some(1e-10),
         max_patch_work: 100_000_000,
     }
+}
+
+/// Pressure geometry source: a cooked shared shape or the body-local cache.
+enum PressureGeometry<'a> {
+    Shared(&'a crate::aerodynamics::geometry::PreparedGeometry),
+    Cache(&'a mut PreparedGeometryCache),
 }
 
 fn evaluate_pressure(
@@ -971,18 +1139,21 @@ fn evaluate_pressure(
     instances: &[GeometryInstance<'_>],
     collider_parts: &[PartId],
     wave_only_parts: &[PartId],
-    cache: &mut PreparedGeometryCache,
+    geometry: PressureGeometry<'_>,
 ) -> Result<PreparedSurfacePatches, crate::Error> {
     let config = pressure_geometry_config(collider_parts);
-    let geometry = cache.prepare_instances(
-        GeometryCacheKey {
-            body: body_id,
-            geometry_version: 0,
-            config_version: 1,
-        },
-        instances,
-        config,
-    )?;
+    let geometry = match geometry {
+        PressureGeometry::Shared(geometry) => geometry,
+        PressureGeometry::Cache(cache) => cache.prepare_instances(
+            GeometryCacheKey {
+                body: body_id,
+                geometry_version: 0,
+                config_version: 1,
+            },
+            instances,
+            config,
+        )?,
+    };
     let inverse = entry
         .body
         .state()
@@ -1011,9 +1182,18 @@ fn evaluate_pressure(
                 .and_then(|rotation| velocity.checked_add(rotation))
                 .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))
         })?;
+    // Shared-shape evaluation resolves slot owners to parts through the
+    // binding before instance construction; unresolved slots cannot be
+    // attributed to wave-only parts here and are rejected explicitly.
+    if patches
+        .iter()
+        .any(|patch| matches!(patch.owner, GeometryOwner::Slot(_)))
+    {
+        return Err(crate::Error::from(GeometryError::InvalidGeometry));
+    }
     patches.retain(|patch| match patch.owner {
         GeometryOwner::Part(part) => wave_only_parts.binary_search(&part).is_err(),
-        GeometryOwner::Body => true,
+        GeometryOwner::Body | GeometryOwner::Slot(_) => true,
     });
     Ok(patches)
 }
@@ -1151,6 +1331,212 @@ mod tests {
                 weld_tolerance: None,
             },
         )?)
+    }
+
+    #[rstest::rstest]
+    #[case::merge(false, 0)]
+    #[case::merge_sharded(true, 0)]
+    #[case::split(false, 1)]
+    #[case::split_sharded(true, 1)]
+    #[case::root_transfer(false, 2)]
+    #[case::root_transfer_sharded(true, 2)]
+    fn bound_wave_and_shielded_wing_keep_topology_owners(
+        #[case] sharded: bool,
+        #[case] topology: u8,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::{
+            geometry::OwnerSlot,
+            shape::CookedSource,
+            wing::{FiniteWing, WingSurface},
+        };
+        let mut results = Vec::new();
+        for (bound, shielded, rebind) in [
+            (false, true, false),
+            (true, true, false),
+            (false, false, false),
+            (true, true, true),
+        ] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::X * -680.0,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let first = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+            let second = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+            let root = world.enable_cluster(first)?;
+            let loaded = world.enable_cluster(second)?;
+            let mut model = wave_model()?;
+            model.mesh = Arc::new(super::super::shape_binding_tests::cube()?);
+            world.set_part_voxel_wave(loaded, Some(model))?;
+            let wing = WingSurface::new(
+                FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?
+                    .with_supersonic_linear_theory(1.2, 3.0)?,
+                Transform::new(Vec3::Y * 0.25, kapitsa_math::Quat::IDENTITY)?,
+                4.0,
+            )?;
+            let wing = if shielded {
+                wing.with_rectangular_footprint(Vec3::splat(0.5), 2.0, 2.0)?
+            } else {
+                wing
+            };
+            world.set_part_aerodynamic_wings(loaded, vec![wing])?;
+            // A wave-only mesh on the other root permits a full two-slot binding
+            // before split/root transfer without introducing pressure loads.
+            world.set_part_wave_source_mesh_shared(
+                root,
+                Some(Arc::clone(
+                    world.part_aerodynamic_mesh_arc(loaded).ok_or("wave mesh")?,
+                )),
+            )?;
+            if topology != 0 {
+                world.merge_clusters(first, second, weld())?;
+            }
+            let bind = |world: &mut PhysicsWorld, body| -> Result<(), Box<dyn std::error::Error>> {
+                let parts = world
+                    .cluster(body)
+                    .ok_or("binding cluster")?
+                    .parts()
+                    .to_vec();
+                let sources = parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &part)| {
+                        Ok(CookedSource {
+                            mesh: Arc::clone(
+                                world.part_aerodynamic_mesh_arc(part).ok_or("source mesh")?,
+                            ),
+                            local_transform: Transform::identity(),
+                            slot: OwnerSlot::new(u32::try_from(i)?),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+                let shape = world.cook_shape(&sources, false)?;
+                world.bind_shape(body, shape, parts)?;
+                Ok(())
+            };
+            if bound {
+                bind(&mut world, if topology == 0 { second } else { first })?;
+            }
+            match topology {
+                0 => world.merge_clusters(first, second, weld())?,
+                1 => {
+                    let bridge = world.cluster(first).ok_or("merged cluster")?.welds()[0];
+                    world.break_weld(bridge)?;
+                }
+                _ => world.destroy_cluster_part(root)?,
+            }
+            let body = world.part_body(loaded).ok_or("load owner body")?;
+            if rebind {
+                bind(&mut world, body)?;
+            }
+            // All cases compare against the same ordinary, body-local reference.
+            if sharded && bound {
+                world.step_with_shards(
+                    1e-8,
+                    &mut [Vec::new(), Vec::new()],
+                    &SequentialExecutor,
+                    2,
+                )?;
+            } else {
+                world.step(1e-8)?;
+            }
+            let [wave] = world.part_hull_wrenches() else {
+                return Err("expected one wave wrench".into());
+            };
+            let [wing] = world.part_wing_wrenches() else {
+                return Err("expected one wing wrench".into());
+            };
+            assert_eq!((wave.body, wave.part), (body, loaded));
+            assert_eq!((wing.body, wing.part), (body, loaded));
+            assert!(wave.wrench.force.length() > 0.0);
+            assert!(wing.wrench.force.length() > 0.0);
+            assert!(wing.wrench.moment.length() > 0.0);
+            assert_eq!(world.shape_binding(body).is_some(), rebind);
+            results.push((wave.wrench, wing.wrench));
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[0], results[3]);
+        assert!(results[0].1.force.length() < results[2].1.force.length());
+        Ok(())
+    }
+
+    #[test]
+    fn bound_wave_model_keeps_local_wave_response() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::{geometry::OwnerSlot, shape::CookedSource};
+        let mut results = Vec::new();
+        for (bound, sharded) in [(false, false), (true, false), (true, true)] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let mut rigid = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            rigid.set_linear_velocity(Vec3::X * 680.0)?;
+            let body = world.add_body(rigid)?;
+            let root = world.enable_cluster(body)?;
+            world.set_part_voxel_wave(root, Some(wave_model()?))?;
+            let offset = Vec3::X * 2.0;
+            let rotation = kapitsa_math::Quat::IDENTITY;
+            let local_transform = Transform::new(offset, rotation)?;
+            let child = world.add_cluster_part(
+                root,
+                crate::cluster::ClusterPartDesc {
+                    local_transform,
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::X * 680.0,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    frame_a: JointFrame::new(offset, rotation),
+                    ..weld()
+                },
+            )?;
+            let source_mesh = Arc::new(plate()?);
+            world.set_part_wave_source_mesh_shared(child, Some(Arc::clone(&source_mesh)))?;
+            if bound {
+                let mesh = Arc::clone(world.part_aerodynamic_mesh_arc(root).ok_or("wave mesh")?);
+                let shape = world.cook_shape(
+                    &[
+                        CookedSource {
+                            mesh,
+                            local_transform: Transform::identity(),
+                            slot: OwnerSlot::new(0),
+                        },
+                        CookedSource {
+                            mesh: source_mesh,
+                            local_transform,
+                            slot: OwnerSlot::new(1),
+                        },
+                    ],
+                    false,
+                )?;
+                world.bind_shape(body, shape, vec![root, child])?;
+            }
+            if sharded {
+                world.step_with_shards(1e-4, &mut [Vec::new()], &SequentialExecutor, 1)?;
+            } else {
+                world.step(1e-4)?;
+            }
+            let cache = world
+                .assembly_aerodynamics
+                .as_ref()
+                .and_then(|c| c.get(&body))
+                .ok_or("assembly cache")?;
+            assert!(cache.wave_cache.get().is_some());
+            if bound {
+                assert!(cache.sources.is_empty());
+                assert!(cache.cache.get().is_none());
+                assert!(world.shape_binding(body).is_some());
+            }
+            results.push(world.body(body).ok_or("body")?.state().linear_velocity());
+        }
+        assert!(results[0].x < 680.0);
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[0], results[2]);
+        Ok(())
     }
 
     #[test]
@@ -2024,6 +2410,7 @@ mod tests {
                 AssemblyEnvironment {
                     atmosphere: world.atmosphere,
                     oriented_cavities: false,
+                    shared: None,
                 },
             )?
             .ok_or("assembly")?;
@@ -2828,6 +3215,7 @@ mod tests {
                     AssemblyEnvironment {
                         atmosphere: world.atmosphere,
                         oriented_cavities: false,
+                        shared: None,
                     },
                 )?
                 .ok_or("prepared assembly")?

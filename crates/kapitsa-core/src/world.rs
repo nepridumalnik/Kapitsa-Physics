@@ -105,6 +105,7 @@ mod aerodynamics {
                         ),
                     }));
                 }
+                let shared = world.shared_shape(body_id, entry);
                 let patches = super::assembly_aerodynamics::prepare(
                     body_id,
                     entry,
@@ -115,6 +116,7 @@ mod aerodynamics {
                     super::assembly_aerodynamics::AssemblyEnvironment {
                         atmosphere,
                         oriented_cavities: world.preserve_assembly_mesh_cavities,
+                        shared,
                     },
                 )?;
                 let mut body = entry.body.motion();
@@ -174,6 +176,9 @@ mod part_hull_tests;
 #[cfg(test)]
 mod part_wings_tests;
 mod query;
+#[cfg(test)]
+mod shape_binding_tests;
+mod shapes;
 
 pub use aerodynamics::{AerodynamicSurface, AerodynamicTarget, AerodynamicsTask};
 pub use chunk::{AddChunkBatchError, AddChunkError, ChunkOperationError, RemoveChunkBatchError};
@@ -865,6 +870,8 @@ pub struct PhysicsWorld {
     parts: DensePool<ClusterPart>,
     part_aerodynamic_geometry: Option<HashMap<PartId, assembly_aerodynamics::PartGeometry>>,
     assembly_aerodynamics: Option<HashMap<BodyId, assembly_aerodynamics::AssemblyAerodynamics>>,
+    shapes: crate::aerodynamics::shape::ShapeRegistry,
+    shape_bindings: Option<HashMap<BodyId, crate::aerodynamics::shape::ShapeBinding>>,
     welds: DensePool<Weld>,
     colliders: DensePool<ColliderEntry>,
     chunks: DensePool<chunk::ChunkEntry>,
@@ -1603,6 +1610,8 @@ impl PhysicsWorld {
             parts: DensePool::new(),
             part_aerodynamic_geometry: None,
             assembly_aerodynamics: None,
+            shapes: crate::aerodynamics::shape::ShapeRegistry::new(),
+            shape_bindings: None,
             welds: DensePool::new(),
             colliders: DensePool::new(),
             chunks: DensePool::new(),
@@ -4325,6 +4334,7 @@ impl PhysicsWorld {
         self.part_wing_pending.clear();
         self.simple_surface_pending.clear();
         self.raw_simple_pending.clear();
+        self.prune_stale_shape_bindings();
         let atmosphere = self.atmosphere;
         if matches!(atmosphere, Atmosphere::Vacuum) {
             return Ok(());
@@ -4393,6 +4403,15 @@ impl PhysicsWorld {
             } else {
                 None
             };
+            let shared = shapes::resolve_shared_shape(
+                &self.shapes,
+                self.shape_bindings.as_ref(),
+                &self.parts,
+                self.part_aerodynamic_geometry.as_ref(),
+                self.preserve_assembly_mesh_cavities,
+                body_id,
+                entry,
+            );
             let assembly_prepared = assembly_aerodynamics::prepare(
                 body_id,
                 entry,
@@ -4403,6 +4422,7 @@ impl PhysicsWorld {
                 assembly_aerodynamics::AssemblyEnvironment {
                     atmosphere,
                     oriented_cavities: self.preserve_assembly_mesh_cavities,
+                    shared,
                 },
             )?;
             let (mut mesh_patches, assembly_wave, wing_visibility) = match assembly_prepared {
@@ -6223,15 +6243,12 @@ impl PhysicsWorld {
                                 Ok(None)
                             };
                             let mut temporary_assembly = None;
+                            let shared = self.shared_shape(step.body_id, entry);
                             let local_assembly = if staged.is_none()
-                                && (assembly_aerodynamics::wave_configured(
+                                && assembly_aerodynamics::configured(
                                     entry,
                                     self.part_aerodynamic_geometry.as_ref(),
-                                ) || assembly_aerodynamics::shielding_configured(
-                                    entry,
-                                    &self.parts,
-                                    self.part_aerodynamic_geometry.as_ref(),
-                                )) {
+                                ) {
                                 assembly_aerodynamics::prepare(
                                     step.body_id,
                                     entry,
@@ -6242,6 +6259,7 @@ impl PhysicsWorld {
                                     assembly_aerodynamics::AssemblyEnvironment {
                                         atmosphere,
                                         oriented_cavities: self.preserve_assembly_mesh_cavities,
+                                        shared,
                                     },
                                 )
                             } else {
@@ -6741,6 +6759,9 @@ impl PhysicsWorld {
         }
         if let Some(caches) = &mut self.assembly_aerodynamics {
             caches.remove(&id);
+        }
+        if let Some(bindings) = &mut self.shape_bindings {
+            bindings.remove(&id);
         }
         Some(removed)
     }

@@ -13,11 +13,36 @@ use kapitsa_math::Vec3;
 
 use crate::{shape::TriangleMesh, transform::Transform, world::PartId};
 
+/// Binding-independent owner index within a cooked shape. Slots are dense
+/// indices fixed at cook time; a binding resolves them to concrete parts.
+/// Slot order defines overlap tie-breaks for shared prepared geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OwnerSlot(u32);
+
+impl OwnerSlot {
+    /// Creates a slot from its dense index. Resolution bounds are checked by
+    /// the binding, not by the slot itself.
+    pub fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// Dense index of this slot within its cooked shape.
+    pub fn index(self) -> u32 {
+        self.0
+    }
+}
+
 /// Attribution within one body's local frame. Lowest owner wins overlap ties.
+///
+/// Cooked shared shapes use [`GeometryOwner::Slot`] owners so prepared
+/// geometry stays independent of any vessel's part identities; body-bound
+/// evaluation uses [`GeometryOwner::Part`] after the binding resolves slots to
+/// parts. Do not mix `Part` and `Slot` owners within one preparation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GeometryOwner {
     Body,
     Part(PartId),
+    Slot(OwnerSlot),
 }
 
 /// Borrowed geometry. Preparation neither clones nor takes ownership of the mesh.

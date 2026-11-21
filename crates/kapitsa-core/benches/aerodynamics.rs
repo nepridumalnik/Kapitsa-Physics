@@ -1,14 +1,16 @@
 //! Deterministic scalar kernels; run with `cargo bench -p kapitsa-core --bench aerodynamics`.
-use std::{hint::black_box, time::Instant};
+use std::{hint::black_box, sync::Arc, time::Instant};
 
 use kapitsa_core::{
     aerodynamics::{
         AtmosphericState,
         cache::{GeometryCacheKey, PreparedGeometryCache},
         geometry::{
-            GeometryConfig, GeometryInstance, GeometryOwner, OpenMeshPolicy, PreparedGeometry,
+            GeometryConfig, GeometryInstance, GeometryOwner, OpenMeshPolicy, OwnerSlot,
+            PreparedGeometry,
         },
         pressure::{PressureFlow, PressureWrench, evaluate_prepared_mesh},
+        shape::{CookedShape, CookedSource},
         wing::{FiniteWing, WingSurface},
     },
     rigid_body::RigidBody,
@@ -236,6 +238,64 @@ fn main() -> Result<(), kapitsa_core::Error> {
             black_box(wing_load(black_box(&wings), black_box(wing_flow)));
         });
     }
+
+    // Shared cooked vessel: one occupancy serves every body that binds it.
+    let shared_mesh = Arc::new(plates(4));
+    let cooked_sources = [CookedSource {
+        mesh: Arc::clone(&shared_mesh),
+        local_transform: Transform::identity(),
+        slot: OwnerSlot::new(0),
+    }];
+    let shared_shape = CookedShape::cook(&cooked_sources, config, false)?;
+    let shared_instances = [GeometryInstance {
+        mesh: shared_mesh.as_ref(),
+        local_transform: Transform::identity(),
+        owner: GeometryOwner::Slot(OwnerSlot::new(0)),
+    }];
+    let direct = PreparedGeometry::prepare(&shared_instances, config)?;
+    assert_eq!(shared_shape.geometry(), &direct);
+    let shared_patches = shared_shape.geometry().exposed_surface_patches(
+        &shared_instances,
+        Vec3::X,
+        0.01,
+        config.max_patch_work,
+    )?;
+    println!(
+        "\nshared vessel: tiles=4 triangles={} cells={} patches={}",
+        shared_mesh.triangles().len(),
+        shared_shape.geometry().occupancy().len(),
+        shared_patches.len()
+    );
+    measure("shared shape cook", 10, || {
+        black_box(CookedShape::cook(black_box(&cooked_sources), black_box(config), false).unwrap());
+    });
+    measure("shared prepared patches", 10_000, || {
+        black_box(
+            shared_shape
+                .geometry()
+                .exposed_surface_patches(
+                    black_box(&shared_instances),
+                    black_box(Vec3::X),
+                    black_box(0.01),
+                    black_box(config.max_patch_work),
+                )
+                .unwrap(),
+        );
+    });
+    measure("local prepare+patches", 10, || {
+        let prepared =
+            PreparedGeometry::prepare(black_box(&shared_instances), black_box(config)).unwrap();
+        black_box(
+            prepared
+                .exposed_surface_patches(
+                    black_box(&shared_instances),
+                    black_box(Vec3::X),
+                    black_box(0.01),
+                    black_box(config.max_patch_work),
+                )
+                .unwrap(),
+        );
+    });
 
     let rear_x = -2.0_f64.powi(-500);
     let mesh = TriangleMesh::new(

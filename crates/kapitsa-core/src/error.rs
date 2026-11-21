@@ -11,7 +11,8 @@ use crate::{
     aabb::AabbError,
     aerodynamics::{
         AerodynamicsError, geometry::GeometryError, hull::HullError, pressure::PressureError,
-        sphere_drag::SphereDragError, wave::WaveDragError, wing::WingError,
+        shape::ShapeRegistryError, sphere_drag::SphereDragError, wave::WaveDragError,
+        wing::WingError,
     },
     chunk::ChunkBuildError,
     cluster::{ClusterError, balance::BalanceError},
@@ -238,6 +239,7 @@ impl_error_from!(AerodynamicsError, Aerodynamics);
 impl_error_from!(GeometryError, Aerodynamics);
 impl_error_from!(HullError, Aerodynamics);
 impl_error_from!(PressureError, Aerodynamics);
+impl_error_from!(ShapeRegistryError, Aerodynamics);
 impl_error_from!(SphereDragError, Aerodynamics);
 impl_error_from!(WaveDragError, Aerodynamics);
 impl_error_from!(WingError, Aerodynamics);
