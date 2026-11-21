@@ -123,7 +123,18 @@ impl PhysicsWorld {
         policy: PendingAero,
         worker: &crate::aerodynamics::shape::worker::ShapeWorker,
     ) -> Result<(), crate::Error> {
-        self.queue_body_shape(body, policy, worker)?;
+        self.manage_body_shape_with_completion(body, policy, worker, None)
+    }
+
+    /// Enables automatic recooking and reports the initial publication outcome.
+    pub fn manage_body_shape_with_completion(
+        &mut self,
+        body: BodyId,
+        policy: PendingAero,
+        worker: &crate::aerodynamics::shape::worker::ShapeWorker,
+        completion: Option<BodyShapeCompletion>,
+    ) -> Result<(), crate::Error> {
+        self.queue_body_shape_with_completion(body, policy, worker, completion)?;
         self.managed_shapes.get_or_insert_with(HashMap::new).insert(
             body,
             ManagedBodyShape {

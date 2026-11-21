@@ -134,6 +134,28 @@ impl PhysicsClient {
                 policy,
                 worker: worker.clone(),
                 completion,
+                managed: false,
+            })
+            .await?,
+        )
+    }
+
+    /// Starts background preparation and schedules new cooks after subsequent
+    /// assembly edits at full step boundaries. Completion reports the initial cook.
+    pub async fn manage_body_shape(
+        &self,
+        body: BodyId,
+        policy: kapitsa_core::aerodynamics::shape::worker::PendingAero,
+        worker: &kapitsa_core::aerodynamics::shape::worker::ShapeWorker,
+        completion: Option<kapitsa_core::world::BodyShapeCompletion>,
+    ) -> Result<(), Error> {
+        expect_done(
+            self.submit(PhysicsCommand::QueueBodyShape {
+                body,
+                policy,
+                worker: worker.clone(),
+                completion,
+                managed: true,
             })
             .await?,
         )
