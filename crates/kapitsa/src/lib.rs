@@ -137,8 +137,8 @@ pub mod world {
     };
     pub use kapitsa_core::world::{
         BodyId, ClusterError, ColliderId, ErrorPolicy, ForceSource, ForceSourceError,
-        ForceSourceId, GravityId, JointId, JointTarget, PartId, StepDiagnostics, StepError, WeldId,
-        WorldError,
+        ForceSourceId, GravityId, JointId, JointTarget, PartId, PartWingId, PartWingWrench,
+        StepDiagnostics, StepError, WeldId, WorldError,
     };
 }
 

@@ -256,6 +256,9 @@ fn part_wing_snapshot_sums_force_and_moment_and_reuses_buffers()
         assert_eq!(loads.len(), 2);
         assert_eq!(loads[0].wrench, a);
         assert_eq!(loads[1].wrench, b);
+        assert_eq!(Some(loads[0].wing), world.part_wing_id(part, 0));
+        assert_eq!(Some(loads[1].wing), world.part_wing_id(part, 1));
+        assert_ne!(loads[0].wing, loads[1].wing);
         let sum = loads[0].wrench.force + loads[1].wrench.force;
         let moment = loads[0].wrench.moment + loads[1].wrench.moment;
         assert!(moment.length() < 1e-12);

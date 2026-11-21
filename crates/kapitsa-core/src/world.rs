@@ -301,6 +301,8 @@ pub struct PartHullWrench {
 pub struct PartWingWrench {
     pub body: BodyId,
     pub part: PartId,
+    /// Identity of the evaluated wing, valid until its part's wing list is replaced.
+    pub wing: PartWingId,
     pub wrench: crate::aerodynamics::pressure::PressureWrench,
 }
 
@@ -3804,7 +3806,7 @@ impl PhysicsWorld {
                                  local: crate::transform::Transform,
                                  visibility: Option<crate::aerodynamics::wing::WingVisibility>,
                                  visibility_required: bool,
-                                 owner: Option<PartId>|
+                                 owner: Option<PartWingId>|
          -> Result<(), Error> {
             let transform = body
                 .state()
@@ -3852,11 +3854,12 @@ impl PhysicsWorld {
                         })?;
                 body.apply_force(wrench.force).map_err(|_| error())?;
                 body.apply_torque(wrench.moment).map_err(|_| error())?;
-                if let (Some(part), Some(wrenches)) = (owner, part_wing_wrenches.as_deref_mut()) {
+                if let (Some(wing), Some(wrenches)) = (owner, part_wing_wrenches.as_deref_mut()) {
                     wrenches.try_reserve(1).map_err(|_| error())?;
                     wrenches.push(PartWingWrench {
                         body: body_id,
-                        part,
+                        part: wing.part,
+                        wing,
                         wrench,
                     });
                 }
@@ -3894,7 +3897,11 @@ impl PhysicsWorld {
                     part.local_transform(),
                     visibility,
                     surface.has_footprint() && wing_visibility.is_some(),
-                    Some(part_id),
+                    Some(PartWingId {
+                        part: part_id,
+                        index,
+                        revision: part.wing_revision,
+                    }),
                 )?;
             }
         }
