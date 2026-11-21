@@ -41,6 +41,39 @@ impl std::fmt::Display for SubmitError {
 
 impl std::error::Error for SubmitError {}
 
+/// Aerodynamic behavior while an asynchronously managed shape is pending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingAero {
+    /// Use the last good shape only while its topology still matches.
+    KeepPrevious,
+    /// Suppress aerodynamic loads until publication.
+    ZeroForce,
+    /// Wait for the background result before evaluating the step.
+    BlockStep,
+}
+
+/// Action at a step boundary before aerodynamic evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingAction {
+    /// Evaluate using the last successfully installed shape.
+    Previous,
+    /// Do not apply the pending body's aerodynamic loads.
+    Suppress,
+    /// Wait for the worker before evaluating aerodynamics.
+    Wait,
+}
+
+impl PendingAero {
+    /// Chooses an action. Pass `false` if there is no usable previous shape.
+    pub fn action(self, previous_topology_matches: bool) -> PendingAction {
+        match self {
+            Self::KeepPrevious if previous_topology_matches => PendingAction::Previous,
+            Self::KeepPrevious | Self::ZeroForce => PendingAction::Suppress,
+            Self::BlockStep => PendingAction::Wait,
+        }
+    }
+}
+
 /// One pending cook. Dropping it discards the result without blocking.
 pub struct PendingShape {
     cancelled: Arc<AtomicBool>,
@@ -119,6 +152,19 @@ impl ShapeWorker {
 mod tests {
     use super::*;
     use crate::aerodynamics::geometry::GeometryError;
+
+    #[test]
+    fn pending_policy_never_retains_a_shape_across_topology_changes() {
+        use PendingAction::{Previous, Suppress, Wait};
+        for (policy, unchanged, changed) in [
+            (PendingAero::KeepPrevious, Previous, Suppress),
+            (PendingAero::ZeroForce, Suppress, Suppress),
+            (PendingAero::BlockStep, Wait, Wait),
+        ] {
+            assert_eq!(policy.action(true), unchanged);
+            assert_eq!(policy.action(false), changed);
+        }
+    }
 
     #[test]
     fn cancelled_result_cannot_replace_the_next_request() -> Result<(), Box<dyn std::error::Error>>
