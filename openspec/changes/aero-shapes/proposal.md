@@ -1,7 +1,7 @@
 # Aero shapes: shared prepared vessel geometry
 
-Status: **planned, not started**. Branch: `feat/aero_shapes`, created from the
-updated `master` after `feat/aero_rest` merges. The spec deltas and unchecked
+Status: **in progress** on `feat/aero_shapes`, created from the updated
+`master` after the `feat/aero_rest` merge. The spec deltas and unchecked
 tasks record the agreed acceptance criteria; they are refined when the change
 starts.
 
@@ -53,6 +53,66 @@ their current guarantees.
   shape-related allocation.
 - Regression tests cover sharing, invalidation, stale tickets, topology
   changes and rollback; docs and public API snapshots are updated.
+
+## Design
+
+Recorded from the integration audit at the branch start. The audit mapped
+every entry point of `BodyId`/`PartId` into geometry preparation, caching,
+owner attribution and load dispatch.
+
+Audit facts that shape the design:
+
+- Production cache keys are the constant `{body, geometry_version: 0,
+  config_version: 1}`; invalidation happens by dropping the cache owner and
+  by `Arc<()>` incarnation tickets, not by version bumps. The
+  `request -> prepare -> publish` ticket path is already async-capable and is
+  reused, not rebuilt.
+- `GeometryOwner::Part(PartId)` is embedded in prepared occupancy, surface
+  triangles, patches and `OwnerPressureWorkspace`. `PartHullWrench` /
+  `PartWingWrench`, assembly wave ownership and wing visibility keys carry
+  `PartId` directly from cluster parts and are independent of prepared-geometry
+  owners; only mesh-pressure attribution needs a slot translation layer.
+- Patch geometry is re-derived from instances at evaluation time; only
+  occupancy, sections and volume are baked at preparation. A shared shape can
+  therefore serve different bindings without re-voxelization.
+- `GeometryOwner` is facade-public and `Ord`-sensitive: overlap ties resolve to
+  the lowest owner and canonical patch sorting is owner-first, currently
+  ordered by `PartId` `(world, index, generation)`.
+- `MaterialStorage`/`MaterialId` (storage-scoped identity over `DensePool`
+  with generation checks) is the closest existing registry analogue.
+- Existing defect found: `destroy_cluster_part` orphans
+  `part_aerodynamic_geometry` entries until `remove_body`. The shape lifecycle
+  must not repeat this; the leak is fixed as a focused separate commit.
+
+Decisions:
+
+1. **Slot-based ownership.** `GeometryOwner` becomes `{ Body, Slot(OwnerSlot) }`
+   with `OwnerSlot` a small `Copy` index newtype. This is a documented breaking
+   change to a public enum, authorized by the spec delta requiring owner slots;
+   the crate is pre-1.0. The world assembly path assigns slots in sorted
+   `PartId` order, which preserves the current overlap tie-break and canonical
+   patch ordering bit-for-bit within one body.
+2. **Registry.** `ShapeRegistry` mirrors `MaterialStorage`: storage-scoped
+   `ShapeId { registry, DenseId }` over a `DensePool` of cooked shapes, with
+   generation-guarded lookups and explicit removal. A `CookedShape` holds the
+   immutable `PreparedGeometry`, its `GeometryConfig`, a revision, and the
+   `Arc`-shared source instances (mesh, cook-frame transform, owner slot)
+   needed to re-derive patches at evaluation.
+3. **Cook frame is fixed.** Source transforms are baked into occupancy at cook
+   time. A `ShapeBinding` maps `OwnerSlot -> PartId` and is validated against
+   the bound parts' existence and cook-frame transforms; a binding whose
+   transforms differ is rejected and requires a re-cook. No silent re-framing
+   of baked occupancy.
+4. **Cache reuse.** The existing `PreparedGeometryCache` and incarnation
+   tickets are reused for shape preparation/publication; the cache key is
+   generalized from `BodyId` to the shape identity. The primary single-body
+   mesh path keeps its current behavior in this change.
+5. **Translation at world boundaries.** Slot owners are translated to `PartId`
+   through the binding before weld-reaction dispatch and public load
+   publication. `PartHullWrench`/`PartWingWrench` channels are unchanged.
+6. **Determinism.** Slot order is fixed by the cooked shape; bindings never
+   alter cooked data. Ordinary and sharded paths must agree, and a geometry
+   edit on one vessel must not invalidate another vessel's shared shape.
 
 ## Non-goals
 
