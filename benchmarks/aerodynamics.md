@@ -286,3 +286,9 @@ The affine distance fallback revision `8607c83` measured medians of
 21.07 us and 1.307 ms on the small and moderate fixtures. The wide
 projected-edge fixture measured 6.03 us (5.98 to 6.20 us). These runs
 do not isolate the exact affine fallback.
+
+Fused intersection interpolation on `c603ae5` measured 22.70 us for the
+small partial-visibility fixture, 1.445 ms for the moderate fixture and
+6.66 us for wide projected edges. The workspace test suite was running
+concurrently, so these values are not an isolated performance comparison.
+Both aerodynamic and wing-shielding benchmark targets completed.
