@@ -18,7 +18,9 @@ shadow boundaries and windward values, and `c603ae5` for fused multiply-add
 crossing interpolation with finite coordinate differences, and `a633369` for
 fused residual correction of crossing fractions near binary rounding boundaries,
 and `3ef81e7` for reciprocal residual correction in the larger endpoint-order
-branch and its rational-reference regression.
+branch and its rational-reference regression, and `b3ab97b` for shared
+power-of-two scaling of two subnormal crossing distances before fused ratio
+residual correction and its exact rational-reference regression.
 
 ## Scope
 
@@ -132,11 +134,27 @@ This change covers:
   overflowing distance sum;
 - applying `a633369` fused residual correction to the smaller fraction: with
   `r = small/large`, `d = 1 + r` and `f = r/d`, compute
-  `e = r - (d - 1)`, `q = (-r).mul_add(large, small)/large` and
+  `e = r - (d - 1)`, `q = (-r).mul_add(L, S)/L` and
   `s = (-f).mul_add(d, r)`, then use `f + ((s + q) - f*e)/d`;
   these bounded correction quantities reduce ratio, sum and division rounding
   error without forming an overflowing distance sum or a separately rounded,
-  potentially underflowing residual product;
+  potentially underflowing residual product; `S` and `L` are the residual
+  operands selected by the shared scaling below;
+- applying `b3ab97b` shared exact binary scaling before the FMA ratio residual:
+  when `large < f64::MIN_POSITIVE`, both magnitudes are subnormal and
+  `(S,L) = (small*2^52, large*2^52)`; otherwise `(S,L) = (small,large)`;
+  the common scale preserves the mathematical ratio and keeps the subnormal
+  operands and fused residual representable before division by `L`; the
+  initial `r`, `d` and `f` remain computed from the unscaled ratio, and the
+  resulting `q` is shared by the smaller and larger endpoint-order corrections;
+- recording `b3ab97b` synthetic regression
+  `crossing_fraction_corrects_two_subnormal_distances`: with
+  `small = f64::from_bits(0x5d)` and `large = f64::from_bits(0x3c_f738)`,
+  both `(small, -large)` and `(-small, large)` yield
+  `f64::from_bits(0x3ef8_6816_e38d_5625)`, the nearest binary64 to the exact
+  rational `small/(small+large) = 0x5d/(0x5d + 0x3c_f738)` formed from
+  those stored inputs; the common subnormal unit cancels exactly; this is not
+  test execution evidence or independent physical validation;
 - applying `3ef81e7` reciprocal residual correction in the larger endpoint-order
   branch: with the same `r`, `d`, `e` and `q`, compute `u = 1/d` and
   `v = (-u).mul_add(d, 1.0)`, then use `u + (v - u*(e + q))/d` instead
@@ -174,7 +192,8 @@ This change covers:
 - retaining binary64 rounding of coordinate differences, crossing fractions
   and constructed intersections, including possible fraction rounding to one;
   the ratio, `1 + ratio`, residual correction, reciprocal and final fraction
-  remain binary64 operations, with no universal correct-rounding guarantee;
+  remain binary64 operations despite exact shared subnormal scaling, with no
+  universal correct-rounding guarantee;
   a smaller fraction rounding to zero still returns `PrecisionLoss` and
   non-finite constructed points still return `ArithmeticOverflow`; fused
   multiply-add does not make geometry exact or provide a global numeric error

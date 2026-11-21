@@ -172,7 +172,8 @@
 - [x] Record `3ef81e7`: for the larger endpoint-order branch, use
   `u = 1/d`, `v = (-u).mul_add(d, 1.0)` and
   `u + (v - u*(e + q))/d`, with `r = small/large`, `d = 1 + r`,
-  `e = r - (d - 1)` and `q = (-r).mul_add(large, small)/large`;
+  `e = r - (d - 1)` and `q = (-r).mul_add(L, S)/L`, with residual operands
+  selected by `b3ab97b` shared scaling below;
   correct reciprocal, denominator and ratio rounding without forming the
   distance sum, while retaining the smaller-fraction underflow check.
 - [x] Document `crossing_fraction_corrects_large_endpoint_reciprocal`:
@@ -182,3 +183,21 @@
   using the nearest binary64 to exact rational `a/(a+b)` as reference for
   stored inputs; record a synthetic assertion only, not execution evidence
   or independent physical validation, and retain all binary64 limitations.
+- [x] Record `b3ab97b`: if `large < f64::MIN_POSITIVE`, scale both subnormal
+  magnitudes exactly by `2^52` to obtain `(S,L)` before computing the FMA
+  residual `q = (-r).mul_add(L, S)/L`; otherwise use the original magnitudes.
+  Preserve the mathematical ratio and residual before division, retain the
+  unscaled initial ratio calculation and share `q` across both endpoint-order
+  corrections.
+- [x] Document `crossing_fraction_corrects_two_subnormal_distances`:
+  `small = f64::from_bits(0x5d)` and `large = f64::from_bits(0x3c_f738)` give
+  `f64::from_bits(0x3ef8_6816_e38d_5625)` for both `(small, -large)` and
+  `(-small, large)`, using the nearest binary64 to exact rational
+  `small/(small+large) = 0x5d/(0x5d + 0x3c_f738)` for stored inputs;
+  record a synthetic assertion only, not execution evidence or independent
+  physical validation.
+- [x] Retain rounding of ratio, denominator, residual correction, reciprocal,
+  fraction and constructed coordinates despite exact subnormal scaling: no
+  universal correct-rounding guarantee, exact geometry or global error bound;
+  possible fraction rounding to one, zero smaller-fraction `PrecisionLoss`
+  and non-finite-point `ArithmeticOverflow` remain unchanged.

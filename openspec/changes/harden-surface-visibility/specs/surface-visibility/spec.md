@@ -331,13 +331,10 @@ to zero SHALL return `PrecisionLoss`.
 
 ### Requirement: Preserve representable numeric intersections
 
-Crossing fractions SHALL use the smaller-to-larger absolute distance ratio.
-The smaller fraction SHALL apply fused ratio and division residual corrections
-and a correction for rounding `1 + ratio`, as recorded in `a633369`.
-The larger endpoint-order fraction SHALL apply fused reciprocal residual
-correction with the ratio and denominator errors, as recorded in `3ef81e7`.
-Finite coordinate differences SHALL use fused multiply-add for interpolation.
-Unrepresentable results SHALL return an error.
+Crossing fractions SHALL use the smaller-to-larger absolute distance ratio
+and fused residual corrections. Subnormal distance magnitudes SHALL share a
+power-of-two scale during residual calculation. Finite coordinate differences
+SHALL use fused multiply-add. Unrepresentable results SHALL return an error.
 
 #### Scenario: Finite distances have an overflowing difference
 
@@ -362,17 +359,44 @@ Unrepresentable results SHALL return an error.
 - **WHEN** `r = small/large`, `d = 1 + r` and `f = r/d` are computed from
   strictly opposite-signed finite distances' absolute magnitudes
 - **THEN** the smaller fraction uses `f + ((s + q) - f*e)/d`, where
-  `e = r - (d - 1)`, `q = (-r).mul_add(large, small)/large` and
+  `e = r - (d - 1)`, `q = (-r).mul_add(L, S)/L` and
   `s = (-f).mul_add(d, r)`
+- **AND** `(S,L)` are the shared scaled residual operands defined below;
+  `r`, `d` and `f` still use the original smaller-to-larger ratio
 - **AND** correction quantities are bounded; fused residuals avoid separately
   rounding potentially underflowing residual products, without forming the
   distance sum
+
+#### Scenario: Two subnormal distances share an exact residual scale
+
+- **WHEN** the ordered magnitudes satisfy `large < f64::MIN_POSITIVE`
+- **THEN** both are subnormal and the residual operands are
+  `S = small*2^52` and `L = large*2^52`, with both scalings exact
+- **AND** `q = (-r).mul_add(L, S)/L` preserves the fused residual before
+  division without changing the mathematical ratio; the same `q` is used
+  in both endpoint-order corrections
+- **AND** when `large >= f64::MIN_POSITIVE`, the operands remain
+  `S = small` and `L = large`
+
+#### Scenario: Synthetic two-subnormal correction matches an exact rational
+
+- **WHEN** `crossing_fraction_corrects_two_subnormal_distances` in `b3ab97b`
+  uses `small = f64::from_bits(0x5d)` and
+  `large = f64::from_bits(0x3c_f738)`
+- **THEN** both `crossing_fraction(small, -large)` and
+  `crossing_fraction(-small, large)` equal
+  `f64::from_bits(0x3ef8_6816_e38d_5625)`, the nearest binary64 to exact
+  rational `small/(small+large) = 0x5d/(0x5d + 0x3c_f738)`; the common
+  subnormal unit cancels exactly for these stored inputs
+- **AND** this is a synthetic regression assertion, not test execution evidence
+  or independent physical validation; this reference does not establish
+  universally correct rounding or exact geometry
 
 #### Scenario: Larger crossing fraction corrects the reciprocal residual
 
 - **WHEN** the first endpoint has the larger absolute distance and
   `r = small/large`, `d = 1 + r`, `e = r - (d - 1)` and
-  `q = (-r).mul_add(large, small)/large`
+  `q = (-r).mul_add(L, S)/L` with the shared residual operands defined above
 - **THEN** the larger endpoint-order branch computes `u = 1/d`,
   `v = (-u).mul_add(d, 1.0)` and returns `u + (v - u*(e + q))/d`,
   correcting reciprocal, denominator and ratio rounding without forming the
@@ -423,7 +447,8 @@ Unrepresentable results SHALL return an error.
 #### Scenario: Crossing arithmetic retains binary64 limits
 
 - **WHEN** crossings use fused residual fraction correction and fused
-  multiply-add for finite coordinate differences
+  multiply-add for finite coordinate differences, including shared exact
+  power-of-two residual scaling for two subnormal distances
 - **THEN** coordinate subtraction, the smaller-to-larger ratio, `1 + ratio`,
   residual correction, reciprocal, endpoint-order fraction and constructed
   point still round to binary64, and a fraction can still round to one
