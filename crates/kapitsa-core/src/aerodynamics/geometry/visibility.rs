@@ -781,6 +781,17 @@ mod tests {
     }
 
     #[test]
+    fn crossing_fraction_wide_range_stays_within_one_ulp() -> Result<(), crate::Error> {
+        // Inputs and expected result came from exact rational arithmetic.
+        let small = f64::from_bits(0x3f9b_7e1e_cdef_1832);
+        let large = f64::from_bits(0x7f49_8322_6928_7812);
+        let expected = f64::from_bits(0x0041_3df4_c5af_7ddf);
+        let actual = crossing_fraction(small, -large)?;
+        assert!(actual.to_bits().abs_diff(expected.to_bits()) <= 1);
+        Ok(())
+    }
+
+    #[test]
     fn crossing_fraction_corrects_normal_ratio_near_underflow() -> Result<(), crate::Error> {
         // Expected from exact rational arithmetic on the binary64 inputs.
         let small = f64::from_bits(0x2a38_b9be_9e64_a7b4);
