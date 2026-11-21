@@ -950,16 +950,15 @@ fn evaluate(
 }
 
 fn pressure_geometry_config(collider_parts: &[PartId]) -> GeometryConfig {
+    if collider_parts.is_empty() {
+        return crate::aerodynamics::shape::assembly_pressure_config();
+    }
     GeometryConfig {
         cell_size: 0.125,
         max_cells: 1_048_576,
         max_work: 100_000_000,
         open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
-        weld_tolerance: if collider_parts.is_empty() {
-            None
-        } else {
-            Some(1e-10)
-        },
+        weld_tolerance: Some(1e-10),
         max_patch_work: 100_000_000,
     }
 }

@@ -18,10 +18,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::containers::{DenseId, DensePool, DensePoolError};
 use crate::shape::TriangleMesh;
 use crate::transform::Transform;
+use crate::world::PartId;
 
 use super::geometry::{
-    GeometryConfig, GeometryError, GeometryInstance, GeometryOwner, OwnerSlot, PreparedGeometry,
+    GeometryConfig, GeometryError, GeometryInstance, GeometryOwner, OpenMeshPolicy, OwnerSlot,
+    PreparedGeometry,
 };
+
+/// Preparation configuration of the assembly mesh-pressure union for vessels
+/// whose sources are all explicit meshes (no collider tessellation).
+///
+/// A shared shape must be cooked with exactly this configuration and the
+/// body's current oriented-cavity policy to bind to a body; binding validates
+/// both. The values are the assembly union's production settings, kept here
+/// so cooking and evaluation share one definition.
+pub fn assembly_pressure_config() -> GeometryConfig {
+    GeometryConfig {
+        cell_size: 0.125,
+        max_cells: 1_048_576,
+        max_work: 100_000_000,
+        open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+        weld_tolerance: None,
+        max_patch_work: 100_000_000,
+    }
+}
 
 /// One source instance of a vessel shape in its fixed cook frame.
 ///
@@ -71,6 +91,14 @@ pub enum ShapeRegistryError {
     StaleShape,
     /// The shape revision counter cannot advance.
     RevisionExhausted,
+    /// A binding targets a revision that is no longer current.
+    StaleBinding,
+    /// A binding is empty, duplicates a part, or does not cover exactly one
+    /// part per shape source.
+    InvalidBinding,
+    /// A shape source cannot be shared: collider tessellation is regenerated
+    /// per body and cannot be pointer-verified for lazy invalidation.
+    UnsupportedSource,
 }
 
 impl fmt::Display for ShapeRegistryError {
@@ -78,6 +106,13 @@ impl fmt::Display for ShapeRegistryError {
         match self {
             Self::StaleShape => formatter.write_str("shape ID is foreign or stale"),
             Self::RevisionExhausted => formatter.write_str("shape revision counter is exhausted"),
+            Self::StaleBinding => formatter.write_str("shape binding revision is stale"),
+            Self::InvalidBinding => {
+                formatter.write_str("shape binding does not map one part per source")
+            }
+            Self::UnsupportedSource => {
+                formatter.write_str("shape source cannot be shared between bodies")
+            }
         }
     }
 }
@@ -290,6 +325,107 @@ impl ShapeRegistry {
 impl Default for ShapeRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Slot-to-part mapping that lets one body evaluate a shared [`CookedShape`].
+///
+/// The binding records the shape ID and the revision it was validated against.
+/// Slot `i` maps to `parts[i]`, preserving the cook-time source order and
+/// therefore overlap tie-breaks. Evaluation compares the live shape revision
+/// with the bound one and falls back to body-local preparation on mismatch
+/// instead of using stale geometry; it never mutates the binding in place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShapeBinding {
+    shape: ShapeId,
+    revision: u64,
+    parts: Vec<PartId>,
+}
+
+impl ShapeBinding {
+    /// Creates a slot-ordered binding.
+    ///
+    /// Rejects an empty mapping and duplicate parts. The part count must equal
+    /// the shape's source count; the world checks that when binding because
+    /// only the registry can resolve the shape.
+    pub fn new(shape: ShapeId, revision: u64, parts: Vec<PartId>) -> Result<Self, crate::Error> {
+        if parts.is_empty() {
+            return Err(crate::Error::from(ShapeRegistryError::InvalidBinding));
+        }
+        let mut sorted = Vec::new();
+        sorted
+            .try_reserve(parts.len())
+            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
+        sorted.extend_from_slice(&parts);
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(crate::Error::from(ShapeRegistryError::InvalidBinding));
+        }
+        Ok(Self {
+            shape,
+            revision,
+            parts,
+        })
+    }
+
+    /// Shape this binding refers to.
+    pub fn shape(&self) -> ShapeId {
+        self.shape
+    }
+
+    /// Revision the binding was validated against.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Parts in slot order; slot `i` is `parts()[i]`.
+    pub fn parts(&self) -> &[PartId] {
+        &self.parts
+    }
+
+    /// Part that owns `slot`, or `None` when the slot is outside the binding.
+    pub fn part(&self, slot: OwnerSlot) -> Option<PartId> {
+        self.parts.get(usize::try_from(slot.index()).ok()?).copied()
+    }
+
+    /// Slot owned by `part`, or `None` when the part is not bound. Linear in
+    /// the source count, which is small and bounded by the vessel parts.
+    pub fn slot_of(&self, part: PartId) -> Option<OwnerSlot> {
+        self.parts
+            .iter()
+            .position(|bound| *bound == part)
+            .and_then(|index| u32::try_from(index).ok())
+            .map(OwnerSlot::new)
+    }
+
+    /// Appends geometry instances for `shape` with this binding's part owners.
+    ///
+    /// The shape must still be at the bound revision and expose exactly one
+    /// source per bound part; otherwise the result is a stale or invalid
+    /// binding and nothing is appended.
+    pub fn write_instances<'a>(
+        &self,
+        shape: &'a CookedShape,
+        instances: &mut Vec<GeometryInstance<'a>>,
+    ) -> Result<(), crate::Error> {
+        if shape.revision() != self.revision {
+            return Err(crate::Error::from(ShapeRegistryError::StaleBinding));
+        }
+        let sources = shape.sources();
+        if sources.len() != self.parts.len() {
+            return Err(crate::Error::from(ShapeRegistryError::InvalidBinding));
+        }
+        instances
+            .try_reserve(sources.len())
+            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
+        for (source, part) in sources.iter().zip(&self.parts) {
+            instances.push(GeometryInstance {
+                mesh: &source.mesh,
+                local_transform: source.local_transform,
+                owner: GeometryOwner::Part(*part),
+            });
+        }
+        Ok(())
     }
 }
 

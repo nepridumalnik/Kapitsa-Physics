@@ -315,3 +315,121 @@ fn revision_exhaustion_is_rejected_without_mutation() -> Result<(), Box<dyn std:
     assert_eq!(stored.sources().len(), 2);
     Ok(())
 }
+
+/// Creates `count` clustered bodies and returns their root parts.
+fn bound_parts(
+    count: usize,
+) -> Result<(crate::world::PhysicsWorld, Vec<PartId>), Box<dyn std::error::Error>> {
+    use crate::{mass::MassProperties, rigid_body::RigidBody, world::PhysicsWorld};
+    use kapitsa_math::Mat3;
+    let mut world = PhysicsWorld::new();
+    let mut parts = Vec::new();
+    for _ in 0..count {
+        let body = world.add_body(RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+        )?)?;
+        parts.push(world.enable_cluster(body)?);
+    }
+    Ok((world, parts))
+}
+
+#[test]
+fn binding_maps_slots_and_writes_part_owned_instances() -> Result<(), Box<dyn std::error::Error>> {
+    let (mesh, list) = sources()?;
+    let mut registry = ShapeRegistry::new();
+    let id = registry.cook(&list, config(), false)?;
+    let (_world, parts) = bound_parts(2)?;
+    let shape = registry.get(id).ok_or("shape")?;
+    let binding = ShapeBinding::new(id, shape.revision(), parts.clone())?;
+    assert_eq!(binding.shape(), id);
+    assert_eq!(binding.revision(), 1);
+    assert_eq!(binding.parts(), parts.as_slice());
+    assert_eq!(binding.part(OwnerSlot::new(1)), Some(parts[1]));
+    assert_eq!(binding.part(OwnerSlot::new(2)), None);
+    assert_eq!(binding.slot_of(parts[0]), Some(OwnerSlot::new(0)));
+    let mut instances = Vec::new();
+    binding.write_instances(shape, &mut instances)?;
+    assert_eq!(instances.len(), 2);
+    assert_eq!(instances[0].owner, GeometryOwner::Part(parts[0]));
+    assert_eq!(instances[1].owner, GeometryOwner::Part(parts[1]));
+    assert!(std::ptr::eq(instances[0].mesh, &*shape.sources()[0].mesh));
+    assert!(std::ptr::eq(instances[0].mesh, &*mesh));
+    assert_eq!(
+        instances[1].local_transform,
+        Transform::new(Vec3::Y * 3.0, Quat::IDENTITY)?
+    );
+    Ok(())
+}
+
+#[test]
+fn binding_rejects_empty_and_duplicate_parts() -> Result<(), Box<dyn std::error::Error>> {
+    let (_, list) = sources()?;
+    let mut registry = ShapeRegistry::new();
+    let id = registry.cook(&list, config(), false)?;
+    let (_, parts) = bound_parts(2)?;
+    let error = ShapeBinding::new(id, 1, Vec::new())
+        .err()
+        .ok_or("empty binding must fail")?;
+    assert_eq!(
+        error.downcast_ref::<ShapeRegistryError>(),
+        Some(&ShapeRegistryError::InvalidBinding)
+    );
+    let error = ShapeBinding::new(id, 1, vec![parts[0], parts[0]])
+        .err()
+        .ok_or("duplicate binding must fail")?;
+    assert_eq!(
+        error.downcast_ref::<ShapeRegistryError>(),
+        Some(&ShapeRegistryError::InvalidBinding)
+    );
+    Ok(())
+}
+
+#[test]
+fn binding_write_rejects_stale_revision_and_wrong_arity() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (_, list) = sources()?;
+    let mut registry = ShapeRegistry::new();
+    let id = registry.cook(&list, config(), false)?;
+    let (_, parts) = bound_parts(2)?;
+    let binding = ShapeBinding::new(id, 1, parts.clone())?;
+    {
+        let mut instances = Vec::new();
+        binding.write_instances(registry.get(id).ok_or("shape")?, &mut instances)?;
+        assert_eq!(instances.len(), 2);
+    }
+    let replacement = CookedShape::cook(&list, config(), false)?;
+    assert_eq!(registry.replace(id, replacement)?, 2);
+    let mut instances = Vec::new();
+    let error = binding
+        .write_instances(registry.get(id).ok_or("shape")?, &mut instances)
+        .err()
+        .ok_or("stale binding must fail")?;
+    assert_eq!(
+        error.downcast_ref::<ShapeRegistryError>(),
+        Some(&ShapeRegistryError::StaleBinding)
+    );
+    assert!(instances.is_empty());
+    let mut instances = Vec::new();
+    let fresh = ShapeBinding::new(id, 2, vec![parts[0]])?;
+    let error = fresh
+        .write_instances(registry.get(id).ok_or("shape")?, &mut instances)
+        .err()
+        .ok_or("wrong arity must fail")?;
+    assert_eq!(
+        error.downcast_ref::<ShapeRegistryError>(),
+        Some(&ShapeRegistryError::InvalidBinding)
+    );
+    Ok(())
+}
+
+#[test]
+fn assembly_pressure_config_is_the_documented_union_configuration() {
+    let config = assembly_pressure_config();
+    assert_eq!(config.cell_size, 0.125);
+    assert_eq!(config.max_cells, 1_048_576);
+    assert_eq!(config.max_work, 100_000_000);
+    assert_eq!(config.open_mesh_policy, OpenMeshPolicy::SurfaceOnly);
+    assert_eq!(config.weld_tolerance, None);
+    assert_eq!(config.max_patch_work, 100_000_000);
+}
