@@ -948,6 +948,30 @@ mod tests {
         let current = world.shape_binding(first).ok_or("merged binding")?;
         assert_ne!(initial, current.shape());
         assert_eq!(current.parts(), &[a, b]);
+        let bridge = *world
+            .cluster(first)
+            .ok_or("merged cluster")?
+            .welds()
+            .first()
+            .ok_or("missing bridge")?;
+        let merged = current.shape();
+        world.break_weld(bridge)?;
+        step(&mut world)?;
+        let current = world.shape_binding(first).ok_or("split binding")?;
+        assert_ne!(current.shape(), merged);
+        assert_eq!(current.parts(), &[a]);
+        let detached = world.part_body(b).ok_or("detached owner")?;
+        assert_eq!(
+            world.body_shape_status(detached),
+            BodyShapeStatus::Unmanaged
+        );
+        world.merge_clusters(
+            first,
+            detached,
+            super::super::shape_binding_tests::merge_weld(),
+        )?;
+        step(&mut world)?;
+        let current = world.shape_binding(first).ok_or("remerged binding")?;
         let merged = current.shape();
         world.destroy_cluster_part(a)?;
         step(&mut world)?;
