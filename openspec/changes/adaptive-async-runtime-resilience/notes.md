@@ -150,8 +150,10 @@ blocked-state test now also checks that an identical velocity update leaves the
 service blocked; unchanged angular-velocity updates are handled likewise. Other
 command types still need a complete no-op/relevant-mutation audit before task
 2.5 can be accepted.
-Velocity-only batches now compare final body motion with their starting state,
-so setting a value and restoring it does not unblock the service. This bounded
+Body, joint and force-source batches now compare final state with their starting
+state, so setting a value and restoring it does not unblock the service. Single
+body, joint, force-source, atmosphere, central-gravity and collision-config
+commands also compare their state. This bounded
 temporary collection is used only while blocked; ordinary step processing does
 not allocate it. The focused service suite passed 46 tests (2 ignored), and
 all-target/all-feature clippy passed after updating the benchmark call site.

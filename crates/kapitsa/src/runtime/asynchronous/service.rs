@@ -1257,15 +1257,73 @@ fn simulation_debt(accumulated: Duration, fixed_step: Duration) -> Duration {
     accumulated.saturating_sub(fixed_step)
 }
 
-fn command_may_change_world(world: &PhysicsWorld, command: &PhysicsCommand) -> bool {
+enum MutationBefore {
+    Body(
+        kapitsa_core::world::BodyId,
+        Option<kapitsa_core::rigid_body::BodyMotion>,
+    ),
+    Joint(
+        kapitsa_core::world::JointId,
+        Box<Option<kapitsa_core::joint::Joint>>,
+    ),
+    ForceSource(
+        kapitsa_core::world::ForceSourceId,
+        Option<kapitsa_core::world::ForceSource>,
+    ),
+    Gravity(Option<kapitsa_core::gravity::CentralGravity>),
+    Atmosphere(kapitsa_core::aerodynamics::Atmosphere),
+    CollisionConfig(kapitsa_core::collision::CollisionConfig),
+    Unknown,
+}
+
+impl MutationBefore {
+    fn changed(&self, world: &PhysicsWorld) -> bool {
+        match self {
+            Self::Body(id, before) => world.body(*id).map(|body| body.motion()) != *before,
+            Self::Joint(id, before) => world.joint(*id).copied() != **before,
+            Self::ForceSource(id, before) => world.force_source(*id).copied() != *before,
+            Self::Gravity(before) => world.central_gravity() != *before,
+            Self::Atmosphere(before) => world.atmosphere() != *before,
+            Self::CollisionConfig(before) => world.collision_config() != *before,
+            Self::Unknown => true,
+        }
+    }
+}
+
+fn mutation_before(world: &PhysicsWorld, command: &PhysicsCommand) -> MutationBefore {
     match command {
-        PhysicsCommand::SetLinearVelocity { id, velocity } => world
-            .body(*id)
-            .is_none_or(|body| body.state().linear_velocity() != *velocity),
-        PhysicsCommand::SetAngularVelocity { id, velocity } => world
-            .body(*id)
-            .is_none_or(|body| body.state().angular_velocity() != *velocity),
-        _ => true,
+        PhysicsCommand::SetTransform { id, .. }
+        | PhysicsCommand::SetLinearVelocity { id, .. }
+        | PhysicsCommand::SetAngularVelocity { id, .. }
+        | PhysicsCommand::SetMass { id, .. }
+        | PhysicsCommand::SetCcdMode { id, .. }
+        | PhysicsCommand::Sleep { id }
+        | PhysicsCommand::WakeUp { id }
+        | PhysicsCommand::ApplyForce { id, .. }
+        | PhysicsCommand::ApplyForceAtPoint { id, .. }
+        | PhysicsCommand::ApplyTorque { id, .. }
+        | PhysicsCommand::ApplyImpulse { id, .. }
+        | PhysicsCommand::ApplyImpulseAtPoint { id, .. }
+        | PhysicsCommand::ClearForces { id } => {
+            MutationBefore::Body(*id, world.body(*id).map(|body| body.motion()))
+        }
+        PhysicsCommand::UpdateJoint { id, .. }
+        | PhysicsCommand::SetJointEnabled { id, .. }
+        | PhysicsCommand::RemoveJoint { id } => {
+            MutationBefore::Joint(*id, Box::new(world.joint(*id).copied()))
+        }
+        PhysicsCommand::SetForceSource { id, .. }
+        | PhysicsCommand::SetForceSourceEnabled { id, .. } => {
+            MutationBefore::ForceSource(*id, world.force_source(*id).copied())
+        }
+        PhysicsCommand::SetCentralGravity { .. } => {
+            MutationBefore::Gravity(world.central_gravity())
+        }
+        PhysicsCommand::SetAtmosphere { .. } => MutationBefore::Atmosphere(world.atmosphere()),
+        PhysicsCommand::SetCollisionConfig { .. } => {
+            MutationBefore::CollisionConfig(world.collision_config())
+        }
+        _ => MutationBefore::Unknown,
     }
 }
 
@@ -1308,14 +1366,17 @@ fn apply_queued_commands(
                         | PhysicsCommand::Sweep { .. }
                         | PhysicsCommand::Overlaps { .. }
                         | PhysicsCommand::GetMaterial { .. }
+                        | PhysicsCommand::GetPartWingId { .. }
                         | PhysicsCommand::GetCluster { .. }
                         | PhysicsCommand::GetClusterPart { .. }
                         | PhysicsCommand::GetWeld { .. }
                 );
-                let changes_world =
-                    !is_read_only_query && command_may_change_world(world, &command);
+                let before =
+                    (detect_noop && !is_read_only_query).then(|| mutation_before(world, &command));
                 let result = apply_command(world, command);
-                mutated |= changes_world && result.is_ok();
+                mutated |= !is_read_only_query
+                    && result.is_ok()
+                    && before.as_ref().is_none_or(|before| before.changed(world));
                 commands
                     .pending_results
                     .push(DeferredCommandResult::Single {
@@ -1325,37 +1386,20 @@ fn apply_queued_commands(
                     });
             }
             CommandRequest::Batch { id, buffer } => {
-                let velocity_only = detect_noop
-                    && buffer.commands().iter().all(|command| {
-                        matches!(
-                            command,
-                            PhysicsCommand::SetLinearVelocity { .. }
-                                | PhysicsCommand::SetAngularVelocity { .. }
-                        )
-                    });
-                let original_motions = if velocity_only {
+                let originals = if detect_noop {
                     buffer
                         .commands()
                         .iter()
-                        .filter_map(|command| match command {
-                            PhysicsCommand::SetLinearVelocity { id, .. }
-                            | PhysicsCommand::SetAngularVelocity { id, .. } => {
-                                world.body(*id).map(|body| (*id, body.motion()))
-                            }
-                            _ => None,
-                        })
+                        .map(|command| mutation_before(world, command))
                         .collect::<Vec<_>>()
                 } else {
                     Vec::new()
                 };
-                let changes_world = !velocity_only && !buffer.is_empty();
+                let changes_world = !detect_noop && !buffer.is_empty();
                 let result =
                     apply_command_batch(world, buffer.commands(), &mut commands.batch_scratch);
                 mutated |= result.is_ok()
-                    && (changes_world
-                        || original_motions.iter().any(|(id, before)| {
-                            world.body(*id).is_none_or(|body| body.motion() != *before)
-                        }));
+                    && (changes_world || originals.iter().any(|before| before.changed(world)));
                 commands.buffer_pool.recycle(buffer);
                 commands
                     .pending_results
@@ -1768,6 +1812,61 @@ mod tests {
     }
 
     #[test]
+    fn blocked_mutation_comparison_tracks_body_joint_source_and_environment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{PhysicsCommand, mutation_before};
+        use kapitsa_core::world::PhysicsWorld;
+        let mut world = PhysicsWorld::new();
+        let fixed = world.add_body(RigidBody::new_static(Transform::identity()))?;
+        let body = world.add_body(dynamic_body())?;
+        let joint = world.add_joint(
+            fixed,
+            body,
+            Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        )?;
+        let source = world.add_force_source(body, Vec3::ZERO, Vec3::X)?;
+        let commands = [
+            PhysicsCommand::ApplyForce {
+                id: body,
+                force: Vec3::ZERO,
+            },
+            PhysicsCommand::SetJointEnabled {
+                id: joint,
+                enabled: true,
+            },
+            PhysicsCommand::SetForceSource {
+                id: source,
+                local_point: Vec3::ZERO,
+                local_force: Vec3::X,
+            },
+            PhysicsCommand::SetCentralGravity { gravity: None },
+            PhysicsCommand::SetAtmosphere {
+                atmosphere: kapitsa_core::aerodynamics::Atmosphere::Vacuum,
+            },
+            PhysicsCommand::SetCollisionConfig {
+                config: world.collision_config(),
+            },
+        ];
+        for command in commands {
+            let before = mutation_before(&world, &command);
+            world.apply_command(command)?;
+            assert!(!before.changed(&world));
+        }
+        let command = PhysicsCommand::SetForceSource {
+            id: source,
+            local_point: Vec3::ZERO,
+            local_force: Vec3::Y,
+        };
+        let before = mutation_before(&world, &command);
+        world.apply_command(command)?;
+        assert!(before.changed(&world));
+        Ok(())
+    }
+
+    #[test]
     fn overload_slowdown_keeps_fixed_step_and_accumulates_below_floor() {
         let step = Duration::from_millis(10);
         assert_eq!(
@@ -2060,6 +2159,9 @@ mod tests {
         let body = runner
             .world_mut()?
             .add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        let source = runner
+            .world_mut()?
+            .add_force_source(body, Vec3::ZERO, Vec3::X)?;
         runner.reject_steps_remaining = 2;
         let client = simulation.client();
         let mut results = client.subscribe_batch_results();
@@ -2124,6 +2226,20 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), results.next_result()).await??;
         assert_eq!(net_result.batch_id, net_id);
         net_result.result?;
+        assert!(matches!(
+            simulation.metrics().recovery_status,
+            RecoveryStatus::Blocked(_)
+        ));
+        let mut net_force = client.commands();
+        net_force.apply_force(body, Vec3::Y);
+        net_force.apply_force(body, -Vec3::Y);
+        net_force.set_force_source(source, Vec3::ZERO, Vec3::Y);
+        net_force.set_force_source(source, Vec3::ZERO, Vec3::X);
+        let force_id = client.try_submit(net_force)?;
+        let force_result =
+            tokio::time::timeout(Duration::from_secs(1), results.next_result()).await??;
+        assert_eq!(force_result.batch_id, force_id);
+        force_result.result?;
         assert!(matches!(
             simulation.metrics().recovery_status,
             RecoveryStatus::Blocked(_)
