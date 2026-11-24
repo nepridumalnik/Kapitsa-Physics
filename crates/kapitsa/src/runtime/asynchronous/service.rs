@@ -819,6 +819,9 @@ async fn run_simulation_loop(
     };
 
     loop {
+        if stopping(&stop) {
+            break;
+        }
         if let Some(deadline) = worker_retry_deadline
             && current_multiplier != 0.0
             && !time_horizon
@@ -839,6 +842,12 @@ async fn run_simulation_loop(
             continue;
         }
         if let Some(reason) = blocked.as_ref() {
+            if time_updates_open && time_multiplier.has_changed().unwrap_or(false) {
+                current_multiplier = *time_multiplier.borrow_and_update();
+            }
+            if time_horizon.has_changed().unwrap_or(false) {
+                time_horizon.borrow_and_update();
+            }
             metrics.send_modify(|value| {
                 value.state = SimulationState::Running;
                 value.recovery_status = RecoveryStatus::Blocked(reason.clone());
@@ -864,6 +873,7 @@ async fn run_simulation_loop(
                     metrics.send_modify(|value| value.recovery_status = RecoveryStatus::Healthy);
                 }
                 previous = Instant::now();
+                tokio::task::yield_now().await;
                 continue;
             }
             tokio::select! {
@@ -935,6 +945,7 @@ async fn run_simulation_loop(
             snapshot.set_revision(revision);
             snapshots.send_replace(Arc::new(snapshot));
             publish_command_results(commands, events);
+            tokio::task::yield_now().await;
             continue;
         }
         let (mut ready_step, mut step_limited) =
@@ -1046,6 +1057,11 @@ async fn run_simulation_loop(
 
         for _ in 0..max_catch_up_steps {
             if stopping(&stop) {
+                break;
+            }
+            if (time_updates_open && time_multiplier.has_changed().unwrap_or(true))
+                || time_horizon.has_changed().unwrap_or(true)
+            {
                 break;
             }
             if let Some(horizon) = *time_horizon.borrow() {
@@ -1893,6 +1909,53 @@ mod chunk_tests;
 #[cfg(test)]
 mod tests {
     #[tokio::test(start_paused = true)]
+    async fn pause_and_horizon_preempt_catchup_after_inflight_step()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for pause in [true, false] {
+            let mut settings = config(100);
+            settings.max_catch_up_steps = 16;
+            settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+            settings.step_recovery_policy =
+                StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+            let mut simulation = Simulation::new_from_config(settings)?;
+            let (entered, entered_rx) = oneshot::channel();
+            let (release, release_rx) = mpsc::channel();
+            simulation
+                .simulation
+                .as_mut()
+                .ok_or("runner")?
+                .gate_next_step(entered, release_rx);
+            simulation.start()?;
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_millis(10)).await;
+            entered_rx.await?;
+            tokio::time::advance(Duration::from_secs(1)).await;
+            if pause {
+                simulation.pause()?;
+            } else {
+                simulation.set_time_horizon(Some(Duration::from_millis(10)));
+            }
+            release.send(())?;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while simulation.client().snapshot().step() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(simulation.client().snapshot().step(), 1);
+            assert_eq!(
+                simulation.client().snapshot().simulation_time(),
+                Duration::from_millis(10)
+            );
+            simulation.stop().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn huge_finite_warp_progresses_with_bounded_admission()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut settings = config(100);
@@ -1967,6 +2030,57 @@ mod tests {
             RecoveryStatus::Healthy
         );
         simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sustained_overload_stays_bounded_and_advances_real_steps()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut settings = config(100);
+        settings.max_catch_up_steps = 1;
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig {
+            maximum_step: Duration::from_millis(10),
+            ..AdaptiveTimeStepConfig::default()
+        });
+        settings.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+        let mut simulation = Simulation::new_from_config(settings)?;
+        let runner = simulation.simulation.as_mut().ok_or("runner")?;
+        let mut moving = dynamic_body();
+        moving.set_linear_velocity(Vec3::X)?;
+        let body = runner.world_mut()?.add_body(moving)?;
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        let client = simulation.client();
+        let mut previous_step = 0;
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while client.snapshot().step() <= previous_step {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            previous_step = client.snapshot().step();
+            assert!(simulation.metrics().simulation_time_debt <= Duration::from_secs(1));
+            assert_eq!(simulation.state(), SimulationState::Running);
+        }
+        simulation.pause()?;
+        simulation.stop().await?;
+        let snapshot = client.snapshot();
+        assert!(snapshot.step() >= 5);
+        assert!(simulation.metrics().discarded_simulation_demand > Duration::ZERO);
+        let mut reference = kapitsa_core::world::PhysicsWorld::new();
+        let mut reference_body = dynamic_body();
+        reference_body.set_linear_velocity(Vec3::X)?;
+        let reference_id = reference.add_body(reference_body)?;
+        for _ in 0..snapshot.step() {
+            reference.step(0.01)?;
+        }
+        assert_eq!(
+            *snapshot.body(body).ok_or("body")?,
+            *reference.body(reference_id).ok_or("reference")?.state()
+        );
         Ok(())
     }
 
@@ -3171,6 +3285,45 @@ mod tests {
         );
         assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
         simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_preempts_a_saturated_blocked_queue() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::runtime::constants::COMMAND_QUEUE_CAPACITY;
+        let mut settings = config(100);
+        settings.max_catch_up_steps = 1;
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy = StepRecoveryPolicy::Resilient(
+            crate::runtime::RecoveryConfig::builder()
+                .max_retries(1)
+                .build(),
+        );
+        let mut simulation = Simulation::new_from_config(settings)?;
+        let runner = simulation.simulation.as_mut().ok_or("runner")?;
+        let body = runner.world_mut()?.add_body(dynamic_body())?;
+        runner.reject_steps_remaining = 2;
+        let client = simulation.client();
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !matches!(
+                simulation.metrics().recovery_status,
+                RecoveryStatus::Blocked(_)
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let revision = client.snapshot().revision();
+        for _ in 0..COMMAND_QUEUE_CAPACITY {
+            let mut no_op = client.commands();
+            no_op.set_linear_velocity(body, Vec3::ZERO);
+            client.try_submit(no_op)?;
+        }
+        tokio::time::timeout(Duration::from_secs(1), simulation.stop()).await??;
+        assert_eq!(client.snapshot().revision(), revision);
         Ok(())
     }
 

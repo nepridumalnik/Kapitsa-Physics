@@ -187,6 +187,12 @@ floor, and caps unrepresentable adaptive targets. Tests cover huge finite warp,
 the lower admission factor, demand limits and a gated overloaded successful
 step compared with a reference world. Paired release measurements remain in 6.3.
 
+Task 4.2: attempt slots include retries; command-only paths yield between
+bounded batches and check stop before draining another batch. Tests cover stop
+with a saturated blocked queue, pause/horizon changes during a gated attempt,
+and repeated overload with bounded debt and reference physics. Existing blocked
+and retry-budget regressions exercise idle waiting and retries across turns.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the
