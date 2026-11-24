@@ -48,6 +48,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+The optional resilient adaptive service bounds retries and admitted simulation
+time while keeping the last committed snapshot available. Defaults remain
+fail-fast. Run `cargo run -p kapitsa --features service --example resilient_host`
+for a dedicated-runtime host loop with horizon coordination and persistent loads;
+see [runtime documentation](https://github.com/nepridumalnik/Kapitsa-Physics/blob/main/docs/runtime.md)
+for recovery and command semantics.
+
 For host-driven synchronous stepping, use `PhysicsWorld` directly:
 
 ```rust

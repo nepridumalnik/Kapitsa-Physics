@@ -45,8 +45,8 @@ pub(crate) enum PhysicsClientError {
     Cluster(ClusterError),
     Query(QueryError),
     ForceSource(ForceSourceError),
-    /// The command changed the world, but the associated step failed before
-    /// publishing a snapshot. `step` is the failed step attempt.
+    /// The command changed the world, but its next step did not commit.
+    /// `step` identifies that attempted or next scheduled step.
     StepFailedAfterApply {
         step: u64,
         cause: Error,

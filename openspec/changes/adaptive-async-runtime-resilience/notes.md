@@ -212,6 +212,10 @@ completed and reported 200 ms committed time. The example uses an owned clock
 runtime, a host-owned Rayon pool, bounded submission, persistent force, zero
 horizon setup, acknowledged environment update and a later horizon extension.
 
+Task 5.2 updates the runtime guide, both README entry points and relevant
+comments with the recovery matrix, resource limits, publication and host-time
+contracts. The `kapitsa` service doctests passed and the example ran again.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the

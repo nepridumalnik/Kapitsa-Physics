@@ -60,7 +60,7 @@ With this approach, the calling code does not need a Tokio runtime: the engine u
 
 `simulation.set_time_multiplier(x)` sets the rate of simulation time relative to real time: `1.0` is normal speed, `0.0` pauses the simulation, and values greater than one accelerate it. Negative and non-finite values are invalid. Actual speed depends on the workload.
 
-Under heavy load, the engine reduces the rate at which simulation time advances based on the measured step duration, down to 30% of the requested speed. With fixed time stepping, `dt` remains unchanged. If steps still cannot keep up, lag accumulates. In adaptive mode, the selected policy determines `dt`; measurements and speed may fluctuate as the workload changes.
+Under heavy load, the default fail-fast service reduces admission based on measured step duration, down to 30% of the requested speed. The opt-in resilient adaptive policy can reduce admission further, bounds accumulated demand, and reports discarded demand. With fixed time stepping, `dt` remains unchanged. See [runtime documentation](docs/runtime.md) for recovery, horizons and metrics.
 
 Advanced configuration (`Simulation::new_from_config`) is available when the builder's options are insufficient. `SimulationConfig` is constructed with `SimulationConfig::builder()` and exposes read-only getters; `Default` keeps the documented defaults:
 
@@ -103,7 +103,7 @@ client.apply_force(id, Vec3::new(0.0, 1000.0, 0.0)).await?;
 
 The mass and inertia tensor are illustrative; use values appropriate for the object. The client can change position, velocities, mass, and CCD mode; apply forces, torques, and impulses; and put a body to sleep or wake it up. For a persistent force, use `add_force_source` and `remove_force_source`: the application point and force are specified in the body's local coordinates.
 
-`client.snapshot()` returns the most recently published snapshot without waiting. `snapshot.body(id)` reads a specific body's state, and `snapshot.bodies()` iterates over all bodies. `next_snapshot().await` waits for a new publication, but intermediate snapshots may be skipped. Each publication contains a step number and simulation time. While paused, state can change without changing the step number or simulation time.
+`client.snapshot()` returns the most recently published snapshot without waiting. `snapshot.body(id)` reads a specific body's state, and `snapshot.bodies()` iterates over all bodies. `next_snapshot().await` waits for a new publication, but intermediate snapshots may be skipped. Each publication contains a revision, step number and simulation time. While paused, state and revision can change without changing the step number or simulation time.
 
 ## Colliders and Shapes
 

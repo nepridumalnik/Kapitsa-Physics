@@ -69,7 +69,7 @@ pub struct SimulationMetrics {
     pub rayon_pool_size: Option<usize>,
     pub total_steps: u64,
     pub deadline_misses: u64,
-    /// Accumulated simulation time beyond one configured base interval.
+    /// Admitted simulation time beyond one configured base interval.
     pub simulation_time_debt: Duration,
     /// Requested simulated time discarded by admission limits or horizon reduction.
     pub discarded_simulation_demand: Duration,
