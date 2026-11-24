@@ -2349,6 +2349,62 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn retry_applies_impulse_and_one_shot_force_once_with_persistent_load()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut settings = config(100);
+        settings.max_catch_up_steps = 1;
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+        let mut simulation = Simulation::new_from_config(settings)?;
+        simulation.set_time_horizon(Some(Duration::from_millis(5)));
+        let runner = simulation.simulation.as_mut().ok_or("runner")?;
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = runner
+            .world_mut()?
+            .add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        runner
+            .world_mut()?
+            .add_force_source(body, Vec3::ZERO, Vec3::Y)?;
+        runner.reject_steps_remaining = 1;
+        let mut reference = kapitsa_core::world::PhysicsWorld::new();
+        let reference_body =
+            reference.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        reference.add_force_source(reference_body, Vec3::ZERO, Vec3::Y)?;
+        reference
+            .body_mut(reference_body)
+            .ok_or("reference body")?
+            .apply_impulse(Vec3::X)?;
+        reference
+            .body_mut(reference_body)
+            .ok_or("reference body")?
+            .apply_force(Vec3::Z * 3.0)?;
+        let client = simulation.client();
+        let mut results = client.subscribe_batch_results();
+        simulation.start()?;
+        let mut commands = client.commands();
+        commands.apply_impulse(body, Vec3::X);
+        commands.apply_force(body, Vec3::Z * 3.0);
+        let id = client.try_submit(commands)?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let result = results.next_result().await?;
+        assert_eq!(result.batch_id, id);
+        result.result?;
+        let snapshot = client.snapshot();
+        reference.step(snapshot.simulation_time().as_secs_f64())?;
+        assert_eq!(
+            *snapshot.body(body).ok_or("body")?,
+            *reference
+                .body(reference_body)
+                .ok_or("reference body")?
+                .state()
+        );
+        simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn intact_dispatch_failure_uses_bounded_backoff_before_retry()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut settings = config(100);
