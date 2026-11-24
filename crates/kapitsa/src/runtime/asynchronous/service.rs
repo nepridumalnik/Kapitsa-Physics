@@ -1567,6 +1567,116 @@ mod tests {
         assert_eq!(elapsed - step, Duration::from_millis(20));
     }
 
+    // Baseline probes for the future opt-in policy. They are explicitly run
+    // while establishing the failures, then enabled when that policy exists.
+    #[test]
+    #[ignore = "resilient admission is not implemented yet"]
+    fn resilient_overload_bounds_admitted_demand() -> Result<(), Box<dyn std::error::Error>> {
+        let mut debt = Duration::ZERO;
+        add_scaled_elapsed(&mut debt, Duration::from_secs(10), 1.0)?;
+        assert!(debt <= Duration::from_secs(1), "admitted debt: {debt:?}");
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[ignore = "resilient retry is not implemented yet"]
+    async fn resilient_service_survives_a_dt_sensitive_rejection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut adaptive = config(100);
+        adaptive.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig {
+            minimum_step: Duration::from_millis(1),
+            maximum_step: Duration::from_secs(1),
+            relative_error_tolerance: 0.01,
+        });
+        let mut simulation = Simulation::new_from_config(adaptive)?;
+        let world = simulation
+            .simulation
+            .as_mut()
+            .ok_or("missing runner")?
+            .world_mut()?;
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::X * 1.0e308, kapitsa_math::Quat::IDENTITY)?,
+            mass,
+        )?;
+        body.set_linear_velocity(Vec3::X * 1.0e308)?;
+        let mut reference = kapitsa_core::world::PhysicsWorld::new();
+        let mut reference_body = RigidBody::new_dynamic(
+            Transform::new(Vec3::X * 1.0e308, kapitsa_math::Quat::IDENTITY)?,
+            mass,
+        )?;
+        reference_body.set_linear_velocity(Vec3::X * 1.0e308)?;
+        reference.add_body(reference_body)?;
+        reference.step(0.5)?;
+        world.add_body(body)?;
+        simulation.set_time_multiplier(100.0)?;
+        simulation.set_time_horizon(Some(Duration::from_secs(1)));
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while simulation.state() != SimulationState::Error
+                && simulation.client().snapshot().simulation_time().is_zero()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let state = simulation.state();
+        let committed = simulation.client().snapshot().simulation_time();
+        let _ = simulation.stop().await;
+        assert_ne!(
+            state,
+            SimulationState::Error,
+            "service terminated on a recoverable rejected step"
+        );
+        assert!(committed > Duration::ZERO);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[ignore = "post-command resilient step selection is not implemented yet"]
+    async fn resilient_step_recomputes_bound_after_queued_velocity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut adaptive = config(100);
+        adaptive.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig {
+            minimum_step: Duration::from_micros(10),
+            maximum_step: Duration::from_millis(10),
+            relative_error_tolerance: 0.01,
+        });
+        let mut simulation = Simulation::new_from_config(adaptive)?;
+        let world = simulation
+            .simulation
+            .as_mut()
+            .ok_or("missing runner")?
+            .world_mut()?;
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?;
+        simulation.set_time_horizon(Some(Duration::from_millis(1)));
+        let client = simulation.client();
+        let mut results = client.subscribe_batch_results();
+        simulation.start()?;
+        let mut commands = client.commands();
+        commands.set_linear_velocity(body, Vec3::X * 100.0);
+        let batch = client.try_submit(commands)?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let result = results.next_result().await?;
+        assert_eq!(result.batch_id, batch);
+        result.result?;
+        let committed = client.snapshot().simulation_time();
+        simulation.stop().await?;
+        assert!(
+            committed <= Duration::from_micros(500),
+            "first attempt committed {committed:?}"
+        );
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn overloaded_step_keeps_dt_and_reports_speed_floor() {
         let mut simulation = Simulation::new_from_config(config(100)).unwrap();

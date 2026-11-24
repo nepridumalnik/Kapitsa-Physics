@@ -4,8 +4,8 @@ All tasks are unchecked intentionally. Implement in order; each numbered group i
 
 ## 0. Reproduce and map contracts (P0)
 
-- [ ] 0.1 Record baseline SHA, feature flags and relevant tests. Run existing focused service/adaptive/core transaction tests. Write a short error-path matrix in the change notes with actual typed error variants, whether rollback is proven, retry decision and corresponding test.
-- [ ] 0.2 Add failing deterministic regression for recoverable numerical rejection terminating the existing service, below-preferred-minimum hold, overload debt, and stale dt after a queued impulse or geometry/force mutation. Use test-only seams where deterministic injection is needed. Record baseline failures; do not change assertions to make baseline pass.
+- [x] 0.1 Record baseline SHA, feature flags and relevant tests. Run existing focused service/adaptive/core transaction tests. Write a short error-path matrix in the change notes with actual typed error variants, whether rollback is proven, retry decision and corresponding test.
+- [x] 0.2 Add failing deterministic regression for recoverable numerical rejection terminating the existing service, below-preferred-minimum hold, overload debt, and stale dt after a queued impulse or geometry/force mutation. Use test-only seams where deterministic injection is needed. Record baseline failures; do not change assertions to make baseline pass.
 
 ## 1. Core transaction and error classification (P0)
 

@@ -1612,6 +1612,42 @@ mod tests {
         ));
     }
 
+    // Baseline regression: the future opt-in resilient policy must admit the
+    // safe physical bound below the preferred minimum. Run explicitly until
+    // that policy is available; the default-policy test above remains intact.
+    #[test]
+    #[ignore = "resilient adaptive policy is not implemented yet"]
+    fn resilient_step_progresses_below_the_preferred_minimum()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = adaptive_config();
+        config.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig {
+            minimum_step: Duration::from_millis(5),
+            maximum_step: Duration::from_millis(10),
+            relative_error_tolerance: 0.01,
+        });
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut moving = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        moving.set_linear_velocity(Vec3::X * 100.0)?;
+        let body = world.add_body(moving)?;
+        world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?;
+        let selected = choose_step(
+            &world,
+            &config,
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+            config.step_budget(),
+        );
+        assert!(
+            matches!(selected, StepChoice::Step(step) if !step.is_zero() && step <= Duration::from_micros(500)),
+            "{selected:?}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn subminimum_target_accumulates_and_paused_debt_can_drain() {
         let mut config = adaptive_config();
