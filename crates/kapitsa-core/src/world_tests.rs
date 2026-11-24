@@ -2144,6 +2144,39 @@ fn joint_break_force_is_in_newtons_and_removes_the_joint() {
 }
 
 #[test]
+fn aborted_precommit_discards_staged_joint_break() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::execution::SequentialExecutor;
+    let mut world = PhysicsWorld::new();
+    let first = world.add_body(body_at(Vec3::ZERO, 1.0))?;
+    let mut moving = body_at(Vec3::ZERO, 1.0);
+    moving.set_linear_velocity(Vec3::X)?;
+    let second = world.add_body(moving)?;
+    let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    common.break_force = Some(0.1);
+    let joint = world.add_joint(first, second, Joint::Fixed(FixedJoint::new(common)))?;
+    let dt = 1.0 / 60.0;
+    world.collision_system.begin_step();
+    world.prepare_joint_collision_pairs()?;
+    let predictions = world
+        .bodies()
+        .map(|(id, body)| Ok((id, super::predict(body, dt)?)))
+        .collect::<Result<Vec<_>, Error>>()?;
+    for (id, state) in predictions {
+        world.collision_system.stage_prediction(id, state);
+    }
+    world.prepare_collision_candidates(dt, 1, &SequentialExecutor)?;
+    world.process_collision_candidates(1, &SequentialExecutor, dt)?;
+    assert_eq!(world.collision_system.joint_break_events().len(), 1);
+    world.collision_system.abort_step();
+    assert!(world.joint_events().is_empty());
+    assert!(world.joint(joint).is_some());
+    world.step(dt)?;
+    assert_eq!(world.joint_events().len(), 1);
+    assert!(world.joint(joint).is_none());
+    Ok(())
+}
+
+#[test]
 fn fixed_joint_breaks_from_differential_aerodynamic_drag() -> Result<(), Box<dyn std::error::Error>>
 {
     use crate::aerodynamics::{Aerodynamics, AtmosphericState, hull::HullSection};

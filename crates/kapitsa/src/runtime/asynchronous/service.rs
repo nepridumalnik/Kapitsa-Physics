@@ -2772,6 +2772,8 @@ mod tests {
         runner.reject_steps_remaining = 2;
         let client = simulation.client();
         let mut results = client.subscribe_batch_results();
+        let mut collisions = client.subscribe_collision_events();
+        let mut breaks = client.subscribe_joint_break_events();
         simulation.start()?;
         let mut first = client.commands();
         first.apply_impulse(body, Vec3::X);
@@ -2797,6 +2799,12 @@ mod tests {
         .await?;
         assert_eq!(simulation.state(), SimulationState::Running);
         assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
+        let mut collision = Box::pin(collisions.next_batch());
+        assert!(matches!(poll_once(collision.as_mut()), Poll::Pending));
+        drop(collision);
+        let mut joint_break = Box::pin(breaks.next_batch());
+        assert!(matches!(poll_once(joint_break.as_mut()), Poll::Pending));
+        drop(joint_break);
         tokio::time::advance(Duration::from_secs(10)).await;
         tokio::task::yield_now().await;
         assert_eq!(client.snapshot().step(), 0);
@@ -3338,6 +3346,63 @@ mod tests {
             assert!(client.snapshot().revision() > after_update.revision());
             simulation.stop().await?;
         }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retained_snapshot_and_lagging_events_do_not_block_stepping()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::runtime::constants::COLLISION_EVENT_BATCH_CAPACITY;
+        let mut simulation = Simulation::new_from_config(config(100))?;
+        let runner = simulation.simulation.as_mut().ok_or("runner")?;
+        let body = runner.world_mut()?.add_body(dynamic_body())?;
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = mpsc::channel();
+        runner.gate_next_step(entered, release_rx);
+        let client = simulation.client();
+        let mut events = client.subscribe_collision_events();
+        simulation.start()?;
+        let retained = client.snapshot();
+        let original_revision = retained.revision();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        entered_rx.await?;
+        assert_eq!(client.snapshot().revision(), original_revision);
+        let mut command = client.commands();
+        command.set_linear_velocity(body, Vec3::X);
+        client.try_submit(command)?;
+        release.send(())?;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut prior_step = 0;
+            let mut prior_time = Duration::ZERO;
+            while client.snapshot().step() <= COLLISION_EVENT_BATCH_CAPACITY as u64 {
+                let observed = client.snapshot();
+                assert!(observed.step() >= prior_step);
+                assert!(observed.simulation_time() >= prior_time);
+                prior_step = observed.step();
+                prior_time = observed.simulation_time();
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let latest = client.snapshot();
+        assert!(latest.revision() > retained.revision());
+        assert!(latest.simulation_time() > retained.simulation_time());
+        assert_eq!(retained.step(), 0);
+        assert_eq!(
+            retained
+                .body(body)
+                .ok_or("retained body")?
+                .linear_velocity(),
+            Vec3::ZERO
+        );
+        assert!(simulation.collision_events_tx.len() <= COLLISION_EVENT_BATCH_CAPACITY);
+        let lag = events.next_batch().await.err().ok_or("expected lag")?;
+        assert!(lag.lagged_batches().is_some_and(|count| count > 0));
+        let event = events.next_batch().await?;
+        assert!(client.snapshot().step() >= event.step());
+        simulation.stop().await?;
         Ok(())
     }
 

@@ -172,6 +172,15 @@ acknowledgement ordering, unchanged time/step and absence of collision and
 joint-break events; the blocked recovery regression checks the revision before
 resumption. Revision exhaustion is explicitly rejected before publication.
 
+Task 3.4: `retained_snapshot_and_lagging_events_do_not_block_stepping` gates a
+worker, retains its prior snapshot through more than the event-channel capacity,
+checks monotonic observations, snapshot-before-event and explicit lag. Rejected
+service attempts emit neither event stream; core tests
+`rejected_collision_work_then_smaller_step_matches_reference` and
+`aborted_precommit_discards_staged_joint_break` cover staged collision and joint
+break rollback respectively. Event channels are bounded and stale snapshots are
+owned by readers, not kept in a producer queue.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the
