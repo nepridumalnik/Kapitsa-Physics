@@ -791,7 +791,12 @@ async fn run_simulation_loop(
     };
 
     loop {
-        if let Some(deadline) = worker_retry_deadline {
+        if let Some(deadline) = worker_retry_deadline
+            && current_multiplier != 0.0
+            && !time_horizon
+                .borrow()
+                .is_some_and(|horizon| horizon.saturating_sub(*simulation_time) < minimum_interval)
+        {
             tokio::select! {
                 biased;
                 changed = stop.changed() => { if changed.is_err() || *stop.borrow() { break; } }
@@ -2385,6 +2390,38 @@ mod tests {
             simulation.client().snapshot().simulation_time(),
             Duration::from_millis(10)
         );
+        simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn paused_during_worker_backoff_accepts_commands_without_advancing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut settings = config(100);
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy = StepRecoveryPolicy::Resilient(
+            crate::runtime::RecoveryConfig::builder()
+                .worker_retry_backoff(Duration::from_secs(10))
+                .build(),
+        );
+        let mut simulation = Simulation::new_from_config(settings)?;
+        simulation
+            .simulation
+            .as_mut()
+            .ok_or("runner")?
+            .fail_dispatches_remaining = 1;
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        simulation.pause()?;
+        let client = simulation.client();
+        let body = tokio::time::timeout(Duration::from_millis(1), client.add_body(dynamic_body()))
+            .await??;
+        assert!(client.snapshot().body(body).is_some());
+        assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
         simulation.stop().await?;
         Ok(())
     }

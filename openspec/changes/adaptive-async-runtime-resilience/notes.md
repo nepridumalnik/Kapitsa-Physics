@@ -148,8 +148,9 @@ The bounded worker retry handler is compiled in production and exercised by two
 paused-clock tests that inject failure before dispatch moves the engine. Current
 Rayon dispatch exposes no verified transient failure, so production does not yet
 assert that a worker failure is intact; ambiguous worker errors remain fatal.
-The service suite passed 50 tests with 2 ignored. Interaction of the backoff
-with paused command handling still needs verification before task 2.5 is closed.
+The service suite passed 50 tests with 2 ignored. The paused-clock test
+`paused_during_worker_backoff_accepts_commands_without_advancing` also checks
+that a pause permits command publication before a long backoff expires.
 
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
