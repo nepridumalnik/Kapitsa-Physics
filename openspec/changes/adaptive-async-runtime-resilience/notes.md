@@ -144,6 +144,13 @@ restart; a typed provenance boundary and rollback evidence are still needed for
 a safe transient-worker retry. Stop during a rejected attempt is covered by
 `stopping_after_rejection_resolves_applied_command_once`.
 
+The bounded worker retry handler is compiled in production and exercised by two
+paused-clock tests that inject failure before dispatch moves the engine. Current
+Rayon dispatch exposes no verified transient failure, so production does not yet
+assert that a worker failure is intact; ambiguous worker errors remain fatal.
+The service suite passed 50 tests with 2 ignored. Interaction of the backoff
+with paused command handling still needs verification before task 2.5 is closed.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the

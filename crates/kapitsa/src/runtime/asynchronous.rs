@@ -54,7 +54,7 @@ enum StepRunnerError {
     InvalidConfig(ConfigError),
     InvalidWorkerConfig(WorkerConfigError),
     RayonPool(RayonPoolError),
-    Physics(Error),
+    Physics(Error, bool),
     WorldUnavailable,
     WorldLost,
 }
@@ -67,7 +67,7 @@ impl std::fmt::Display for StepRunnerError {
                 write!(formatter, "invalid async worker config: {error}")
             }
             Self::RayonPool(error) => write!(formatter, "Rayon runtime failed: {error}"),
-            Self::Physics(error) => write!(formatter, "physics step failed: {error}"),
+            Self::Physics(error, _) => write!(formatter, "physics step failed: {error}"),
             Self::WorldUnavailable => {
                 formatter.write_str("the world is unavailable while a step is in flight")
             }
@@ -82,7 +82,7 @@ impl std::error::Error for StepRunnerError {
             Self::InvalidConfig(error) => Some(error),
             Self::InvalidWorkerConfig(error) => Some(error),
             Self::RayonPool(error) => Some(error),
-            Self::Physics(error) => Some(error),
+            Self::Physics(error, _) => Some(error),
             Self::WorldUnavailable | Self::WorldLost => None,
         }
     }
@@ -108,7 +108,7 @@ impl From<WorkerConfigError> for StepRunnerError {
 
 impl From<Error> for StepRunnerError {
     fn from(error: Error) -> Self {
-        Self::Physics(error)
+        Self::Physics(error, false)
     }
 }
 
@@ -132,6 +132,8 @@ struct StepRunner {
     reject_steps_remaining: usize,
     #[cfg(test)]
     fail_worker: bool,
+    #[cfg(test)]
+    fail_dispatches_remaining: usize,
 }
 
 impl StepRunner {
@@ -187,6 +189,8 @@ impl StepRunner {
             reject_steps_remaining: 0,
             #[cfg(test)]
             fail_worker: false,
+            #[cfg(test)]
+            fail_dispatches_remaining: 0,
         })
     }
 
@@ -289,6 +293,16 @@ impl StepRunner {
     }
 
     fn start_step(&mut self, physics_dt: f64) -> Result<(), StepRunnerError> {
+        #[cfg(test)]
+        if self.fail_dispatches_remaining > 0 {
+            self.fail_dispatches_remaining -= 1;
+            return Err(StepRunnerError::Physics(
+                Error::from(StepError::Collision(Error::from(
+                    CollisionError::WorkerFailed,
+                ))),
+                true,
+            ));
+        }
         let state = mem::replace(&mut self.state, EngineState::Lost);
         let engine = match state {
             EngineState::Available(engine) => engine,
@@ -391,7 +405,9 @@ impl StepRunner {
         }
         self.last_metrics = output.engine.metrics().clone();
         self.state = EngineState::Available(output.engine);
-        output.result.map_err(StepRunnerError::Physics)
+        output
+            .result
+            .map_err(|error| StepRunnerError::Physics(error, false))
     }
 
     #[cfg(test)]
@@ -667,7 +683,7 @@ mod tests {
 
             assert!(matches!(
                 simulation.step().await,
-                Err(StepRunnerError::Physics(error))
+                Err(StepRunnerError::Physics(error, _))
                     if error.downcast_ref::<StepError>().is_some()
             ));
             assert!(

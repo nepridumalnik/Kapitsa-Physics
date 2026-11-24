@@ -423,7 +423,7 @@ impl From<StepRunnerError> for SimulationError {
                 Self::InvalidConfig(ConfigError::InvalidWorkerConfig(error))
             }
             StepRunnerError::RayonPool(_) => Self::WorkerPoolInitializationFailed,
-            StepRunnerError::Physics(error) => Self::Physics(error),
+            StepRunnerError::Physics(error, _) => Self::Physics(error),
             StepRunnerError::WorldUnavailable => Self::WorldUnavailable,
             StepRunnerError::WorldLost => Self::WorldLost,
         }
@@ -780,6 +780,7 @@ async fn run_simulation_loop(
     let mut was_horizon_reached = false;
     let mut retry: Option<(Duration, usize, Error)> = None;
     let mut retry_ceiling: Option<Duration> = None;
+    let mut worker_retry_deadline: Option<Instant> = None;
     let mut blocked: Option<RecoveryBlock> = None;
     let minimum_interval = match simulation.config().time_step_policy {
         TimeStepPolicy::Fixed => step_duration,
@@ -790,6 +791,20 @@ async fn run_simulation_loop(
     };
 
     loop {
+        if let Some(deadline) = worker_retry_deadline {
+            tokio::select! {
+                biased;
+                changed = stop.changed() => { if changed.is_err() || *stop.borrow() { break; } }
+                changed = time_multiplier.changed(), if time_updates_open => {
+                    if changed.is_ok() { current_multiplier = *time_multiplier.borrow_and_update(); }
+                    else { time_updates_open = false; }
+                }
+                changed = time_horizon.changed() => { if changed.is_err() { break; } time_horizon.borrow_and_update(); }
+                _ = tokio::time::sleep_until(deadline) => { worker_retry_deadline = None; }
+            }
+            previous = Instant::now();
+            continue;
+        }
         if let Some(reason) = blocked.as_ref() {
             metrics.send_modify(|value| {
                 value.state = SimulationState::Running;
@@ -1060,11 +1075,13 @@ async fn run_simulation_loop(
                 simulation.step().await
             };
             if let Err(error) = step_result {
-                if let (StepRecoveryPolicy::Resilient(config), StepRunnerError::Physics(cause)) =
-                    (simulation.config().step_recovery_policy, &error)
+                if let (
+                    StepRecoveryPolicy::Resilient(config),
+                    StepRunnerError::Physics(cause, intact_worker),
+                ) = (simulation.config().step_recovery_policy, &error)
                 {
                     let retries = retry.as_ref().map_or(0, |(_, count, _)| *count);
-                    let class = classify(cause, simulation.config().error_policy, false);
+                    let class = classify(cause, simulation.config().error_policy, *intact_worker);
                     let decision = decide(
                         class,
                         physics_step,
@@ -1078,6 +1095,24 @@ async fn run_simulation_loop(
                             retry = Some((next, retries + 1, cause.clone()));
                             continue;
                         }
+                        RetryDecision::RetryWorker => {
+                            if let Some(deadline) =
+                                Instant::now().checked_add(config.worker_retry_backoff)
+                            {
+                                retry = Some((physics_step, retries + 1, cause.clone()));
+                                worker_retry_deadline = Some(deadline);
+                                break;
+                            }
+                            publish_failed_command_results(
+                                commands,
+                                events,
+                                attempted_step,
+                                cause.clone(),
+                            );
+                            retry = None;
+                            blocked = Some(RecoveryBlock::RejectedStep(cause.clone()));
+                            break;
+                        }
                         RetryDecision::Blocked => {
                             publish_failed_command_results(
                                 commands,
@@ -1089,7 +1124,7 @@ async fn run_simulation_loop(
                             blocked = Some(RecoveryBlock::RejectedStep(cause.clone()));
                             break;
                         }
-                        RetryDecision::Fatal | RetryDecision::RetryWorker => {}
+                        RetryDecision::Fatal => {}
                     }
                 }
                 publish_failed_command_results(
@@ -1575,7 +1610,7 @@ fn publish_failed_command_results(
 
 fn step_error_for_result(error: &StepRunnerError) -> kapitsa_core::Error {
     match error {
-        StepRunnerError::Physics(error) => error.clone(),
+        StepRunnerError::Physics(error, _) => error.clone(),
         StepRunnerError::InvalidConfig(error) => kapitsa_core::Error::from(*error),
         StepRunnerError::InvalidWorkerConfig(error) => kapitsa_core::Error::from(*error),
         StepRunnerError::RayonPool(error) => {
@@ -2304,6 +2339,91 @@ mod tests {
             snapshot.body(body).ok_or("body")?.linear_velocity(),
             Vec3::X
         );
+        simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn intact_dispatch_failure_uses_bounded_backoff_before_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut settings = config(100);
+        settings.max_catch_up_steps = 1;
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy = StepRecoveryPolicy::Resilient(
+            crate::runtime::RecoveryConfig::builder()
+                .max_retries(1)
+                .worker_retry_backoff(Duration::from_millis(10))
+                .build(),
+        );
+        let mut simulation = Simulation::new_from_config(settings)?;
+        simulation.set_time_horizon(Some(Duration::from_millis(10)));
+        simulation
+            .simulation
+            .as_mut()
+            .ok_or("runner")?
+            .fail_dispatches_remaining = 1;
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(simulation.client().snapshot().step(), 0);
+        tokio::time::advance(Duration::from_millis(9)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(simulation.client().snapshot().step(), 0);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while simulation.client().snapshot().step() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(
+            simulation.client().snapshot().simulation_time(),
+            Duration::from_millis(10)
+        );
+        simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn intact_dispatch_failure_stops_after_retry_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut settings = config(100);
+        settings.max_catch_up_steps = 1;
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy = StepRecoveryPolicy::Resilient(
+            crate::runtime::RecoveryConfig::builder()
+                .max_retries(1)
+                .build(),
+        );
+        let mut simulation = Simulation::new_from_config(settings)?;
+        simulation
+            .simulation
+            .as_mut()
+            .ok_or("runner")?
+            .fail_dispatches_remaining = 2;
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !matches!(
+                simulation.metrics().recovery_status,
+                RecoveryStatus::Blocked(_)
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(simulation.client().snapshot().step(), 0);
+        assert_eq!(simulation.state(), SimulationState::Running);
         simulation.stop().await?;
         Ok(())
     }
