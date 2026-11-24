@@ -1257,6 +1257,18 @@ fn simulation_debt(accumulated: Duration, fixed_step: Duration) -> Duration {
     accumulated.saturating_sub(fixed_step)
 }
 
+fn command_may_change_world(world: &PhysicsWorld, command: &PhysicsCommand) -> bool {
+    match command {
+        PhysicsCommand::SetLinearVelocity { id, velocity } => world
+            .body(*id)
+            .is_none_or(|body| body.state().linear_velocity() != *velocity),
+        PhysicsCommand::SetAngularVelocity { id, velocity } => world
+            .body(*id)
+            .is_none_or(|body| body.state().angular_velocity() != *velocity),
+        _ => true,
+    }
+}
+
 fn apply_queued_commands(
     simulation: &mut StepRunner,
     commands: &mut CommandQueue,
@@ -1299,8 +1311,10 @@ fn apply_queued_commands(
                         | PhysicsCommand::GetClusterPart { .. }
                         | PhysicsCommand::GetWeld { .. }
                 );
+                let changes_world =
+                    !is_read_only_query && command_may_change_world(world, &command);
                 let result = apply_command(world, command);
-                mutated |= !is_read_only_query && result.is_ok();
+                mutated |= changes_world && result.is_ok();
                 commands
                     .pending_results
                     .push(DeferredCommandResult::Single {
@@ -1310,10 +1324,13 @@ fn apply_queued_commands(
                     });
             }
             CommandRequest::Batch { id, buffer } => {
-                let nonempty = !buffer.is_empty();
+                let changes_world = buffer
+                    .commands()
+                    .iter()
+                    .any(|command| command_may_change_world(world, command));
                 let result =
                     apply_command_batch(world, buffer.commands(), &mut commands.batch_scratch);
-                mutated |= nonempty && result.is_ok();
+                mutated |= changes_world && result.is_ok();
                 commands.buffer_pool.recycle(buffer);
                 commands
                     .pending_results
@@ -2061,6 +2078,19 @@ mod tests {
             RecoveryStatus::Blocked(_)
         ));
         assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
+        let mut unchanged = client.commands();
+        unchanged.set_linear_velocity(body, Vec3::X);
+        let unchanged_id = client.try_submit(unchanged)?;
+        let unchanged_result =
+            tokio::time::timeout(Duration::from_secs(1), results.next_result()).await??;
+        assert_eq!(unchanged_result.batch_id, unchanged_id);
+        unchanged_result.result?;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            simulation.metrics().recovery_status,
+            RecoveryStatus::Blocked(_)
+        ));
+        assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
         let mut corrective = client.commands();
         corrective.set_linear_velocity(body, Vec3::Y);
         let correction_id = client.try_submit(corrective)?;
@@ -2188,7 +2218,17 @@ mod tests {
             RecoveryStatus::Blocked(RecoveryBlock::PhysicalStepLimit)
         );
         assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
+        simulation.pause()?;
+        simulation.set_time_horizon(Some(Duration::from_secs(1)));
+        tokio::task::yield_now().await;
+        assert_eq!(
+            simulation.metrics().recovery_status,
+            RecoveryStatus::Blocked(RecoveryBlock::PhysicalStepLimit)
+        );
+        assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
         client.set_linear_velocity(body, Vec3::ZERO).await?;
+        assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
+        simulation.resume()?;
         tokio::time::advance(Duration::from_millis(10)).await;
         tokio::time::timeout(Duration::from_secs(1), async {
             while client.snapshot().step() == 0 {
