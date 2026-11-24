@@ -1607,6 +1607,76 @@ fn failed_step_restores_body_after_aerodynamics_and_gravity_preparation() {
 }
 
 #[test]
+fn rejected_step_keeps_aerodynamic_and_gravity_loads_for_retry()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn fixture() -> Result<(PhysicsWorld, super::BodyId), Box<dyn std::error::Error>> {
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::Y * 10.0, kapitsa_math::Quat::IDENTITY)?,
+            mass,
+        )?;
+        body.set_linear_velocity(Vec3::X * 10.0)?;
+        body.apply_force(Vec3::Z)?;
+        let mut world = PhysicsWorld::new();
+        let id = world.add_body(body)?;
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.0,
+            Vec3::ZERO,
+        )?));
+        world.set_aerodynamics(
+            id,
+            Aerodynamics::Simple(AerodynamicProperties::new(2.0, 0.5, Vec3::ZERO)?),
+        )?;
+        world.set_central_gravity(Some(crate::gravity::CentralGravity::new(Vec3::ZERO, 1.0)?));
+        world.add_force_source(id, Vec3::ZERO, Vec3::Y)?;
+        Ok((world, id))
+    }
+    for sharded in [false, true] {
+        let (mut attempted, id) = fixture()?;
+        let (mut reference, reference_id) = fixture()?;
+        let before = attempted.body(id).ok_or("body")?.motion();
+        // Inject an executor failure during preparation without introducing
+        // wall-clock scheduling into the rollback comparison.
+        let executor = super::tests::FailingExecutor {
+            fail_on_call: 1,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let failure = if sharded {
+            attempted.step_with_shards(0.1, &mut [Vec::new(), Vec::new()], &executor, 2)
+        } else {
+            attempted.step_with_executor(0.1, &executor, 2)
+        };
+        assert!(failure.is_err());
+        assert_eq!(attempted.body(id).ok_or("body")?.motion(), before);
+        if sharded {
+            attempted.step_with_shards(
+                0.05,
+                &mut [Vec::new(), Vec::new()],
+                &super::tests::ScopedThreadExecutor,
+                2,
+            )?;
+            reference.step_with_shards(
+                0.05,
+                &mut [Vec::new(), Vec::new()],
+                &super::tests::ScopedThreadExecutor,
+                2,
+            )?;
+        } else {
+            attempted.step(0.05)?;
+            reference.step(0.05)?;
+        }
+        assert_eq!(
+            attempted.body(id).ok_or("body")?.motion(),
+            reference
+                .body(reference_id)
+                .ok_or("reference body")?
+                .motion()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn wind_accelerates_a_stationary_body() {
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
     let mut world = PhysicsWorld::new();

@@ -1464,9 +1464,9 @@ impl StepExecutor for ScopedThreadExecutor {
     }
 }
 
-struct FailingExecutor {
-    fail_on_call: usize,
-    calls: AtomicUsize,
+pub(super) struct FailingExecutor {
+    pub(super) fail_on_call: usize,
+    pub(super) calls: AtomicUsize,
 }
 
 impl FailingExecutor {
@@ -4266,6 +4266,19 @@ fn rejected_collision_work_then_smaller_step_matches_reference()
     }
     let (mut attempted, attempted_ids) = fixture()?;
     let (mut reference, reference_ids) = fixture()?;
+    attempted.step(0.01)?;
+    reference.step(0.01)?;
+    let before_events = attempted.collision_events().to_vec();
+    let before_impulses = attempted.contact_impulses().to_vec();
+    let before_states = attempted_ids
+        .iter()
+        .map(|id| {
+            attempted
+                .body(*id)
+                .map(RigidBody::motion)
+                .ok_or(WorldError::InvalidBodyId)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let executor = FailingExecutor {
         fail_on_call: 2,
         calls: AtomicUsize::new(0),
@@ -4276,8 +4289,17 @@ fn rejected_collision_work_then_smaller_step_matches_reference()
         matches!(step_cause(&failure), Some(StepError::Collision(cause)) if cause.downcast_ref::<CollisionError>() == Some(&CollisionError::WorkerFailed))
     );
     assert_eq!(executor.calls.load(Ordering::Relaxed), 2);
-    assert!(attempted.collision_events().is_empty());
-    assert!(attempted.contact_impulses().is_empty());
+    assert_eq!(attempted.collision_events(), before_events);
+    assert_eq!(attempted.contact_impulses(), before_impulses);
+    for (id, before) in attempted_ids.iter().zip(before_states) {
+        assert_eq!(
+            attempted
+                .body(*id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion(),
+            before
+        );
+    }
     attempted.step_with_shards(0.05, &mut shards, &ScopedThreadExecutor, 4)?;
     let mut reference_shards = vec![Vec::new(); 4];
     reference.step_with_shards(0.05, &mut reference_shards, &ScopedThreadExecutor, 4)?;

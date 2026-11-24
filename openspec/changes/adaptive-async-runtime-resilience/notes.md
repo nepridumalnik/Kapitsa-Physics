@@ -34,11 +34,19 @@ marks the spatial index dirty. Body integration, joint removal, collision event
 publication and weld-split finalization occur after precommit validation. Weld
 split bodies are inserted during the last staging operation, so panic and
 allocation-failure paths require separate integrity evidence before retrying.
+In particular, a panic after successful weld-split body insertion cannot yet be
+certified as rolled back. The asynchronous runner currently turns caught panics
+into `CollisionError::WorkerFailed`, the same typed cause used for a reported
+executor error, so the two must not be considered equally safe for retry.
 
 Two reference-world tests now pass for a rejected prediction after force
 preparation (ordinary and sharded) and a sharded collision-worker failure before
 commit. They verify motion and event/impulse counts after a smaller successful
-step, but do not establish every state component required by task 1.2.
+step. Follow-up tests cover sleeping state, preservation of already-published
+contact events and impulses, and successful retry with aerodynamic, gravity,
+one-shot and persistent forces. Component tests cover contact/joint warm-start
+abort, and a two-cluster weld split test covers topology after allocation failure.
+These do not establish every state component required by task 1.2.
 
 An additional test, `failed_step_does_not_publish_a_ready_aerodynamic_shape`,
 demonstrated an atomicity issue on the baseline: `finish_pending_shapes` installed
