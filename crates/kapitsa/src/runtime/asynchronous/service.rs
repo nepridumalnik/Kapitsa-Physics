@@ -509,6 +509,12 @@ impl Simulation {
                 Err(SimulationError::AlreadyRunning.into())
             };
         }
+        if matches!(
+            self.metrics_rx.borrow().recovery_status,
+            RecoveryStatus::Fatal(_)
+        ) {
+            return Err(SimulationError::WorldLost.into());
+        }
 
         let snapshot = {
             let simulation = self
@@ -1583,7 +1589,7 @@ mod tests {
             } else {
                 builder.spawn_on_tokio(&tokio::runtime::Handle::current())?
             };
-            let mut client = simulation.client();
+            let client = simulation.client();
             client.set_atmosphere(Atmosphere::Vacuum).await?;
             assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
             client.set_atmosphere(atmosphere).await?;
@@ -1592,9 +1598,12 @@ mod tests {
             let horizon = Duration::from_millis(20);
             simulation.set_time_multiplier(1000.0)?;
             simulation.set_time_horizon(Some(horizon));
-            while client.snapshot().simulation_time() < horizon {
-                tokio::time::timeout(Duration::from_secs(5), client.next_snapshot()).await??;
-            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while client.snapshot().simulation_time() < horizon {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
             tokio::time::sleep(Duration::from_millis(30)).await;
             assert_eq!(client.snapshot().simulation_time(), horizon);
             assert_eq!(client.snapshot().step(), 2);
@@ -2040,6 +2049,18 @@ mod tests {
         tokio::time::advance(Duration::from_secs(10)).await;
         tokio::task::yield_now().await;
         assert_eq!(client.snapshot().step(), 0);
+        let mut invalid = client.commands();
+        invalid.set_linear_velocity(body, Vec3::new(f64::NAN, 0.0, 0.0));
+        let invalid_id = client.try_submit(invalid)?;
+        let invalid_result =
+            tokio::time::timeout(Duration::from_secs(1), results.next_result()).await??;
+        assert_eq!(invalid_result.batch_id, invalid_id);
+        assert!(invalid_result.result.is_err());
+        assert!(matches!(
+            simulation.metrics().recovery_status,
+            RecoveryStatus::Blocked(_)
+        ));
+        assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
         let mut corrective = client.commands();
         corrective.set_linear_velocity(body, Vec3::Y);
         let correction_id = client.try_submit(corrective)?;
@@ -2204,6 +2225,7 @@ mod tests {
         ));
         assert_eq!(simulation.client().snapshot().step(), 0);
         assert!(simulation.stop().await.is_err());
+        assert!(simulation.start().is_err());
         Ok(())
     }
 

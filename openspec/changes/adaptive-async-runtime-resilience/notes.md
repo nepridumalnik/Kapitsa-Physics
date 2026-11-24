@@ -136,3 +136,18 @@ unsafe physical bounds now produce a typed blocked status; tests cover no time
 accumulation, query service, and corrective resumption. Unverified worker failure
 is fatal. A bounded retry for a worker whose intact world is proven has not yet
 been integrated or tested; 2.5 remains open.
+
+The executor audit found that `CollisionError::WorkerFailed` represents both an
+executor-returned error and a caught panic in multiple core paths. The runtime
+cannot infer an intact world from that variant, so it reports fatal and refuses
+restart; a typed provenance boundary and rollback evidence are still needed for
+a safe transient-worker retry. Stop during a rejected attempt is covered by
+`stopping_after_rejection_resolves_applied_command_once`.
+
+The focused service suite timed out twice in
+`builder_installs_atmosphere_on_both_executors`; a subsequent isolated run and
+the baseline passed. Its loop checked `snapshot()` and then called
+`next_snapshot()`, which starts waiting from the latest publication, leaving a
+race if the final horizon publication arrives between those calls. The test now
+waits on the same horizon condition under a single timeout without changing its
+state, time, or step assertions; the focused service suite passed afterward.
