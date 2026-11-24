@@ -796,7 +796,7 @@ async fn run_simulation_loop(
                 value.recovery_status = RecoveryStatus::Blocked(reason.clone());
             });
             if has_queued_request(commands) {
-                let mutated = apply_queued_commands(simulation, commands)?;
+                let mutated = apply_queued_commands(simulation, commands, true)?;
                 let step = simulation.metrics().total_steps;
                 for result in &mut commands.pending_results {
                     if let DeferredCommandResult::Batch(batch) = result {
@@ -869,7 +869,7 @@ async fn run_simulation_loop(
                     cause,
                 );
             }
-            apply_queued_commands(simulation, commands)?;
+            apply_queued_commands(simulation, commands, false)?;
             let step = simulation.metrics().total_steps;
             for result in &mut commands.pending_results {
                 if let DeferredCommandResult::Batch(batch) = result {
@@ -889,7 +889,7 @@ async fn run_simulation_loop(
             && step_limited
             && has_queued_request(commands)
         {
-            apply_queued_commands(simulation, commands)?;
+            apply_queued_commands(simulation, commands, false)?;
             (ready_step, step_limited) =
                 choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
         }
@@ -985,7 +985,7 @@ async fn run_simulation_loop(
                 accumulator = accumulator.min(horizon.saturating_sub(*simulation_time));
             }
             if resilient && retry.is_none() {
-                apply_queued_commands(simulation, commands)?;
+                apply_queued_commands(simulation, commands, false)?;
             }
             let (physics_step, limited) =
                 choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
@@ -1005,7 +1005,7 @@ async fn run_simulation_loop(
                         break;
                     }
                     if retry.is_none() && has_queued_request(commands) {
-                        apply_queued_commands(simulation, commands)?;
+                        apply_queued_commands(simulation, commands, false)?;
                     }
                     let (_, still_limited) = choose_runtime_step(
                         simulation,
@@ -1052,7 +1052,7 @@ async fn run_simulation_loop(
                 .ok_or(SimulationError::SimulationTimeOverflow)?;
             let attempted_step = simulation.metrics().total_steps.saturating_add(1);
             if !resilient {
-                apply_queued_commands(simulation, commands)?;
+                apply_queued_commands(simulation, commands, false)?;
             }
             let step_result = if adaptive_policy {
                 simulation.step_with_dt(physics_step.as_secs_f64()).await
@@ -1272,6 +1272,7 @@ fn command_may_change_world(world: &PhysicsWorld, command: &PhysicsCommand) -> b
 fn apply_queued_commands(
     simulation: &mut StepRunner,
     commands: &mut CommandQueue,
+    detect_noop: bool,
 ) -> Result<bool, SimulationError> {
     let step = simulation.metrics().total_steps.saturating_add(1);
     let world = simulation.world_mut().map_err(SimulationError::from)?;
@@ -1324,13 +1325,37 @@ fn apply_queued_commands(
                     });
             }
             CommandRequest::Batch { id, buffer } => {
-                let changes_world = buffer
-                    .commands()
-                    .iter()
-                    .any(|command| command_may_change_world(world, command));
+                let velocity_only = detect_noop
+                    && buffer.commands().iter().all(|command| {
+                        matches!(
+                            command,
+                            PhysicsCommand::SetLinearVelocity { .. }
+                                | PhysicsCommand::SetAngularVelocity { .. }
+                        )
+                    });
+                let original_motions = if velocity_only {
+                    buffer
+                        .commands()
+                        .iter()
+                        .filter_map(|command| match command {
+                            PhysicsCommand::SetLinearVelocity { id, .. }
+                            | PhysicsCommand::SetAngularVelocity { id, .. } => {
+                                world.body(*id).map(|body| (*id, body.motion()))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                let changes_world = !velocity_only && !buffer.is_empty();
                 let result =
                     apply_command_batch(world, buffer.commands(), &mut commands.batch_scratch);
-                mutated |= changes_world && result.is_ok();
+                mutated |= result.is_ok()
+                    && (changes_world
+                        || original_motions.iter().any(|(id, before)| {
+                            world.body(*id).is_none_or(|body| body.motion() != *before)
+                        }));
                 commands.buffer_pool.recycle(buffer);
                 commands
                     .pending_results
@@ -2091,6 +2116,18 @@ mod tests {
             RecoveryStatus::Blocked(_)
         ));
         assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
+        let mut net_unchanged = client.commands();
+        net_unchanged.set_linear_velocity(body, Vec3::Y);
+        net_unchanged.set_linear_velocity(body, Vec3::X);
+        let net_id = client.try_submit(net_unchanged)?;
+        let net_result =
+            tokio::time::timeout(Duration::from_secs(1), results.next_result()).await??;
+        assert_eq!(net_result.batch_id, net_id);
+        net_result.result?;
+        assert!(matches!(
+            simulation.metrics().recovery_status,
+            RecoveryStatus::Blocked(_)
+        ));
         let mut corrective = client.commands();
         corrective.set_linear_velocity(body, Vec3::Y);
         let correction_id = client.try_submit(corrective)?;

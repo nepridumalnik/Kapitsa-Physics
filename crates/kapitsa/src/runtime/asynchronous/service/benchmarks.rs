@@ -969,7 +969,7 @@ fn benchmark_time_warp_scheduler_overhead() -> Result<(), Box<dyn std::error::Er
         for _ in 0..SAMPLES {
             let started = Instant::now();
             for _ in 0..STEPS_PER_SAMPLE {
-                apply_queued_commands(runner, &mut queue)?;
+                apply_queued_commands(runner, &mut queue, false)?;
                 publish_command_results(&mut queue, &events);
             }
             command_samples.push(started.elapsed().div_f64(STEPS_PER_SAMPLE as f64));

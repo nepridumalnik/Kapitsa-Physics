@@ -150,6 +150,11 @@ blocked-state test now also checks that an identical velocity update leaves the
 service blocked; unchanged angular-velocity updates are handled likewise. Other
 command types still need a complete no-op/relevant-mutation audit before task
 2.5 can be accepted.
+Velocity-only batches now compare final body motion with their starting state,
+so setting a value and restoring it does not unblock the service. This bounded
+temporary collection is used only while blocked; ordinary step processing does
+not allocate it. The focused service suite passed 46 tests (2 ignored), and
+all-target/all-feature clippy passed after updating the benchmark call site.
 
 The focused service suite timed out twice in
 `builder_installs_atmosphere_on_both_executors`; a subsequent isolated run and
