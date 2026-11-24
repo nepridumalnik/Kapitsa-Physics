@@ -480,12 +480,49 @@ fn cap(limit: &mut f64, candidate: f64) {
 }
 
 fn duration_floor(seconds: f64) -> Option<Duration> {
+    if seconds.is_nan() || seconds < 0.0 || seconds.is_infinite() {
+        return None;
+    }
+    if seconds == 0.0 {
+        return Some(Duration::ZERO);
+    }
     let rounded = Duration::try_from_secs_f64(seconds).ok()?;
-    if rounded.as_secs_f64() > seconds {
+    if !duration_within_f64(rounded, seconds) {
         rounded.checked_sub(Duration::from_nanos(1))
     } else {
         Some(rounded)
     }
+}
+
+fn duration_within_f64(duration: Duration, seconds: f64) -> bool {
+    let whole = seconds.trunc() as u64;
+    if duration.as_secs() != whole {
+        return duration.as_secs() < whole;
+    }
+    // The fractional part of a nonnegative finite f64 is exact; comparing
+    // integer nanoseconds against its exact binary rational avoids a rounded
+    // `Duration::as_secs_f64` turning an unsafe step into an apparent tie.
+    let fraction = seconds.fract();
+    if fraction == 0.0 {
+        return duration.subsec_nanos() == 0;
+    }
+    let bits = fraction.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let significand = if exponent == 0 {
+        bits & ((1_u64 << 52) - 1)
+    } else {
+        (1_u64 << 52) | (bits & ((1_u64 << 52) - 1))
+    };
+    let shift = if exponent == 0 {
+        1074
+    } else {
+        (1075 - exponent) as u32
+    };
+    let nanos = u128::from(duration.subsec_nanos());
+    if shift >= 128 || nanos > (u128::MAX >> shift) {
+        return nanos == 0;
+    }
+    (nanos << shift) <= u128::from(significand) * 1_000_000_000
 }
 
 #[cfg(test)]
@@ -508,7 +545,7 @@ mod tests {
     };
     use kapitsa_math::{Mat3, Quat, Vec3};
 
-    use super::{StepChoice, choose_step, duration_floor};
+    use super::{StepChoice, choose_step, duration_floor, duration_within_f64};
     use crate::runtime::{
         AdaptiveTimeStepConfig, SimulationConfig, StepRecoveryPolicy, TimeStepPolicy,
     };
@@ -1723,6 +1760,15 @@ mod tests {
         assert_eq!(duration_floor(0.4e-9), Some(Duration::ZERO));
         assert_eq!(duration_floor(f64::INFINITY), None);
         assert_eq!(duration_floor(f64::MAX), None);
+        assert!(!duration_within_f64(Duration::from_nanos(2), 1.9e-9));
+        assert!(duration_within_f64(Duration::from_nanos(1), 1.9e-9));
+        let large = 9_007_199.254_740_993_f64;
+        let floored = duration_floor(large).ok_or("representable duration")?;
+        assert!(duration_within_f64(floored, large));
+        assert!(!duration_within_f64(
+            floored + Duration::from_nanos(1),
+            large
+        ));
         Ok(())
     }
 
