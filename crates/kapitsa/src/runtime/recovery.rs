@@ -42,6 +42,7 @@ pub(crate) fn classify(error: &Error, _policy: ErrorPolicy, intact_worker: bool)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RetryDecision {
     Retry(Duration),
+    RetryWorker,
     Blocked,
     Fatal,
 }
@@ -57,11 +58,17 @@ pub(crate) fn decide(
     if class == FailureClass::Fatal {
         return RetryDecision::Fatal;
     }
-    if class != FailureClass::ReduceStep
-        || floor.is_zero()
-        || attempted.is_zero()
-        || retries >= max_retries
-    {
+    if floor.is_zero() || attempted.is_zero() || retries >= max_retries {
+        return RetryDecision::Blocked;
+    }
+    if class == FailureClass::TransientWorker {
+        return if attempted <= physical_bound && attempted >= floor {
+            RetryDecision::RetryWorker
+        } else {
+            RetryDecision::Blocked
+        };
+    }
+    if class != FailureClass::ReduceStep {
         return RetryDecision::Blocked;
     }
     let next = (attempted / 2).min(physical_bound);
@@ -256,6 +263,18 @@ mod tests {
         assert_eq!(
             decide(FailureClass::Fatal, ms(10), ms(10), ms(1), 0, 8),
             RetryDecision::Fatal
+        );
+        assert_eq!(
+            decide(FailureClass::TransientWorker, ms(10), ms(10), ms(1), 0, 1),
+            RetryDecision::RetryWorker
+        );
+        assert_eq!(
+            decide(FailureClass::TransientWorker, ms(10), ms(9), ms(1), 0, 1),
+            RetryDecision::Blocked
+        );
+        assert_eq!(
+            decide(FailureClass::TransientWorker, ms(10), ms(10), ms(1), 1, 1),
+            RetryDecision::Blocked
         );
         assert_eq!(
             decide(

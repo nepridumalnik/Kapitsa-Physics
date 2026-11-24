@@ -109,3 +109,10 @@ equivalent-reference tests remain tasks 1.1–1.2.
 | `StepError::Collision` / `CollisionError::WorkerFailed` | selected sharded executor failures restore body motion and prepared force sources | no automatic retry until ownership and complete rollback are proven | `sharded_executor_error_rolls_back_force_sources_and_can_retry`, `sharded_collision_solver_error_rolls_back_force_sources_and_can_retry` |
 | `StepError::Gravity`, `Aerodynamics`, `ForceSource`, `WeldBalance`, `WeldSplit` | individual preparation rollback exists; not a general proof for all variants | corrective input or fatal if integrity is uncertain; no blanket retry | `failed_step_restores_body_after_aerodynamics_and_gravity_preparation` |
 | unknown cause, lost worker/world, `InvalidStepResults` | integrity not established | fatal if ownership or rollback cannot be established; never silently retry | `failed_step_reports_runner_cause_instead_of_collision_failure` |
+
+The service-independent retry decision is currently test-gated until task 2.4
+wires it into the service. A real strict-policy CCD fixture demonstrates that a
+rejected 10 ms step can commit at 5 ms without changing the CCD policy. Unknown
+causes and unverified worker failures are fatal; an intact-worker retry decision
+requires explicit integrity evidence and remains bounded. `NonConvergent` and
+arithmetic overflow are not classified as universally dt-sensitive.
