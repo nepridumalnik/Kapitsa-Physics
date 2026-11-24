@@ -355,7 +355,7 @@ impl SimulationBuilder {
 }
 
 /// Failure returned by a clock-driven physics service.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum SimulationError {
     InvalidConfig(ConfigError),
     MissingRuntime,
@@ -736,6 +736,19 @@ async fn run_simulation(
     .await;
     commands.receiver.close();
     let stopped_at_step = simulation.metrics().total_steps;
+    if !commands.pending_results.is_empty() {
+        let cause = match &result {
+            Ok(()) => Error::from(PhysicsClientError::NotRunning),
+            Err(SimulationError::Physics(error)) => error.clone(),
+            Err(error) => Error::from_source(ErrorKind::Runtime, error.clone()),
+        };
+        publish_failed_command_results(
+            &mut commands,
+            events,
+            stopped_at_step.saturating_add(1),
+            cause,
+        );
+    }
     if let Some(request) = commands.pending.take() {
         reject_request(request, stopped_at_step, events, &commands.buffer_pool);
     }
@@ -1473,7 +1486,9 @@ fn apply_queued_commands(
     let world = simulation.world_mut().map_err(SimulationError::from)?;
     let mut processed_commands = 0;
     let mut mutated = false;
-    while processed_commands < MAX_COMMANDS_PER_STEP {
+    while processed_commands < MAX_COMMANDS_PER_STEP
+        && commands.pending_results.len() < MAX_COMMANDS_PER_STEP
+    {
         let request = match commands.pending.take() {
             Some(request) => request,
             None => match commands.receiver.try_recv() {
@@ -1743,6 +1758,112 @@ mod chunk_tests;
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn stop_settles_applied_and_rejected_requests_before_any_attempt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{
+            CommandQueue, CommandRequest, PhysicsClientError, RuntimeControl, SimulationEvents,
+            apply_queued_commands, run_simulation,
+        };
+        use kapitsa_core::command::PhysicsCommand;
+        use std::sync::Arc;
+
+        let mut simulation = Simulation::new_from_config(config(100))?;
+        let runner = simulation.simulation.as_mut().ok_or("runner")?;
+        let body = runner.world_mut()?.add_body(dynamic_body())?;
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let mut queue = CommandQueue::new(receiver, Arc::clone(&simulation.buffer_pool));
+        let (applied_tx, applied_rx) = tokio::sync::oneshot::channel();
+        sender.try_send(CommandRequest::Single {
+            command: PhysicsCommand::SetLinearVelocity {
+                id: body,
+                velocity: Vec3::X,
+            },
+            reply: applied_tx,
+        })?;
+        let (invalid_tx, invalid_rx) = tokio::sync::oneshot::channel();
+        sender.try_send(CommandRequest::Single {
+            command: PhysicsCommand::SetLinearVelocity {
+                id: body,
+                velocity: Vec3::new(f64::NAN, 0.0, 0.0),
+            },
+            reply: invalid_tx,
+        })?;
+        apply_queued_commands(runner, &mut queue, false)?;
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        stop_tx.send_replace(true);
+        let events = SimulationEvents {
+            collisions: simulation.collision_events_tx.clone(),
+            joint_breaks: simulation.joint_break_events_tx.clone(),
+            batch_results: simulation.batch_results_tx.clone(),
+        };
+        run_simulation(
+            runner,
+            queue,
+            RuntimeControl {
+                stop: stop_rx,
+                time_multiplier: simulation.time_multiplier_tx.subscribe(),
+                time_horizon: simulation.time_horizon_tx.subscribe(),
+            },
+            &simulation.metrics_tx,
+            &simulation.snapshot_tx,
+            &events,
+            &mut simulation.simulation_time,
+        )
+        .await?;
+        assert!(matches!(
+            applied_rx.await?,
+            Err(PhysicsClientError::StepFailedAfterApply { step: 1, .. })
+        ));
+        assert!(matches!(
+            invalid_rx.await?,
+            Err(PhysicsClientError::Body(_))
+        ));
+        assert_eq!(
+            runner
+                .world()?
+                .body(body)
+                .ok_or("body")?
+                .state()
+                .linear_velocity(),
+            Vec3::X
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deferred_results_are_bounded_across_command_turns()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{CommandQueue, CommandRequest, MAX_COMMANDS_PER_STEP, apply_queued_commands};
+        use kapitsa_core::command::PhysicsCommand;
+        use std::sync::Arc;
+
+        let mut simulation = Simulation::new_from_config(config(100))?;
+        let runner = simulation.simulation.as_mut().ok_or("runner")?;
+        let body = runner.world_mut()?.add_body(dynamic_body())?;
+        let (sender, receiver) = tokio::sync::mpsc::channel(MAX_COMMANDS_PER_STEP + 1);
+        let mut queue = CommandQueue::new(receiver, Arc::default());
+        for _ in 0..=MAX_COMMANDS_PER_STEP {
+            let (reply, _) = tokio::sync::oneshot::channel();
+            sender.try_send(CommandRequest::Single {
+                command: PhysicsCommand::SetLinearVelocity {
+                    id: body,
+                    velocity: Vec3::X,
+                },
+                reply,
+            })?;
+        }
+        apply_queued_commands(runner, &mut queue, false)?;
+        assert_eq!(queue.pending_results.len(), MAX_COMMANDS_PER_STEP);
+        apply_queued_commands(runner, &mut queue, false)?;
+        assert_eq!(queue.pending_results.len(), MAX_COMMANDS_PER_STEP);
+        assert_eq!(queue.receiver.len(), 1);
+        queue.pending_results.clear();
+        apply_queued_commands(runner, &mut queue, false)?;
+        assert_eq!(queue.pending_results.len(), 1);
+        Ok(())
+    }
+
     #[test]
     fn failed_step_reports_runner_cause_instead_of_collision_failure() {
         use super::{StepRunnerError, step_error_for_result};
