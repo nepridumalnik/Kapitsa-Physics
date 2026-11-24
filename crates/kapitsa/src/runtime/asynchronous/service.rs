@@ -330,6 +330,31 @@ impl SimulationBuilder {
         self.config
             .validate()
             .map_err(SimulationError::InvalidConfig)?;
+        let (owned_runtime, runtime) = OwnedRuntime::start()?;
+        self.spawn_with_rayon_runtime(pool, runtime, Some(owned_runtime))
+    }
+
+    /// Starts a simulation using the supplied Tokio runtime and Rayon pool.
+    pub fn spawn_on_tokio_and_rayon(
+        self,
+        runtime: &Handle,
+        pool: Arc<rayon::ThreadPool>,
+    ) -> Result<Simulation, Error> {
+        self.spawn_with_rayon_runtime(pool, runtime.clone(), None)
+    }
+
+    fn spawn_with_rayon_runtime(
+        self,
+        pool: Arc<rayon::ThreadPool>,
+        runtime: Handle,
+        owned_runtime: Option<OwnedRuntime>,
+    ) -> Result<Simulation, Error> {
+        if self.invalid_worker_count {
+            return Err(Error::from(SimulationError::InvalidWorkerCount));
+        }
+        self.config
+            .validate()
+            .map_err(SimulationError::InvalidConfig)?;
         let mut world = PhysicsWorld::new();
         world.set_atmosphere(self.atmosphere);
         world.set_central_gravity(self.central_gravity);
@@ -343,11 +368,10 @@ impl SimulationBuilder {
         if let Some(model) = self.mesh_pressure_model {
             world.set_mesh_pressure_model(model);
         }
-        let (owned_runtime, runtime) = OwnedRuntime::start()?;
         let runner =
             StepRunner::new_with_executor(world, self.config, RayonExecutor::from_pool(pool))?;
         let mut simulation = Simulation::from_runner(runner, runtime)?;
-        simulation.owned_runtime = Some(owned_runtime);
+        simulation.owned_runtime = owned_runtime;
         simulation.set_time_horizon(self.time_horizon);
         simulation.start()?;
         Ok(simulation)
@@ -1939,6 +1963,71 @@ mod chunk_tests;
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_and_shared_pools_preserve_world_on_gated_stop_and_restart()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::Arc;
+        let pool = Arc::new(rayon::ThreadPoolBuilder::new().num_threads(2).build()?);
+        for shared in [false, true] {
+            let builder = Simulation::builder()
+                .frequency(100)
+                .time_horizon(Duration::ZERO)
+                .time_step_policy(TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default()))
+                .step_recovery_policy(StepRecoveryPolicy::Resilient(
+                    crate::runtime::RecoveryConfig::default(),
+                ));
+            let mut simulation = if shared {
+                builder.spawn_on_tokio_and_rayon(
+                    &tokio::runtime::Handle::current(),
+                    Arc::clone(&pool),
+                )?
+            } else {
+                builder.spawn_on_tokio(&tokio::runtime::Handle::current())?
+            };
+            let client = simulation.client();
+            let body = client.add_body(dynamic_body()).await?;
+            simulation.stop().await?;
+            let (entered, entered_rx) = oneshot::channel();
+            let (release, release_rx) = mpsc::channel();
+            simulation
+                .simulation
+                .as_mut()
+                .ok_or("runner")?
+                .gate_next_step(entered, release_rx);
+            simulation.set_time_horizon(Some(Duration::from_millis(10)));
+            simulation.start()?;
+            let retained = client.snapshot();
+            tokio::time::timeout(Duration::from_secs(1), entered_rx).await??;
+            assert_eq!(client.snapshot().revision(), retained.revision());
+            let mut queued = client.commands();
+            queued.set_linear_velocity(body, Vec3::X);
+            let mut results = client.subscribe_batch_results();
+            let id = client.try_submit(queued)?;
+            let mut stop = Box::pin(simulation.stop());
+            assert!(matches!(poll_once(stop.as_mut()), Poll::Pending));
+            drop(stop);
+            release.send(())?;
+            simulation.stop().await?;
+            let rejected = results.next_result().await?;
+            assert_eq!(rejected.batch_id, id);
+            assert!(rejected.result.is_err());
+            assert_eq!(client.snapshot().step(), 1);
+            assert!(client.snapshot().body(body).is_some());
+            simulation.set_time_horizon(Some(Duration::from_millis(20)));
+            simulation.start()?;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while client.snapshot().step() < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            simulation.stop().await?;
+            drop(simulation);
+            assert_eq!(pool.install(|| 7), 7);
+        }
+        Ok(())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn pause_and_horizon_preempt_catchup_after_inflight_step()
     -> Result<(), Box<dyn std::error::Error>> {

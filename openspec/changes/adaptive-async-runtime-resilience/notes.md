@@ -200,6 +200,13 @@ retry and stop; tests cover retry, blocked, recovered and fatal states alongside
 the overload checks. The latest selected safe duration is distinct from the
 actual retry duration; it is not presented as the raw physical estimator bound.
 
+Task 4.4 adds `spawn_on_tokio_and_rayon` to compose a host runtime with a
+caller-owned bounded pool. The gated lifecycle test covers owned and shared
+pools, cancellation of stop, accepted-request resolution, retained snapshots,
+restart and caller pool reuse. Existing `spawn_on_rayon` coverage checks its
+dedicated runtime and independent shared-pool lifetimes; no thread termination
+is claimed for permanently hung work.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the
