@@ -2771,6 +2771,7 @@ impl PhysicsWorld {
                 self.rollback_gravity_updates();
                 self.rollback_aerodynamics_updates();
                 self.rollback_force_source_updates();
+                self.rollback_pending_shapes()?;
                 Err(Error::from(StepError::Collision(crate::Error::from(
                     CollisionError::WorkerFailed,
                 ))))
@@ -2964,7 +2965,9 @@ impl PhysicsWorld {
             self.rollback_gravity_updates();
             self.rollback_aerodynamics_updates();
             self.rollback_force_source_updates();
+            self.rollback_pending_shapes()?;
         } else {
+            self.commit_pending_shapes();
             self.step_diagnostics = self.pending_step_diagnostics;
             if let Some(workspaces) = &mut self.owner_pressure {
                 workspaces.retain(|_, workspace| workspace.commit());
@@ -3040,6 +3043,7 @@ impl PhysicsWorld {
                 self.rollback_gravity_updates();
                 self.rollback_aerodynamics_updates();
                 self.rollback_force_source_updates();
+                self.rollback_pending_shapes()?;
                 Err(Error::from(StepError::Collision(crate::Error::from(
                     CollisionError::WorkerFailed,
                 ))))

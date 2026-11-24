@@ -69,6 +69,12 @@ A rejected integration SHALL preserve all previously committed physical state an
 - **THEN** subsequent successful execution SHALL match an equivalent reference world with the same accepted commands and successful dt sequence
 - **AND** no failed interval SHALL count as committed time or a committed step
 
+#### Scenario: A ready aerodynamic shape precedes a failed step
+- **WHEN** a pending cook completes during step preparation and the integration subsequently fails
+- **THEN** the previous shape binding and registry state SHALL remain visible
+- **AND** the completion notification SHALL be deferred until a successful publication
+- **AND** a later successful step SHALL use and publish the prepared shape exactly once
+
 ### Requirement: Exactly-once command and result semantics
 Accepted commands SHALL be applied at most once across retries. Rejected atomic batches SHALL have no partial mutation. Results SHALL distinguish applied commands awaiting an integration commit from rejected commands, and every accepted request SHALL receive one terminal outcome or existing explicit bounded-stream lag indication. Query results SHALL retain their FIFO observation semantics.
 

@@ -4159,6 +4159,152 @@ fn sharded_collision_solver_error_rolls_back_force_sources_and_can_retry() {
 }
 
 #[test]
+fn rejected_prediction_then_smaller_step_matches_reference_after_force_preparation()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn fixture() -> Result<(PhysicsWorld, BodyId, BodyId), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut body =
+            RigidBody::new_dynamic(Transform::new(Vec3::X * 1.0e308, Quat::IDENTITY)?, mass)?;
+        body.set_linear_velocity(Vec3::X * 1.0e308)?;
+        body.apply_force(Vec3::Y)?;
+        let id = world.add_body(body)?;
+        world.add_force_source(id, Vec3::ZERO, Vec3::Y)?;
+        let mut sleeping = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        sleeping.sleep()?;
+        let sleeping_id = world.add_body(sleeping)?;
+        Ok((world, id, sleeping_id))
+    }
+
+    for sharded in [false, true] {
+        let (mut attempted, attempted_id, attempted_sleeping) = fixture()?;
+        let (mut reference, reference_id, reference_sleeping) = fixture()?;
+        let before = attempted
+            .body(attempted_id)
+            .ok_or(WorldError::InvalidBodyId)?
+            .motion();
+        let mut shards = vec![Vec::new(); 4];
+        let failure = if sharded {
+            attempted.step_with_shards(1.0, &mut shards, &ScopedThreadExecutor, 4)
+        } else {
+            attempted.step(1.0)
+        };
+        assert!(
+            matches!(step_cause(&failure), Some(StepError::BodyIntegration { cause, .. }) if cause.downcast_ref::<IntegrationError>() == Some(&IntegrationError::ArithmeticOverflow))
+        );
+        assert_eq!(
+            attempted
+                .body(attempted_id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion(),
+            before
+        );
+        assert!(
+            attempted
+                .body(attempted_sleeping)
+                .ok_or(WorldError::InvalidBodyId)?
+                .state()
+                .is_sleeping()
+        );
+        if sharded {
+            attempted.step_with_shards(0.5, &mut shards, &ScopedThreadExecutor, 4)?;
+            let mut reference_shards = vec![Vec::new(); 4];
+            reference.step_with_shards(0.5, &mut reference_shards, &ScopedThreadExecutor, 4)?;
+        } else {
+            attempted.step(0.5)?;
+            reference.step(0.5)?;
+        }
+        assert_eq!(
+            attempted
+                .body(attempted_id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion(),
+            reference
+                .body(reference_id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion()
+        );
+        assert_eq!(
+            attempted
+                .body(attempted_sleeping)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion(),
+            reference
+                .body(reference_sleeping)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion()
+        );
+        assert_eq!(
+            attempted.collision_events().len(),
+            reference.collision_events().len()
+        );
+        assert_eq!(
+            attempted.contact_impulses().len(),
+            reference.contact_impulses().len()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn rejected_collision_work_then_smaller_step_matches_reference()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn fixture() -> Result<(PhysicsWorld, Vec<BodyId>), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut ids = Vec::new();
+        for x in [0.0, 1.5, 5.0, 6.5] {
+            let mut body =
+                RigidBody::new_dynamic(Transform::new(Vec3::X * x, Quat::IDENTITY)?, mass)?;
+            body.apply_force(Vec3::Y)?;
+            let id = world.add_body(body)?;
+            world.add_collider(id, collider(1.0))?;
+            world.add_force_source(id, Vec3::ZERO, Vec3::X)?;
+            ids.push(id);
+        }
+        Ok((world, ids))
+    }
+    let (mut attempted, attempted_ids) = fixture()?;
+    let (mut reference, reference_ids) = fixture()?;
+    let executor = FailingExecutor {
+        fail_on_call: 2,
+        calls: AtomicUsize::new(0),
+    };
+    let mut shards = vec![Vec::new(); 4];
+    let failure = attempted.step_with_shards(0.1, &mut shards, &executor, 4);
+    assert!(
+        matches!(step_cause(&failure), Some(StepError::Collision(cause)) if cause.downcast_ref::<CollisionError>() == Some(&CollisionError::WorkerFailed))
+    );
+    assert_eq!(executor.calls.load(Ordering::Relaxed), 2);
+    assert!(attempted.collision_events().is_empty());
+    assert!(attempted.contact_impulses().is_empty());
+    attempted.step_with_shards(0.05, &mut shards, &ScopedThreadExecutor, 4)?;
+    let mut reference_shards = vec![Vec::new(); 4];
+    reference.step_with_shards(0.05, &mut reference_shards, &ScopedThreadExecutor, 4)?;
+    for (attempted_id, reference_id) in attempted_ids.into_iter().zip(reference_ids) {
+        assert_eq!(
+            attempted
+                .body(attempted_id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion(),
+            reference
+                .body(reference_id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion()
+        );
+    }
+    assert_eq!(
+        attempted.collision_events().len(),
+        reference.collision_events().len()
+    );
+    assert_eq!(
+        attempted.contact_impulses().len(),
+        reference.contact_impulses().len()
+    );
+    Ok(())
+}
+
+#[test]
 fn body_removal_invalidates_its_force_sources_and_disable_stops_force() {
     let mut world = PhysicsWorld::new();
     let body = world.add_body(dynamic_body()).expect("body");

@@ -70,6 +70,14 @@ Per service turn bound total attempts (successes + retries), commands and deferr
 
 ## 6. Transaction boundaries and publication
 
+Shape cooking publication is part of the core integration transaction when it is
+completed while a step prepares aerodynamics. A newly cooked shape, binding,
+body-revision increment, and completion notification SHALL not become visible
+until the enclosing step commits. A failed step SHALL remove unpublished shape
+registry entries, restore the previous binding/revision, and defer or reject the
+completion without claiming installation. Explicit shape publication outside a
+step remains immediate and atomic.
+
 Define two distinct boundaries: (A) atomic command application (existing contract), (B) atomic core integration attempt. Do not roll back a previously acknowledged command merely because a later step fails. At B, verify rollback of body pose/velocity/sleep/forces, persistent force-source and gravity/aerodynamic state, joint and cluster topology, contact caches/warm starts, spatial proxies, events, impulses, diagnostics and staged results. Scratch may change if it cannot affect subsequent results. Test failures after force preparation, during prediction/collision and before final commit. Prefer existing staging and reusable scratch; no full-world clone each step. If a path cannot restore a trustworthy world, classify it Fatal; do not retry it.
 
 On recoverable attempt failure, do not publish a new step snapshot, events or success acknowledgement. Keep accepted command outcomes until the next successful step, or settle them once on Blocked/Fatal/stop. Never replay commands. Existing StepFailedAfterApply / failed_step() semantics identify a command that mutated the world but whose following step did not commit; do not turn this into a rejection or instruct callers to resubmit. Preserve original typed cause. A failed atomic batch remains rejected, not applied. One-shot force must survive a failed attempt exactly once until a successful step consumes it; a persistent ForceSource applies every committed interval; an impulse applies exactly once at command application. Structural IDs remain valid if application succeeded.

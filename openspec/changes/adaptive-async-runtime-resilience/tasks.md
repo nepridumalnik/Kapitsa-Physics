@@ -9,7 +9,7 @@ All tasks are unchecked intentionally. Implement in order; each numbered group i
 
 ## 1. Core transaction and error classification (P0)
 
-- [ ] 1.1 Audit step_with_executor/step_with_shards, force preparation, collision abort, joint/cluster staging and commit; identify all mutation and publication boundaries. Add failure-after-preparation and collision/precommit tests against a reference successful smaller-step world.
+- [x] 1.1 Audit step_with_executor/step_with_shards, force preparation, collision abort, joint/cluster staging and commit; identify all mutation and publication boundaries. Add failure-after-preparation and collision/precommit tests against a reference successful smaller-step world.
 - [ ] 1.2 Repair only demonstrated rollback holes. Verify body state, sleeping, one-shot/persistent forces, contact warm-start, event/impulse buffers, topology, gravity/aero state and committed diagnostics. Include sequential and parallel execution; reuse scratch, no full-world clone per attempt.
 - [ ] 1.3 Implement narrow typed classification and pure bounded retry decision; distinguish dt-sensitive, corrective-input-required, transient worker failure with intact world, and fatal ownership/rollback failure. Test unknown error, invalid dt, strict policy, floor, overflow and exhausted retry budget. No string matching.
 

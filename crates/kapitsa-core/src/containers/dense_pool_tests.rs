@@ -1,6 +1,25 @@
 use super::{DenseId, DensePool, DensePoolError, SlotState};
 
 #[test]
+fn undo_unpublished_insertions_preserves_free_list_and_generations() -> Result<(), crate::Error> {
+    let mut pool = DensePool::new();
+    let first = pool.insert(1)?;
+    let second = pool.insert(2)?;
+    assert_eq!(pool.remove(first), Some(1));
+    let before_reuse = pool.insert_checkpoint();
+    let reused = pool.insert(3)?;
+    let before_append = pool.insert_checkpoint();
+    let appended = pool.insert(4)?;
+    assert_eq!(pool.undo_insertion(reused, before_reuse), None);
+    assert_eq!(pool.undo_insertion(appended, before_append), Some(4));
+    assert_eq!(pool.undo_insertion(reused, before_reuse), Some(3));
+    assert_eq!(pool.get(second), Some(&2));
+    assert_eq!(pool.insert(5)?, reused);
+    assert_eq!(pool.insert(6)?, appended);
+    Ok(())
+}
+
+#[test]
 fn empty_pool_has_no_values() {
     let pool = DensePool::<i32>::new();
 

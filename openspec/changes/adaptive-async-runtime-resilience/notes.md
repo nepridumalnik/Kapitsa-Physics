@@ -24,6 +24,65 @@ because the opt-in policy does not exist; as each policy component is implemente
 wire its corresponding probe to that policy and remove its ignore annotation.
 The legacy tests and their assertions must continue to pass separately.
 
+## Transaction audit in progress
+
+`with_force_source_updates` stages published diagnostics and restores prepared
+gravity, aerodynamic and persistent-force motion on an error. `step_prepared`
+and `commit_step_shards_inner` abort collision staging on the documented error
+paths; abort discards staged caches, lifecycle, joint impulses and context, and
+marks the spatial index dirty. Body integration, joint removal, collision event
+publication and weld-split finalization occur after precommit validation. Weld
+split bodies are inserted during the last staging operation, so panic and
+allocation-failure paths require separate integrity evidence before retrying.
+
+Two reference-world tests now pass for a rejected prediction after force
+preparation (ordinary and sharded) and a sharded collision-worker failure before
+commit. They verify motion and event/impulse counts after a smaller successful
+step, but do not establish every state component required by task 1.2.
+
+An additional test, `failed_step_does_not_publish_a_ready_aerodynamic_shape`,
+demonstrated an atomicity issue on the baseline: `finish_pending_shapes` installed
+and acknowledged a completed shape during aerodynamic preparation, before a
+subsequent gravity failure. The failed step left a new shape binding in the
+world.
+
+The agreed design is implemented: shape registry insertions receive an
+insertion checkpoint, staged bindings commit only after integration succeeds,
+and failed ordinary/sharded attempts restore the prior binding and dense-pool
+free-list/generation state. Completion is delivered only on commit. The
+regression covers both an absent previous shape and an existing previous shape.
+Evidence across all specified state components remains incomplete, so task 1.2
+is not marked complete. In particular,
+panic paths still require an ownership and rollback audit before any worker
+failure may be classified as retryable.
+
+Core sends shape-completion notifications after core commit, before the service
+publishes its new snapshot. The service exposes this completion channel to
+clients, so task 3.2 must also address ordering against service snapshot
+publication. The core-only change does not establish that host-facing guarantee.
+
+Focused release allocation checks: `shared_shape_warm_steps_add_no_allocations`
+reported 4,800 allocations / 1,168,384 bytes for 16 warm steps with four bodies,
+both before (`f603ae4`) and after this change; its body-local and shared-shape
+measurements were equal in both runs. `pending_shape_status_and_collection_do_not_allocate`
+reported zero allocations across 128 pending polls on the candidate. These are
+focused allocation probes, not the paired runtime performance gate in task 6.3.
+
+Validation of the in-progress transaction work: `cargo test -p kapitsa-core --lib
+--quiet` passed 1,384 tests with 3 ignored before the final test-only sleeping
+state extension; the extension passed its focused test. The targeted shape and
+generation tests, warm-start cache tests, and multi-cluster weld rollback test
+also passed. `cargo clippy -p kapitsa-core --all-targets --all-features -- -D
+warnings` and strict validation of this change passed before the last test-only
+edits. Full workspace checks and benchmarks remain outstanding.
+
+`physics_step_metrics()` under `bench-internals` is an attempt diagnostic, not
+the last committed diagnostic: the existing `physics_step_metrics_are_empty_after_a_failed_step`
+test explicitly requires it to be empty after a failure. The regular
+`step_diagnostics` uses pending and published storage and swaps only on success;
+`step_diagnostics_publish_only_on_success` checks that contract. Preserve both
+meanings rather than treating an empty failed-attempt metric as a committed step.
+
 The existing service chooses its adaptive duration before applying queued commands,
 returns on any step error, retains unbounded demand, and enforces a 0.30 load floor.
 The legacy tests intentionally cover these behaviours; opt-in tests must not change them.
