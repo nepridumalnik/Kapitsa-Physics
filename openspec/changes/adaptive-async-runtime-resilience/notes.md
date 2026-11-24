@@ -59,10 +59,9 @@ insertion checkpoint, staged bindings commit only after integration succeeds,
 and failed ordinary/sharded attempts restore the prior binding and dense-pool
 free-list/generation state. Completion is delivered only on commit. The
 regression covers both an absent previous shape and an existing previous shape.
-Evidence across all specified state components remains incomplete, so task 1.2
-is not marked complete. In particular,
-panic paths still require an ownership and rollback audit before any worker
-failure may be classified as retryable.
+The tested ordinary error paths preserve the listed state components. Panic
+paths do not have a complete integrity proof and must be classified as fatal,
+not retried as ordinary worker failures.
 
 Core sends shape-completion notifications after core commit, before the service
 publishes its new snapshot. The service exposes this completion channel to
