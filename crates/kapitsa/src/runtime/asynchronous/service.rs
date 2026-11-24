@@ -29,7 +29,8 @@ use super::{
     },
 };
 use crate::runtime::{
-    ConfigError, SimulationConfig, SimulationMetrics, SimulationState, TimeStepPolicy,
+    ConfigError, SimulationConfig, SimulationMetrics, SimulationState, StepRecoveryPolicy,
+    TimeStepPolicy,
     adaptive_step::{StepChoice, choose_step},
     executor::RayonExecutor,
 };
@@ -754,6 +755,10 @@ async fn run_simulation_loop(
         simulation.config().time_step_policy,
         TimeStepPolicy::Adaptive(_)
     );
+    let resilient = matches!(
+        simulation.config().step_recovery_policy,
+        StepRecoveryPolicy::Resilient(_)
+    );
     let max_catch_up_steps = simulation.config().max_catch_up_steps;
     let mut previous = Instant::now();
     let mut multiplier_started_at = previous;
@@ -766,7 +771,10 @@ async fn run_simulation_loop(
     let mut was_horizon_reached = false;
     let minimum_interval = match simulation.config().time_step_policy {
         TimeStepPolicy::Fixed => step_duration,
-        TimeStepPolicy::Adaptive(config) => config.minimum_step,
+        TimeStepPolicy::Adaptive(config) => match simulation.config().step_recovery_policy {
+            StepRecoveryPolicy::FailFast => config.minimum_step,
+            StepRecoveryPolicy::Resilient(recovery) => recovery.minimum_step,
+        },
     };
 
     loop {
@@ -910,6 +918,9 @@ async fn run_simulation_loop(
             if let Some(horizon) = *time_horizon.borrow() {
                 accumulator = accumulator.min(horizon.saturating_sub(*simulation_time));
             }
+            if resilient {
+                apply_queued_commands(simulation, commands)?;
+            }
             let (physics_step, limited) =
                 choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
             let Some(physics_step) = physics_step else {
@@ -956,7 +967,9 @@ async fn run_simulation_loop(
                 .checked_add(physics_step)
                 .ok_or(SimulationError::SimulationTimeOverflow)?;
             let attempted_step = simulation.metrics().total_steps.saturating_add(1);
-            apply_queued_commands(simulation, commands)?;
+            if !resilient {
+                apply_queued_commands(simulation, commands)?;
+            }
             let step_result = if adaptive_policy {
                 simulation.step_with_dt(physics_step.as_secs_f64()).await
             } else {
@@ -1556,8 +1569,8 @@ mod tests {
     use tokio::{sync::oneshot, time::sleep};
 
     use crate::runtime::{
-        AdaptiveTimeStepConfig, SimulationConfig, SimulationError, SimulationState, TimeStepPolicy,
-        WorkerConfig,
+        AdaptiveTimeStepConfig, SimulationConfig, SimulationError, SimulationState,
+        StepRecoveryPolicy, TimeStepPolicy, WorkerConfig,
     };
 
     use super::{
@@ -1662,7 +1675,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    #[ignore = "post-command resilient step selection is not implemented yet"]
     async fn resilient_step_recomputes_bound_after_queued_velocity()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut adaptive = config(100);
@@ -1671,6 +1683,8 @@ mod tests {
             maximum_step: Duration::from_millis(10),
             relative_error_tolerance: 0.01,
         });
+        adaptive.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
         let mut simulation = Simulation::new_from_config(adaptive)?;
         let world = simulation
             .simulation
@@ -1701,6 +1715,109 @@ mod tests {
             committed <= Duration::from_nanos(866_025),
             "first attempt committed {committed:?}"
         );
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resilient_step_uses_queued_impulse_force_and_joint_bounds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use kapitsa_core::joint::SpringJoint;
+        for kind in 0..3 {
+            let mut adaptive = config(100);
+            adaptive.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig {
+                minimum_step: Duration::from_micros(10),
+                maximum_step: Duration::from_millis(10),
+                relative_error_tolerance: 0.01,
+            });
+            adaptive.step_recovery_policy =
+                StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+            let mut simulation = Simulation::new_from_config(adaptive)?;
+            let world = simulation
+                .simulation
+                .as_mut()
+                .ok_or("missing runner")?
+                .world_mut()?;
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let body = world.add_body(RigidBody::new_dynamic(
+                Transform::new(Vec3::X * 2.0, kapitsa_math::Quat::IDENTITY)?,
+                mass,
+            )?)?;
+            world.add_collider(
+                body,
+                Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+            )?;
+            let joint = if kind == 2 {
+                let fixed = world.add_body(RigidBody::new_static(Transform::identity()))?;
+                Some(world.add_joint(
+                    fixed,
+                    body,
+                    Joint::Spring(SpringJoint::new(
+                        JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY),
+                        2.0,
+                        1.0,
+                        0.0,
+                    )),
+                )?)
+            } else {
+                None
+            };
+            simulation.set_time_horizon(Some(Duration::from_millis(1)));
+            let client = simulation.client();
+            let mut results = client.subscribe_batch_results();
+            simulation.start()?;
+            let mut commands = client.commands();
+            match kind {
+                0 => commands.apply_impulse(body, Vec3::X * 100.0),
+                1 => commands.apply_force(body, Vec3::X * 1_000_000.0),
+                _ => commands.update_joint(
+                    joint.ok_or("joint")?,
+                    Joint::Spring(SpringJoint::new(
+                        JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY),
+                        2.0,
+                        1_000_000.0,
+                        0.0,
+                    )),
+                ),
+            }
+            let batch = client.try_submit(commands)?;
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_millis(10)).await;
+            let result = results.next_result().await?;
+            assert_eq!(result.batch_id, batch);
+            result.result?;
+            let committed = client.snapshot().simulation_time();
+            simulation.stop().await?;
+            assert!(
+                committed > Duration::ZERO && committed < Duration::from_millis(1),
+                "case {kind}: {committed:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resilient_short_horizon_commits_exactly_its_remainder()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut adaptive = config(100);
+        adaptive.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        adaptive.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+        let mut simulation = Simulation::new_from_config(adaptive)?;
+        let horizon = Duration::from_micros(5);
+        simulation.set_time_horizon(Some(horizon));
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while simulation.client().snapshot().simulation_time() < horizon {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let snapshot = simulation.client().snapshot();
+        assert_eq!(snapshot.simulation_time(), horizon);
+        assert_eq!(snapshot.step(), 1);
+        simulation.stop().await?;
         Ok(())
     }
 

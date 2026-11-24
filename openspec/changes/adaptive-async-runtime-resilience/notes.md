@@ -79,6 +79,12 @@ measurements were equal in both runs. `pending_shape_status_and_collection_do_no
 reported zero allocations across 128 pending polls on the candidate. These are
 focused allocation probes, not the paired runtime performance gate in task 6.3.
 
+Resilient service selection now applies queued FIFO mutations before choosing
+the attempt. Tests cover velocity, impulse, one-shot force and spring-joint
+changes, plus a 5 µs absolute horizon that commits exactly one 5 µs step.
+Legacy service tests remain green (40 passed, 2 ignored in the focused service
+module).
+
 Validation of the in-progress transaction work: `cargo test -p kapitsa-core --lib
 --quiet` passed 1,384 tests with 3 ignored before the final test-only sleeping
 state extension; the extension passed its focused test. The targeted shape and
