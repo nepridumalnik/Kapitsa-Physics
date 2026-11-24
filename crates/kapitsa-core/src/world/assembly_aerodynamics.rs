@@ -147,6 +147,17 @@ impl PhysicsWorld {
         })
     }
 
+    /// Returns the surface referenced by a current wing identity.
+    pub fn part_wing(
+        &self,
+        wing: super::PartWingId,
+    ) -> Option<&crate::aerodynamics::wing::WingSurface> {
+        let entry = self.cluster_part(wing.part)?;
+        (entry.wing_revision == wing.revision)
+            .then(|| entry.aerodynamic_wings.get(wing.index))
+            .flatten()
+    }
+
     /// Changes control deflection in radians without invalidating shielding.
     pub fn set_part_wing_deflection(
         &mut self,

@@ -1303,6 +1303,14 @@ enum MutationBefore {
             kapitsa_core::world::BodyShapeStatus,
         )>,
     ),
+    Wing(
+        kapitsa_core::world::PartWingId,
+        Option<Box<kapitsa_core::aerodynamics::wing::WingSurface>>,
+    ),
+    Hull(
+        kapitsa_core::world::PartId,
+        Option<Vec<kapitsa_core::aerodynamics::hull::HullSection>>,
+    ),
     Unknown,
 }
 
@@ -1335,6 +1343,8 @@ impl MutationBefore {
                     .any(|(id, status)| world.body_shape_status(*id) != *status)
                     || world.body_count() != before.len()
             }
+            Self::Wing(id, before) => world.part_wing(*id) != before.as_deref(),
+            Self::Hull(id, before) => world.part_aerodynamic_hull(*id) != before.as_deref(),
             Self::Unknown => true,
         }
     }
@@ -1403,6 +1413,12 @@ fn mutation_before(world: &PhysicsWorld, command: &PhysicsCommand) -> MutationBe
                     .map(|(id, _)| (id, world.body_shape_status(id)))
                     .collect(),
             )
+        }
+        PhysicsCommand::SetPartWingDeflection { wing, .. } => {
+            MutationBefore::Wing(*wing, world.part_wing(*wing).cloned().map(Box::new))
+        }
+        PhysicsCommand::SetPartAerodynamicHull { part, .. } => {
+            MutationBefore::Hull(*part, world.part_aerodynamic_hull(*part).map(<[_]>::to_vec))
         }
         _ => MutationBefore::Unknown,
     }
@@ -1965,6 +1981,54 @@ mod tests {
         let before = mutation_before(&world, &command);
         world.apply_command(command)?;
         assert!(before.changed(&world));
+        Ok(())
+    }
+
+    #[test]
+    fn blocked_aerodynamic_commands_compare_final_values() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use super::{PhysicsCommand, mutation_before};
+        use kapitsa_core::{
+            aerodynamics::wing::{FiniteWing, WingControl, WingSurface},
+            world::PhysicsWorld,
+        };
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(dynamic_body())?;
+        let part = world.enable_cluster(body)?;
+        let surface = WingSurface::new(
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?,
+            Transform::identity(),
+            1.0,
+        )?
+        .with_control(WingControl::new(0.0, 0.2, 1.0)?);
+        world.set_part_aerodynamic_wings(part, vec![surface])?;
+        let wing = world.part_wing_id(part, 0).ok_or("wing")?;
+        let command = PhysicsCommand::SetPartWingDeflection {
+            wing,
+            deflection: 0.0,
+        };
+        let before = mutation_before(&world, &command);
+        world.apply_command(command)?;
+        assert!(!before.changed(&world));
+        let before = mutation_before(
+            &world,
+            &PhysicsCommand::SetPartWingDeflection {
+                wing,
+                deflection: 0.1,
+            },
+        );
+        world.apply_command(PhysicsCommand::SetPartWingDeflection {
+            wing,
+            deflection: 0.1,
+        })?;
+        assert!(before.changed(&world));
+        let hull = PhysicsCommand::SetPartAerodynamicHull {
+            part,
+            sections: Vec::new(),
+        };
+        let before = mutation_before(&world, &hull);
+        world.apply_command(hull)?;
+        assert!(!before.changed(&world));
         Ok(())
     }
 
