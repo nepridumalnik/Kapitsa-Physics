@@ -2842,6 +2842,56 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn saturated_blocked_queue_reaches_corrective_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::runtime::constants::COMMAND_QUEUE_CAPACITY;
+        let mut settings = config(100);
+        settings.max_catch_up_steps = 1;
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy = StepRecoveryPolicy::Resilient(
+            crate::runtime::RecoveryConfig::builder()
+                .max_retries(1)
+                .build(),
+        );
+        let mut simulation = Simulation::new_from_config(settings)?;
+        let runner = simulation.simulation.as_mut().ok_or("runner")?;
+        let body = runner.world_mut()?.add_body(dynamic_body())?;
+        runner.reject_steps_remaining = 2;
+        let client = simulation.client();
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !matches!(
+                simulation.metrics().recovery_status,
+                RecoveryStatus::Blocked(_)
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        for _ in 0..COMMAND_QUEUE_CAPACITY - 1 {
+            let mut no_op = client.commands();
+            no_op.set_linear_velocity(body, Vec3::ZERO);
+            client.try_submit(no_op)?;
+        }
+        let mut corrective = Box::pin(client.set_linear_velocity(body, Vec3::X));
+        assert!(matches!(poll_once(corrective.as_mut()), Poll::Pending));
+        tokio::time::timeout(Duration::from_secs(1), corrective).await??;
+        assert_eq!(
+            client
+                .snapshot()
+                .body(body)
+                .ok_or("body")?
+                .linear_velocity(),
+            Vec3::X
+        );
+        assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
+        simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stopping_after_rejection_resolves_applied_command_once()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut settings = config(100);

@@ -158,11 +158,13 @@ batch. `retry_preserves_structural_commands_and_fifo_queries` checks addition,
 removal and query ordering across a rejected attempt and compares the resulting
 body with a successful-step reference.
 
-Task 3.2 in progress: deferred outcomes are capped across command turns, and
+Task 3.2: deferred outcomes are capped across command turns, and
 service exit now settles already-applied requests even if no attempt started.
 `deferred_results_are_bounded_across_command_turns` and
 `stop_settles_applied_and_rejected_requests_before_any_attempt` cover these
-paths. Saturated-queue corrective-command fairness remains to be verified.
+paths. `saturated_blocked_queue_reaches_corrective_command` verifies that a
+corrective request behind a full queue is applied and acknowledged. Existing
+failure and publication tests cover typed step causes and snapshot ordering.
 
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
