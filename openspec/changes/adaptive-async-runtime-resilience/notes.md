@@ -166,6 +166,12 @@ paths. `saturated_blocked_queue_reaches_corrective_command` verifies that a
 corrective request behind a full queue is applied and acknowledged. Existing
 failure and publication tests cover typed step causes and snapshot ordering.
 
+Task 3.3 adds a checked monotonic snapshot publication revision, including
+command-only publications and restart. The pause/horizon regression checks
+acknowledgement ordering, unchanged time/step and absence of collision and
+joint-break events; the blocked recovery regression checks the revision before
+resumption. Revision exhaustion is explicitly rejected before publication.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the

@@ -25,7 +25,7 @@ All tasks are unchecked intentionally. Implement in order; each numbered group i
 
 - [x] 3.1 Preserve command application exactly once across attempts; add tests for one-shot force, impulse, persistent force, structural addition/removal, invalid atomic batch and FIFO query. Verify against successful dt reference.
 - [x] 3.2 Defer step success results until matching committed snapshot; settle every accepted request once on Blocked/Fatal/stop with correct applied-vs-rejected semantics and original cause. Bound deferred results and ensure corrective commands cannot starve.
-- [ ] 3.3 Service pause/horizon/Blocked command-only publications at unchanged physical time; add publication revision if required. Test acknowledgement after publication, distinct revision, no fictitious step/event, and recovery by corrective command.
+- [x] 3.3 Service pause/horizon/Blocked command-only publications at unchanged physical time; add publication revision if required. Test acknowledgement after publication, distinct revision, no fictitious step/event, and recovery by corrective command.
 - [ ] 3.4 Verify immutable snapshot reads while a worker is gated, monotonic committed step/time, snapshot-before-events, explicit event lag, and no failed-attempt collision/joint-break events. Verify stale snapshot readers do not block producer or grow an internal unbounded queue.
 
 ## 4. Load shedding and asynchronous lifecycle (P0)

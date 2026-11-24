@@ -360,6 +360,7 @@ pub(crate) enum SimulationError {
     InvalidConfig(ConfigError),
     MissingRuntime,
     SimulationTimeOverflow,
+    PublicationRevisionOverflow,
     InvalidTimeMultiplier,
     InvalidWorkerCount,
     InvalidMeshSoundSpeed(kapitsa_core::Error),
@@ -384,6 +385,9 @@ impl std::fmt::Display for SimulationError {
             }
             Self::SimulationTimeOverflow => {
                 formatter.write_str("simulation time accumulator overflowed")
+            }
+            Self::PublicationRevisionOverflow => {
+                formatter.write_str("snapshot publication revision overflowed")
             }
             Self::InvalidTimeMultiplier => {
                 formatter.write_str("time multiplier must be finite and non-negative")
@@ -521,11 +525,13 @@ impl Simulation {
                 .simulation
                 .as_ref()
                 .ok_or(SimulationError::TaskRequiresStop)?;
-            Arc::new(PhysicsSnapshot::from_world(
+            let mut snapshot = PhysicsSnapshot::from_world(
                 simulation.world().map_err(SimulationError::from)?,
                 simulation.metrics().total_steps,
                 self.simulation_time,
-            ))
+            );
+            snapshot.set_revision(next_publication_revision(&self.snapshot_tx)?);
+            Arc::new(snapshot)
         };
         let simulation = self
             .simulation
@@ -829,6 +835,7 @@ async fn run_simulation_loop(
                 value.recovery_status = RecoveryStatus::Blocked(reason.clone());
             });
             if has_queued_request(commands) {
+                let revision = next_publication_revision(snapshots)?;
                 let mutated = apply_queued_commands(simulation, commands, true)?;
                 let step = simulation.metrics().total_steps;
                 for result in &mut commands.pending_results {
@@ -837,11 +844,9 @@ async fn run_simulation_loop(
                     }
                 }
                 let world = simulation.world().map_err(SimulationError::from)?;
-                snapshots.send_replace(Arc::new(PhysicsSnapshot::from_world(
-                    world,
-                    step,
-                    *simulation_time,
-                )));
+                let mut snapshot = PhysicsSnapshot::from_world(world, step, *simulation_time);
+                snapshot.set_revision(revision);
+                snapshots.send_replace(Arc::new(snapshot));
                 publish_command_results(commands, events);
                 if mutated {
                     blocked = None;
@@ -894,6 +899,7 @@ async fn run_simulation_loop(
         }
         was_horizon_reached = horizon_reached;
         if effective_multiplier == 0.0 && commands.pending.is_some() {
+            let revision = next_publication_revision(snapshots)?;
             if let Some((_, _, cause)) = retry.take() {
                 publish_failed_command_results(
                     commands,
@@ -910,7 +916,8 @@ async fn run_simulation_loop(
                 }
             }
             let world = simulation.world().map_err(SimulationError::from)?;
-            let snapshot = PhysicsSnapshot::from_world(world, step, *simulation_time);
+            let mut snapshot = PhysicsSnapshot::from_world(world, step, *simulation_time);
+            snapshot.set_revision(revision);
             snapshots.send_replace(Arc::new(snapshot));
             publish_command_results(commands, events);
             continue;
@@ -1084,6 +1091,7 @@ async fn run_simulation_loop(
                 .checked_add(physics_step)
                 .ok_or(SimulationError::SimulationTimeOverflow)?;
             let attempted_step = simulation.metrics().total_steps.saturating_add(1);
+            let revision = next_publication_revision(snapshots)?;
             if !resilient {
                 apply_queued_commands(simulation, commands, false)?;
             }
@@ -1179,6 +1187,7 @@ async fn run_simulation_loop(
                 }
             };
             snapshot.rebuild(world, simulation.metrics().total_steps, *simulation_time);
+            snapshot.set_revision(revision);
             let previous_snapshot = snapshots.send_replace(Arc::new(snapshot));
             PhysicsSnapshot::recycle(previous_snapshot, &mut reusable_snapshot);
             publish_command_results(commands, events);
@@ -1267,6 +1276,16 @@ fn load_speed_for_step(budget: Duration, average: Duration, multiplier: f64) -> 
     } else {
         (budget.as_secs_f64() / average.as_secs_f64() / multiplier).clamp(MIN_LOAD_SPEED, 1.0)
     }
+}
+
+fn next_publication_revision(
+    snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
+) -> Result<u64, SimulationError> {
+    snapshots
+        .borrow()
+        .revision()
+        .checked_add(1)
+        .ok_or(SimulationError::PublicationRevisionOverflow)
 }
 
 fn choose_runtime_step(
@@ -1758,6 +1777,23 @@ mod chunk_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn snapshot_revision_overflow_is_reported() {
+        use super::{SimulationError, next_publication_revision};
+        use std::sync::Arc;
+        let mut snapshot = super::PhysicsSnapshot::from_world(
+            &kapitsa_core::world::PhysicsWorld::new(),
+            0,
+            Duration::ZERO,
+        );
+        snapshot.set_revision(u64::MAX);
+        let (sender, _) = tokio::sync::watch::channel(Arc::new(snapshot));
+        assert!(matches!(
+            next_publication_revision(&sender),
+            Err(SimulationError::PublicationRevisionOverflow)
+        ));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn stop_settles_applied_and_rejected_requests_before_any_attempt()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2450,6 +2486,7 @@ mod tests {
         let client = simulation.client();
         let mut results = client.subscribe_batch_results();
         simulation.start()?;
+        let starting_revision = client.snapshot().revision();
         let mut commands = client.commands();
         commands.apply_impulse(body, Vec3::X);
         let batch = client.try_submit(commands)?;
@@ -2459,6 +2496,7 @@ mod tests {
         assert_eq!(result.batch_id, batch);
         result.result?;
         let snapshot = client.snapshot();
+        assert!(snapshot.revision() > starting_revision);
         assert_eq!(snapshot.step(), 1);
         assert_eq!(snapshot.simulation_time(), Duration::from_millis(5));
         assert_eq!(
@@ -2813,6 +2851,7 @@ mod tests {
             simulation.metrics().recovery_status,
             RecoveryStatus::Blocked(_)
         ));
+        let revision_before_correction = client.snapshot().revision();
         let mut corrective = client.commands();
         corrective.set_linear_velocity(body, Vec3::Y);
         let correction_id = client.try_submit(corrective)?;
@@ -2820,6 +2859,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), results.next_result()).await??;
         assert_eq!(correction.batch_id, correction_id);
         correction.result?;
+        assert!(client.snapshot().revision() > revision_before_correction);
         assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
         assert_eq!(
             client
@@ -3251,6 +3291,54 @@ mod tests {
         .await
         .unwrap();
         simulation.stop().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pause_and_horizon_publish_distinct_revisions_without_step_events()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for paused in [true, false] {
+            let mut simulation = Simulation::new_from_config(config(100))?;
+            if paused {
+                simulation.pause()?;
+            } else {
+                simulation.set_time_horizon(Some(Duration::ZERO));
+            }
+            simulation.start()?;
+            let client = simulation.client();
+            let mut events = client.subscribe_collision_events();
+            let mut breaks = client.subscribe_joint_break_events();
+            let initial = client.snapshot();
+            let body = client.add_body(dynamic_body()).await?;
+            let after_add = client.snapshot();
+            assert!(after_add.revision() > initial.revision());
+            assert!(after_add.body(body).is_some());
+            assert_eq!(
+                (after_add.step(), after_add.simulation_time()),
+                (0, Duration::ZERO)
+            );
+            client.set_linear_velocity(body, Vec3::X).await?;
+            let after_update = client.snapshot();
+            assert!(after_update.revision() > after_add.revision());
+            assert_eq!(
+                after_update.body(body).ok_or("body")?.linear_velocity(),
+                Vec3::X
+            );
+            assert_eq!(
+                (after_update.step(), after_update.simulation_time()),
+                (0, Duration::ZERO)
+            );
+            let mut event = Box::pin(events.next_batch());
+            assert!(matches!(poll_once(event.as_mut()), Poll::Pending));
+            drop(event);
+            let mut break_event = Box::pin(breaks.next_batch());
+            assert!(matches!(poll_once(break_event.as_mut()), Poll::Pending));
+            drop(break_event);
+            simulation.stop().await?;
+            simulation.start()?;
+            assert!(client.snapshot().revision() > after_update.revision());
+            simulation.stop().await?;
+        }
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

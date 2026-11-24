@@ -24,12 +24,13 @@ enum SnapshotIndex {
     Sparse(HashMap<BodyId, usize>),
 }
 
-/// Immutable body states published after a successful simulation step.
+/// Immutable body states published at a committed step or command boundary.
 ///
 /// Body lookup uses the complete world-scoped generational ID, so IDs from
 /// other worlds and stale IDs cannot resolve to a live body.
 pub struct PhysicsSnapshot {
     step: u64,
+    revision: u64,
     simulation_time: Duration,
     entries: Vec<SnapshotEntry>,
     index: SnapshotIndex,
@@ -39,6 +40,7 @@ impl PhysicsSnapshot {
     fn empty() -> Self {
         Self {
             step: 0,
+            revision: 0,
             simulation_time: Duration::ZERO,
             entries: Vec::new(),
             index: SnapshotIndex::Sparse(HashMap::new()),
@@ -139,6 +141,15 @@ impl PhysicsSnapshot {
     /// Returns the total number of successful steps represented by this snapshot.
     pub fn step(&self) -> u64 {
         self.step
+    }
+
+    /// Returns the monotonically increasing publication revision.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub(crate) fn set_revision(&mut self, revision: u64) {
+        self.revision = revision;
     }
 
     /// Returns accumulated simulated time represented by this snapshot.
