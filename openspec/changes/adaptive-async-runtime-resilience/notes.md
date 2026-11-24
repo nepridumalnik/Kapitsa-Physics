@@ -153,7 +153,8 @@ command types still need a complete no-op/relevant-mutation audit before task
 Body, joint and force-source batches now compare final state with their starting
 state, so setting a value and restoring it does not unblock the service. Single
 body, joint, force-source, atmosphere, central-gravity and collision-config
-commands also compare their state. This bounded
+commands also compare their state, as do material, gravity-field and common
+collider configuration updates. This bounded
 temporary collection is used only while blocked; ordinary step processing does
 not allocate it. The focused service suite passed 46 tests (2 ignored), and
 all-target/all-feature clippy passed after updating the benchmark call site.

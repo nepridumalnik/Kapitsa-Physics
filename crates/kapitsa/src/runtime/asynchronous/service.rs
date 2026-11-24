@@ -1273,6 +1273,30 @@ enum MutationBefore {
     Gravity(Option<kapitsa_core::gravity::CentralGravity>),
     Atmosphere(kapitsa_core::aerodynamics::Atmosphere),
     CollisionConfig(kapitsa_core::collision::CollisionConfig),
+    Material(
+        kapitsa_core::material::MaterialId,
+        Option<kapitsa_core::material::PhysicsMaterial>,
+    ),
+    GravityField(
+        kapitsa_core::world::GravityId,
+        Option<kapitsa_core::gravity::Gravity>,
+    ),
+    ColliderFilter(
+        kapitsa_core::world::ColliderId,
+        Option<kapitsa_core::collider::CollisionFilter>,
+    ),
+    ColliderMode(
+        kapitsa_core::world::ColliderId,
+        Option<kapitsa_core::collider::CollisionMode>,
+    ),
+    ColliderMaterial(
+        kapitsa_core::world::ColliderId,
+        Option<Option<kapitsa_core::material::MaterialId>>,
+    ),
+    ColliderTransform(
+        kapitsa_core::world::ColliderId,
+        Option<kapitsa_core::transform::Transform>,
+    ),
     Unknown,
 }
 
@@ -1285,6 +1309,20 @@ impl MutationBefore {
             Self::Gravity(before) => world.central_gravity() != *before,
             Self::Atmosphere(before) => world.atmosphere() != *before,
             Self::CollisionConfig(before) => world.collision_config() != *before,
+            Self::Material(id, before) => world.material(*id).copied() != *before,
+            Self::GravityField(id, before) => world.gravity(*id) != *before,
+            Self::ColliderFilter(id, before) => {
+                world.collider(*id).map(|value| value.filter()) != *before
+            }
+            Self::ColliderMode(id, before) => {
+                world.collider(*id).map(|value| value.mode()) != *before
+            }
+            Self::ColliderMaterial(id, before) => {
+                world.collider(*id).map(|value| value.material()) != *before
+            }
+            Self::ColliderTransform(id, before) => {
+                world.collider(*id).map(|value| value.local_transform()) != *before
+            }
             Self::Unknown => true,
         }
     }
@@ -1322,6 +1360,29 @@ fn mutation_before(world: &PhysicsWorld, command: &PhysicsCommand) -> MutationBe
         PhysicsCommand::SetAtmosphere { .. } => MutationBefore::Atmosphere(world.atmosphere()),
         PhysicsCommand::SetCollisionConfig { .. } => {
             MutationBefore::CollisionConfig(world.collision_config())
+        }
+        PhysicsCommand::UpdateMaterial { id, .. } => {
+            MutationBefore::Material(*id, world.material(*id).copied())
+        }
+        PhysicsCommand::UpdateGravity { id, .. } => {
+            MutationBefore::GravityField(*id, world.gravity(*id))
+        }
+        PhysicsCommand::SetColliderFilter { id, .. } => {
+            MutationBefore::ColliderFilter(*id, world.collider(*id).map(|value| value.filter()))
+        }
+        PhysicsCommand::SetColliderMode { id, .. } => {
+            MutationBefore::ColliderMode(*id, world.collider(*id).map(|value| value.mode()))
+        }
+        PhysicsCommand::SetColliderMaterial { id, .. } => {
+            MutationBefore::ColliderMaterial(*id, world.collider(*id).map(|value| value.material()))
+        }
+        PhysicsCommand::SetPartColliderTransform { collider, .. } => {
+            MutationBefore::ColliderTransform(
+                *collider,
+                world
+                    .collider(*collider)
+                    .map(|value| value.local_transform()),
+            )
         }
         _ => MutationBefore::Unknown,
     }
@@ -1828,6 +1889,11 @@ mod tests {
             ))),
         )?;
         let source = world.add_force_source(body, Vec3::ZERO, Vec3::X)?;
+        let collider = world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?;
+        let material = world.add_material(kapitsa_core::material::PhysicsMaterial::default())?;
         let commands = [
             PhysicsCommand::ApplyForce {
                 id: body,
@@ -1848,6 +1914,22 @@ mod tests {
             },
             PhysicsCommand::SetCollisionConfig {
                 config: world.collision_config(),
+            },
+            PhysicsCommand::UpdateMaterial {
+                id: material,
+                material: kapitsa_core::material::PhysicsMaterial::default(),
+            },
+            PhysicsCommand::SetColliderMode {
+                id: collider,
+                mode: world.collider(collider).ok_or("collider")?.mode(),
+            },
+            PhysicsCommand::SetColliderFilter {
+                id: collider,
+                filter: world.collider(collider).ok_or("collider")?.filter(),
+            },
+            PhysicsCommand::SetColliderMaterial {
+                id: collider,
+                material: None,
             },
         ];
         for command in commands {
