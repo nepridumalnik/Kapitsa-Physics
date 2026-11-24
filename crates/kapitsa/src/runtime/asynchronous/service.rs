@@ -1297,6 +1297,12 @@ enum MutationBefore {
         kapitsa_core::world::ColliderId,
         Option<kapitsa_core::transform::Transform>,
     ),
+    Shapes(
+        Vec<(
+            kapitsa_core::world::BodyId,
+            kapitsa_core::world::BodyShapeStatus,
+        )>,
+    ),
     Unknown,
 }
 
@@ -1322,6 +1328,12 @@ impl MutationBefore {
             }
             Self::ColliderTransform(id, before) => {
                 world.collider(*id).map(|value| value.local_transform()) != *before
+            }
+            Self::Shapes(before) => {
+                before
+                    .iter()
+                    .any(|(id, status)| world.body_shape_status(*id) != *status)
+                    || world.body_count() != before.len()
             }
             Self::Unknown => true,
         }
@@ -1382,6 +1394,14 @@ fn mutation_before(world: &PhysicsWorld, command: &PhysicsCommand) -> MutationBe
                 world
                     .collider(*collider)
                     .map(|value| value.local_transform()),
+            )
+        }
+        PhysicsCommand::PollBodyShape { .. } | PhysicsCommand::CancelBodyShape { .. } => {
+            MutationBefore::Shapes(
+                world
+                    .bodies()
+                    .map(|(id, _)| (id, world.body_shape_status(id)))
+                    .collect(),
             )
         }
         _ => MutationBefore::Unknown,
@@ -2448,6 +2468,11 @@ mod tests {
         .await?;
         let ray = Ray::new(Vec3::new(0.0, 0.0, -2.0), Vec3::Z, 10.0)?;
         assert!(client.raycast(ray, QueryFilter::default()).await?.is_some());
+        assert_eq!(
+            client.poll_body_shape(body).await?,
+            kapitsa_core::world::BodyShapeStatus::Unmanaged
+        );
+        assert!(!client.cancel_body_shape(body).await?);
         assert_eq!(
             simulation.metrics().recovery_status,
             RecoveryStatus::Blocked(RecoveryBlock::PhysicalStepLimit)
