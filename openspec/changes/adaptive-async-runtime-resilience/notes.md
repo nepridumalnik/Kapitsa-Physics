@@ -152,6 +152,12 @@ The service suite passed 50 tests with 2 ignored. The paused-clock test
 `paused_during_worker_backoff_accepts_commands_without_advancing` also checks
 that a pause permits command publication before a long backoff expires.
 
+Task 3.1: `retry_applies_impulse_and_one_shot_force_once_with_persistent_load`
+compares the committed state with a reference world, including an invalid atomic
+batch. `retry_preserves_structural_commands_and_fifo_queries` checks addition,
+removal and query ordering across a rejected attempt and compares the resulting
+body with a successful-step reference.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the

@@ -2412,6 +2412,68 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn retry_preserves_structural_commands_and_fifo_queries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use kapitsa_core::{
+            command::{PhysicsCommand, PhysicsCommandResult},
+            material::PhysicsMaterial,
+        };
+        let mut settings = config(100);
+        settings.max_catch_up_steps = 1;
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+        let mut simulation = Simulation::new_from_config(settings)?;
+        simulation.set_time_horizon(Some(Duration::from_millis(5)));
+        let runner = simulation.simulation.as_mut().ok_or("runner")?;
+        let removed = runner.world_mut()?.add_body(dynamic_body())?;
+        let initial = PhysicsMaterial::new(0.1, 0.2, 0.3, 1.0)?;
+        let updated = PhysicsMaterial::new(0.2, 0.3, 0.4, 1.0)?;
+        let material = runner.world_mut()?.add_material(initial)?;
+        runner.reject_steps_remaining = 1;
+        let client = simulation.client();
+        simulation.start()?;
+        let mut add = Box::pin(client.add_body(dynamic_body()));
+        let mut remove = Box::pin(client.remove_body(removed));
+        let mut before = Box::pin(client.submit(PhysicsCommand::GetMaterial { id: material }));
+        let mut update = Box::pin(client.submit(PhysicsCommand::UpdateMaterial {
+            id: material,
+            material: updated,
+        }));
+        let mut after = Box::pin(client.submit(PhysicsCommand::GetMaterial { id: material }));
+        assert!(matches!(poll_once(add.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(remove.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(before.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(update.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(after.as_mut()), Poll::Pending));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let added = add.await?;
+        remove.await?;
+        assert_eq!(before.await?, PhysicsCommandResult::Material(Some(initial)));
+        assert_eq!(update.await?, PhysicsCommandResult::Done);
+        assert_eq!(after.await?, PhysicsCommandResult::Material(Some(updated)));
+        let snapshot = client.snapshot();
+        assert!(snapshot.body(removed).is_none());
+        let mut reference = kapitsa_core::world::PhysicsWorld::new();
+        let reference_removed = reference.add_body(dynamic_body())?;
+        let reference_added = reference.add_body(dynamic_body())?;
+        reference
+            .remove_body(reference_removed)
+            .ok_or("removed body")?;
+        reference.step(snapshot.simulation_time().as_secs_f64())?;
+        assert_eq!(
+            *snapshot.body(added).ok_or("added body")?,
+            *reference
+                .body(reference_added)
+                .ok_or("reference body")?
+                .state()
+        );
+        simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn intact_dispatch_failure_uses_bounded_backoff_before_retry()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut settings = config(100);
