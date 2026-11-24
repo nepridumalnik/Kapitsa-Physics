@@ -29,8 +29,8 @@ use super::{
     },
 };
 use crate::runtime::{
-    ConfigError, SimulationConfig, SimulationMetrics, SimulationState, StepRecoveryPolicy,
-    TimeStepPolicy,
+    ConfigError, RecoveryBlock, RecoveryStatus, SimulationConfig, SimulationMetrics,
+    SimulationState, StepRecoveryPolicy, TimeStepPolicy,
     adaptive_step::{StepChoice, choose_step},
     executor::RayonExecutor,
     recovery::{RetryDecision, classify, decide},
@@ -579,11 +579,13 @@ impl Simulation {
                 let actual_multiplier = metrics.actual_time_multiplier;
                 let adaptive_step_limited = metrics.adaptive_step_limited;
                 let load_speed_factor = metrics.load_speed_factor;
+                let recovery_status = metrics.recovery_status.clone();
                 *metrics = simulation.metrics().clone();
                 metrics.requested_time_multiplier = requested_multiplier;
                 metrics.actual_time_multiplier = actual_multiplier;
                 metrics.adaptive_step_limited = adaptive_step_limited;
                 metrics.load_speed_factor = load_speed_factor;
+                metrics.recovery_status = recovery_status;
             });
             ServiceTaskOutput {
                 simulation,
@@ -772,6 +774,7 @@ async fn run_simulation_loop(
     let mut was_horizon_reached = false;
     let mut retry: Option<(Duration, usize, Error)> = None;
     let mut retry_ceiling: Option<Duration> = None;
+    let mut blocked: Option<RecoveryBlock> = None;
     let minimum_interval = match simulation.config().time_step_policy {
         TimeStepPolicy::Fixed => step_duration,
         TimeStepPolicy::Adaptive(config) => match simulation.config().step_recovery_policy {
@@ -781,6 +784,48 @@ async fn run_simulation_loop(
     };
 
     loop {
+        if let Some(reason) = blocked.as_ref() {
+            metrics.send_modify(|value| {
+                value.state = SimulationState::Running;
+                value.recovery_status = RecoveryStatus::Blocked(reason.clone());
+            });
+            if has_queued_request(commands) {
+                let mutated = apply_queued_commands(simulation, commands)?;
+                let step = simulation.metrics().total_steps;
+                for result in &mut commands.pending_results {
+                    if let DeferredCommandResult::Batch(batch) = result {
+                        batch.step = step;
+                    }
+                }
+                let world = simulation.world().map_err(SimulationError::from)?;
+                snapshots.send_replace(Arc::new(PhysicsSnapshot::from_world(
+                    world,
+                    step,
+                    *simulation_time,
+                )));
+                publish_command_results(commands, events);
+                if mutated {
+                    blocked = None;
+                    retry = None;
+                    retry_ceiling = None;
+                    metrics.send_modify(|value| value.recovery_status = RecoveryStatus::Healthy);
+                }
+                previous = Instant::now();
+                continue;
+            }
+            tokio::select! {
+                biased;
+                changed = stop.changed() => { if changed.is_err() || *stop.borrow() { break; } }
+                changed = time_multiplier.changed(), if time_updates_open => {
+                    if changed.is_ok() { current_multiplier = *time_multiplier.borrow_and_update(); }
+                    else { time_updates_open = false; }
+                }
+                changed = time_horizon.changed() => { if changed.is_err() { break; } time_horizon.borrow_and_update(); }
+                request = commands.receiver.recv(), if !commands.receiver.is_closed() => { commands.pending = request; }
+            }
+            previous = Instant::now();
+            continue;
+        }
         let available = time_horizon
             .borrow()
             .map(|horizon| horizon.saturating_sub(*simulation_time));
@@ -940,6 +985,19 @@ async fn run_simulation_loop(
                 choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
             let Some(mut physics_step) = physics_step else {
                 if limited {
+                    if resilient {
+                        publish_failed_command_results(
+                            commands,
+                            events,
+                            simulation.metrics().total_steps.saturating_add(1),
+                            Error::new(
+                                ErrorKind::Runtime,
+                                "physical step bound is below the recovery floor",
+                            ),
+                        );
+                        blocked = Some(RecoveryBlock::PhysicalStepLimit);
+                        break;
+                    }
                     if retry.is_none() && has_queued_request(commands) {
                         apply_queued_commands(simulation, commands)?;
                     }
@@ -1001,16 +1059,31 @@ async fn run_simulation_loop(
                 {
                     let retries = retry.as_ref().map_or(0, |(_, count, _)| *count);
                     let class = classify(cause, simulation.config().error_policy, false);
-                    if let RetryDecision::Retry(next) = decide(
+                    let decision = decide(
                         class,
                         physics_step,
                         physics_step,
                         config.minimum_step,
                         retries,
                         config.max_retries,
-                    ) {
-                        retry = Some((next, retries + 1, cause.clone()));
-                        continue;
+                    );
+                    match decision {
+                        RetryDecision::Retry(next) => {
+                            retry = Some((next, retries + 1, cause.clone()));
+                            continue;
+                        }
+                        RetryDecision::Blocked => {
+                            publish_failed_command_results(
+                                commands,
+                                events,
+                                attempted_step,
+                                cause.clone(),
+                            );
+                            retry = None;
+                            blocked = Some(RecoveryBlock::RejectedStep(cause.clone()));
+                            break;
+                        }
+                        RetryDecision::Fatal | RetryDecision::RetryWorker => {}
                     }
                 }
                 publish_failed_command_results(
@@ -1019,6 +1092,11 @@ async fn run_simulation_loop(
                     attempted_step,
                     step_error_for_result(&error),
                 );
+                if resilient {
+                    metrics.send_modify(|value| {
+                        value.recovery_status = RecoveryStatus::Fatal(step_error_for_result(&error))
+                    });
+                }
                 return Err(error.into());
             }
             if retry.take().is_some() {
@@ -1176,10 +1254,11 @@ fn simulation_debt(accumulated: Duration, fixed_step: Duration) -> Duration {
 fn apply_queued_commands(
     simulation: &mut StepRunner,
     commands: &mut CommandQueue,
-) -> Result<(), SimulationError> {
+) -> Result<bool, SimulationError> {
     let step = simulation.metrics().total_steps.saturating_add(1);
     let world = simulation.world_mut().map_err(SimulationError::from)?;
     let mut processed_commands = 0;
+    let mut mutated = false;
     while processed_commands < MAX_COMMANDS_PER_STEP {
         let request = match commands.pending.take() {
             Some(request) => request,
@@ -1198,6 +1277,7 @@ fn apply_queued_commands(
         match request {
             CommandRequest::Chunk { command, reply } => {
                 let outcome = apply_chunk(world, command);
+                mutated |= outcome.applied();
                 commands
                     .pending_results
                     .push(DeferredCommandResult::Chunk { reply, outcome });
@@ -1214,6 +1294,7 @@ fn apply_queued_commands(
                         | PhysicsCommand::GetWeld { .. }
                 );
                 let result = apply_command(world, command);
+                mutated |= !is_read_only_query && result.is_ok();
                 commands
                     .pending_results
                     .push(DeferredCommandResult::Single {
@@ -1223,8 +1304,10 @@ fn apply_queued_commands(
                     });
             }
             CommandRequest::Batch { id, buffer } => {
+                let nonempty = !buffer.is_empty();
                 let result =
                     apply_command_batch(world, buffer.commands(), &mut commands.batch_scratch);
+                mutated |= nonempty && result.is_ok();
                 commands.buffer_pool.recycle(buffer);
                 commands
                     .pending_results
@@ -1237,7 +1320,7 @@ fn apply_queued_commands(
         }
         processed_commands += command_count;
     }
-    Ok(())
+    Ok(mutated)
 }
 
 fn publish_command_results(commands: &mut CommandQueue, events: &SimulationEvents) {
@@ -1619,7 +1702,7 @@ mod tests {
     use tokio::{sync::oneshot, time::sleep};
 
     use crate::runtime::{
-        AdaptiveTimeStepConfig, SimulationConfig, SimulationError, SimulationState,
+        AdaptiveTimeStepConfig, RecoveryStatus, SimulationConfig, SimulationError, SimulationState,
         StepRecoveryPolicy, TimeStepPolicy, WorkerConfig,
     };
 
@@ -1886,7 +1969,7 @@ mod tests {
         let body = runner
             .world_mut()?
             .add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
-        runner.reject_next_step = true;
+        runner.reject_steps_remaining = 1;
         let client = simulation.client();
         let mut results = client.subscribe_batch_results();
         simulation.start()?;
@@ -1906,6 +1989,221 @@ mod tests {
             Vec3::X
         );
         simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_retries_block_without_spinning_and_corrective_command_resumes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut settings = config(100);
+        settings.max_catch_up_steps = 1;
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy = StepRecoveryPolicy::Resilient(
+            crate::runtime::RecoveryConfig::builder()
+                .max_retries(1)
+                .build(),
+        );
+        let mut simulation = Simulation::new_from_config(settings)?;
+        let runner = simulation.simulation.as_mut().ok_or("runner")?;
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = runner
+            .world_mut()?
+            .add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        runner.reject_steps_remaining = 2;
+        let client = simulation.client();
+        let mut results = client.subscribe_batch_results();
+        simulation.start()?;
+        let mut first = client.commands();
+        first.apply_impulse(body, Vec3::X);
+        let first_id = client.try_submit(first)?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let rejected =
+            tokio::time::timeout(Duration::from_secs(1), results.next_result()).await??;
+        assert_eq!(rejected.batch_id, first_id);
+        let cause = rejected
+            .result
+            .err()
+            .ok_or("applied command must report failed step")?;
+        assert_eq!(cause.failed_step(), Some(1));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !matches!(
+                simulation.metrics().recovery_status,
+                RecoveryStatus::Blocked(_)
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(simulation.state(), SimulationState::Running);
+        assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(client.snapshot().step(), 0);
+        let mut corrective = client.commands();
+        corrective.set_linear_velocity(body, Vec3::Y);
+        let correction_id = client.try_submit(corrective)?;
+        let correction =
+            tokio::time::timeout(Duration::from_secs(1), results.next_result()).await??;
+        assert_eq!(correction.batch_id, correction_id);
+        correction.result?;
+        assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
+        assert_eq!(
+            client
+                .snapshot()
+                .body(body)
+                .ok_or("body")?
+                .linear_velocity(),
+            Vec3::Y
+        );
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.snapshot().step() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(client.snapshot().simulation_time() <= Duration::from_millis(20));
+        simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopping_after_rejection_resolves_applied_command_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut settings = config(100);
+        settings.max_catch_up_steps = 1;
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+        let mut simulation = Simulation::new_from_config(settings)?;
+        let runner = simulation.simulation.as_mut().ok_or("runner")?;
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = runner
+            .world_mut()?
+            .add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = mpsc::channel();
+        runner.gate_next_step(entered, release_rx);
+        runner.reject_steps_remaining = 1;
+        let client = simulation.client();
+        let mut results = client.subscribe_batch_results();
+        simulation.start()?;
+        let mut command = client.commands();
+        command.apply_impulse(body, Vec3::X);
+        let id = client.try_submit(command)?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        entered_rx.await?;
+        let mut stop = Box::pin(simulation.stop());
+        assert!(matches!(poll_once(stop.as_mut()), Poll::Pending));
+        release.send(())?;
+        stop.await?;
+        let result = tokio::time::timeout(Duration::from_secs(1), results.next_result()).await??;
+        assert_eq!(result.batch_id, id);
+        assert_eq!(
+            result.result.err().ok_or("missing failure")?.failed_step(),
+            Some(1)
+        );
+        assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
+        let runner = simulation.simulation.as_ref().ok_or("stopped runner")?;
+        assert_eq!(
+            runner
+                .world()?
+                .body(body)
+                .ok_or("body")?
+                .state()
+                .linear_velocity(),
+            Vec3::X
+        );
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unsafe_floor_blocks_until_motion_is_corrected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::runtime::RecoveryBlock;
+        let mut settings = config(100);
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig {
+            minimum_step: Duration::from_millis(1),
+            maximum_step: Duration::from_millis(10),
+            relative_error_tolerance: 0.01,
+        });
+        settings.step_recovery_policy = StepRecoveryPolicy::Resilient(
+            crate::runtime::RecoveryConfig::builder()
+                .minimum_step(Duration::from_micros(100))
+                .build(),
+        );
+        let mut simulation = Simulation::new_from_config(settings)?;
+        let world = simulation
+            .simulation
+            .as_mut()
+            .ok_or("runner")?
+            .world_mut()?;
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut moving = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        moving.set_linear_velocity(Vec3::X * 100_000.0)?;
+        let body = world.add_body(moving)?;
+        world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?;
+        let client = simulation.client();
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while simulation.metrics().recovery_status
+                != RecoveryStatus::Blocked(RecoveryBlock::PhysicalStepLimit)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let ray = Ray::new(Vec3::new(0.0, 0.0, -2.0), Vec3::Z, 10.0)?;
+        assert!(client.raycast(ray, QueryFilter::default()).await?.is_some());
+        assert_eq!(
+            simulation.metrics().recovery_status,
+            RecoveryStatus::Blocked(RecoveryBlock::PhysicalStepLimit)
+        );
+        assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
+        client.set_linear_velocity(body, Vec3::ZERO).await?;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.snapshot().step() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(client.snapshot().simulation_time() > Duration::ZERO);
+        simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unverified_worker_failure_is_fatal_instead_of_retried()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut settings = config(100);
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+        let mut simulation = Simulation::new_from_config(settings)?;
+        simulation.simulation.as_mut().ok_or("runner")?.fail_worker = true;
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while simulation.state() != SimulationState::Error {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(matches!(
+            simulation.metrics().recovery_status,
+            RecoveryStatus::Fatal(_)
+        ));
+        assert_eq!(simulation.client().snapshot().step(), 0);
+        assert!(simulation.stop().await.is_err());
         Ok(())
     }
 
@@ -1995,7 +2293,7 @@ mod tests {
         simulation.set_time_horizon(Some(Duration::from_millis(10)));
         let runner = simulation.simulation.as_mut().ok_or("runner")?;
         let (body, constrained) = fixture(runner.world_mut()?)?;
-        runner.reject_next_step = true;
+        runner.reject_steps_remaining = 1;
         let mut reference = PhysicsWorld::new();
         let (reference_body, reference_constrained) = fixture(&mut reference)?;
         let client = simulation.client();

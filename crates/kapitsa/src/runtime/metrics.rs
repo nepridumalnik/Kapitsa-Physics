@@ -18,10 +18,27 @@ pub enum SimulationState {
     Error,
 }
 
+/// Resilient service progress independently of its lifecycle state.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum RecoveryStatus {
+    #[default]
+    Healthy,
+    Blocked(RecoveryBlock),
+    Fatal(kapitsa_core::Error),
+}
+
+/// Why an autonomous resilient service cannot currently advance.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RecoveryBlock {
+    PhysicalStepLimit,
+    RejectedStep(kapitsa_core::Error),
+}
+
 /// Snapshot of simulation timing, workload, and deadline metrics.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SimulationMetrics {
     pub state: SimulationState,
+    pub recovery_status: RecoveryStatus,
     /// Simulation-time interval integrated by the latest completed physics step.
     pub last_physics_step: Duration,
     pub last_step_duration: Duration,

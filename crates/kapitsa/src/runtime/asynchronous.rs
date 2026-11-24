@@ -129,7 +129,9 @@ struct StepRunner {
     #[cfg(test)]
     step_gate: Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     #[cfg(test)]
-    reject_next_step: bool,
+    reject_steps_remaining: usize,
+    #[cfg(test)]
+    fail_worker: bool,
 }
 
 impl StepRunner {
@@ -182,7 +184,9 @@ impl StepRunner {
             #[cfg(test)]
             step_gate: None,
             #[cfg(test)]
-            reject_next_step: false,
+            reject_steps_remaining: 0,
+            #[cfg(test)]
+            fail_worker: false,
         })
     }
 
@@ -298,7 +302,14 @@ impl StepRunner {
         #[cfg(test)]
         let step_gate = self.step_gate.take();
         #[cfg(test)]
-        let reject_step = std::mem::take(&mut self.reject_next_step);
+        let reject_step = if self.reject_steps_remaining > 0 {
+            self.reject_steps_remaining -= 1;
+            true
+        } else {
+            false
+        };
+        #[cfg(test)]
+        let fail_worker = std::mem::take(&mut self.fail_worker);
 
         self.dispatch
             .as_ref()
@@ -311,6 +322,14 @@ impl StepRunner {
                 }
 
                 let mut engine = engine;
+                #[cfg(test)]
+                if fail_worker {
+                    let result = Err(Error::from(StepError::Collision(Error::from(
+                        CollisionError::WorkerFailed,
+                    ))));
+                    let _ = result_sender.send(StepOutput { engine, result });
+                    return;
+                }
                 #[cfg(test)]
                 if reject_step {
                     let result = Err(Error::from(StepError::Collision(Error::from(

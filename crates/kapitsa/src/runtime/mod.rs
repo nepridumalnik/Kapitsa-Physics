@@ -74,7 +74,9 @@ pub use config::{
 pub use executor::RayonExecutor;
 #[cfg(feature = "service")]
 pub use executor::{RayonPool, RayonPoolError};
-pub use metrics::{SimulationMetrics, SimulationState, StepMeasurement, StepStats};
+pub use metrics::{
+    RecoveryBlock, RecoveryStatus, SimulationMetrics, SimulationState, StepMeasurement, StepStats,
+};
 pub use planner::{WorkerConfig, WorkerConfigError};
 
 #[cfg(feature = "service")]

@@ -131,5 +131,8 @@ Task 2.4 carries a reduced retry duration across turns and counts attempts again
 the turn limit. An injected rejection verifies a single impulse and a 5 ms commit;
 a separate high-speed contact and spring-joint fixture compares committed state
 and collision event content with a reference world. Failure exhaustion and
-corrective-command behaviour remain task 2.5: the current path still terminates
-on exhausted retries and is not yet the complete resilient service contract.
+corrective-command behaviour are being implemented in task 2.5. Exhaustion and
+unsafe physical bounds now produce a typed blocked status; tests cover no time
+accumulation, query service, and corrective resumption. Unverified worker failure
+is fatal. A bounded retry for a worker whose intact world is proven has not yet
+been integrated or tested; 2.5 remains open.
