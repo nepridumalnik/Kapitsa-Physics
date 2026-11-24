@@ -216,6 +216,15 @@ Task 5.2 updates the runtime guide, both README entry points and relevant
 comments with the recovery matrix, resource limits, publication and host-time
 contracts. The `kapitsa` service doctests passed and the example ran again.
 
+Task 5.3: regenerated both `scripts/public_api_snapshot.py` and the nightly
+rustdoc JSON snapshot; the source snapshot `--check` passed. Cargo dependency
+trees show no Tokio in default or parallel-only builds. The workspace declares
+version 0.7.0; no separate release/version policy was found in the reviewed CI,
+README or manifests, and no release or version bump is part of this change.
+Adding public `SimulationMetrics` fields affects downstream struct literals and
+should be considered in release compatibility review. The rustdoc path snapshot
+also picks up existing `PhysicsSystem` paths missing from the old baseline.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the
