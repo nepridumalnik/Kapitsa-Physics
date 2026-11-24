@@ -2386,11 +2386,18 @@ mod tests {
         commands.apply_impulse(body, Vec3::X);
         commands.apply_force(body, Vec3::Z * 3.0);
         let id = client.try_submit(commands)?;
+        let mut invalid = client.commands();
+        invalid.set_linear_velocity(body, Vec3::Y * 50.0);
+        invalid.set_linear_velocity(body, Vec3::new(f64::NAN, 0.0, 0.0));
+        let invalid_id = client.try_submit(invalid)?;
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(10)).await;
         let result = results.next_result().await?;
         assert_eq!(result.batch_id, id);
         result.result?;
+        let invalid_result = results.next_result().await?;
+        assert_eq!(invalid_result.batch_id, invalid_id);
+        assert!(invalid_result.result.is_err());
         let snapshot = client.snapshot();
         reference.step(snapshot.simulation_time().as_secs_f64())?;
         assert_eq!(
