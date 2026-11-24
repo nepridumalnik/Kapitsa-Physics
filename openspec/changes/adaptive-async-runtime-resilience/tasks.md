@@ -16,7 +16,7 @@ All tasks are unchecked intentionally. Implement in order; each numbered group i
 ## 2. Opt-in adaptive policy and progress (P0)
 
 - [x] 2.1 Add validated RecoveryConfig and StepRecoveryPolicy to config/builders/public exports; preserve FailFast defaults and reject unsupported combinations. Test invalid configuration before start.
-- [ ] 2.2 Refactor choose_step to expose the physical bound; keep existing legacy tests. Resilient adaptive mode may use a positive safe dt below preferred minimum to hard floor. Test safe smaller dt, floor violation, sub-floor horizon, duration quantization and overflow.
+- [x] 2.2 Refactor choose_step to expose the physical bound; keep existing legacy tests. Resilient adaptive mode may use a positive safe dt below preferred minimum to hard floor. Test safe smaller dt, floor violation, sub-floor horizon, duration quantization and overflow.
 - [ ] 2.3 Select/revalidate dt after FIFO mutations; add test that a newly applied impulse, force and collider/joint change influences that same attempt. Test horizon and exact committed time.
 - [ ] 2.4 Integrate retry context into service and StepRunner; halve dt with strict reduction, obey fresh bounds, keep retry count across scheduler turns, commit only actual successful dt, grow retry ceiling conservatively after success. A transient rejected step must not end service. Verify reference trajectory and event sequence; include a real high-speed contact and constrained joint fixture.
 - [ ] 2.5 On exhausted retry/floor enter explicit Blocked, keep service alive, do not retry at unchanged inputs or accrue new demand. Corrective mutation must resume without restart; distinguish fatal world loss and intentional pause. Test bounded worker retry only for proven intact world.

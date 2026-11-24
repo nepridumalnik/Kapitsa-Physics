@@ -17,9 +17,13 @@ and `parallel` enables Rayon. Tests below were run on the starting point.
 The four explicitly ignored `resilient_` baseline probes are run by
 `cargo test -p kapitsa --features service resilient_ -- --ignored --nocapture`.
 On the baseline all four fail: the numerical rejection terminates the service
-(the same initial state succeeds at half the duration), the safe 500 µs bound
-returns `Limited`, admission retains 10 s, and a queued velocity commits 1 ms
-when the post-command bound is 500 µs. They currently exercise legacy machinery
+(the same initial state succeeds at half the duration), the safe approximately
+866 µs bound returns `Limited`, admission retains 10 s, and a queued velocity commits 1 ms
+when the post-command bound is approximately 866 µs. The original probe used
+500 µs incorrectly: the existing estimator uses the radius of the sphere's
+bounding box, `sqrt(3) * 0.5 m`, not the sphere radius. The corrected threshold
+preserves the estimator contract and still detects the original 1 ms violation.
+They initially exercise legacy machinery
 because the opt-in policy does not exist; as each policy component is implemented,
 wire its corresponding probe to that policy and remove its ignore annotation.
 The legacy tests and their assertions must continue to pass separately.

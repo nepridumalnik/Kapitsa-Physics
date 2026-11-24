@@ -1698,7 +1698,7 @@ mod tests {
         let committed = client.snapshot().simulation_time();
         simulation.stop().await?;
         assert!(
-            committed <= Duration::from_micros(500),
+            committed <= Duration::from_nanos(866_025),
             "first attempt committed {committed:?}"
         );
         Ok(())
