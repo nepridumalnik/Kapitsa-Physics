@@ -55,13 +55,17 @@ pub struct SimulationMetrics {
     pub deadline_misses: u64,
     /// Accumulated simulation time beyond one configured base interval.
     pub simulation_time_debt: Duration,
+    /// Requested simulated time discarded by admission limits or horizon reduction.
+    pub discarded_simulation_demand: Duration,
+    /// Whether discarded demand exceeded the representable duration range.
+    pub discarded_demand_saturated: bool,
     /// True when adaptive precision bounds are below the configured minimum step.
     pub adaptive_step_limited: bool,
     /// Time multiplier requested through `Simulation::set_time_multiplier`.
     pub requested_time_multiplier: f64,
     /// Simulated seconds per wall second measured since the latest multiplier change.
     pub actual_time_multiplier: f64,
-    /// Current load-induced speed factor, between 0.3 and 1.0 while running.
+    /// Current load-induced admission factor, between zero and one while running.
     pub load_speed_factor: f64,
     /// Degradations recorded by the latest successfully committed physics step.
     pub step_diagnostics: StepDiagnostics,

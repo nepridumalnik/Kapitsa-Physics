@@ -545,6 +545,10 @@ impl Simulation {
         let mut simulation = simulation;
         simulation.set_runtime_status(SimulationState::Running, Duration::ZERO);
         let mut initial_metrics = simulation.metrics().clone();
+        initial_metrics.discarded_simulation_demand =
+            self.metrics_rx.borrow().discarded_simulation_demand;
+        initial_metrics.discarded_demand_saturated =
+            self.metrics_rx.borrow().discarded_demand_saturated;
         initial_metrics.requested_time_multiplier = *self.time_multiplier_tx.borrow();
         initial_metrics.actual_time_multiplier = 0.0;
         initial_metrics.load_speed_factor = 1.0;
@@ -592,12 +596,16 @@ impl Simulation {
                 let adaptive_step_limited = metrics.adaptive_step_limited;
                 let load_speed_factor = metrics.load_speed_factor;
                 let recovery_status = metrics.recovery_status.clone();
+                let discarded_simulation_demand = metrics.discarded_simulation_demand;
+                let discarded_demand_saturated = metrics.discarded_demand_saturated;
                 *metrics = simulation.metrics().clone();
                 metrics.requested_time_multiplier = requested_multiplier;
                 metrics.actual_time_multiplier = actual_multiplier;
                 metrics.adaptive_step_limited = adaptive_step_limited;
                 metrics.load_speed_factor = load_speed_factor;
                 metrics.recovery_status = recovery_status;
+                metrics.discarded_simulation_demand = discarded_simulation_demand;
+                metrics.discarded_demand_saturated = discarded_demand_saturated;
             });
             ServiceTaskOutput {
                 simulation,
@@ -783,6 +791,7 @@ async fn run_simulation_loop(
         simulation.config().time_step_policy,
         TimeStepPolicy::Adaptive(_)
     );
+    let recovery_policy = simulation.config().step_recovery_policy;
     let resilient = matches!(
         simulation.config().step_recovery_policy,
         StepRecoveryPolicy::Resilient(_)
@@ -875,6 +884,9 @@ async fn run_simulation_loop(
             .map(|horizon| horizon.saturating_sub(*simulation_time));
         let horizon_reached = available.is_some_and(|remaining| remaining < minimum_interval);
         if let Some(remaining) = available {
+            if resilient && accumulator > remaining {
+                record_discarded_demand(metrics, accumulator - remaining, false);
+            }
             accumulator = accumulator.min(remaining);
         }
         let effective_multiplier = if horizon_reached {
@@ -883,6 +895,9 @@ async fn run_simulation_loop(
             current_multiplier
         };
         if horizon_reached {
+            if resilient && !accumulator.is_zero() {
+                record_discarded_demand(metrics, accumulator, false);
+            }
             accumulator = Duration::ZERO;
             previous = Instant::now();
             if !was_horizon_reached {
@@ -956,10 +971,14 @@ async fn run_simulation_loop(
             }
             changed = time_multiplier.changed(), if time_updates_open => {
                 let now = Instant::now();
-                add_scaled_elapsed(
+                admit_elapsed(
                     &mut accumulator,
                     now.duration_since(previous),
-                    effective_multiplier * load_speed,
+                    effective_multiplier,
+                    load_speed,
+                    recovery_policy,
+                    available,
+                    metrics,
                 )?;
                 previous = now;
                 match changed {
@@ -984,10 +1003,14 @@ async fn run_simulation_loop(
                 if (effective_multiplier == 0.0 || (adaptive_policy && step_limited)) && commands.pending.is_none() && !commands.receiver.is_closed() =>
             {
                 let now = Instant::now();
-                add_scaled_elapsed(
+                admit_elapsed(
                     &mut accumulator,
                     now.duration_since(previous),
-                    effective_multiplier * load_speed,
+                    effective_multiplier,
+                    load_speed,
+                    recovery_policy,
+                    available,
+                    metrics,
                 )?;
                 previous = now;
                 commands.pending = request;
@@ -1007,10 +1030,14 @@ async fn run_simulation_loop(
         }
 
         let now = Instant::now();
-        add_scaled_elapsed(
+        admit_elapsed(
             &mut accumulator,
             now.duration_since(previous),
-            current_multiplier * load_speed,
+            current_multiplier,
+            load_speed,
+            recovery_policy,
+            available,
+            metrics,
         )?;
         if step_deadline_reached && !adaptive_policy {
             accumulator = accumulator.max(step_duration);
@@ -1022,7 +1049,11 @@ async fn run_simulation_loop(
                 break;
             }
             if let Some(horizon) = *time_horizon.borrow() {
-                accumulator = accumulator.min(horizon.saturating_sub(*simulation_time));
+                let remaining = horizon.saturating_sub(*simulation_time);
+                if resilient && accumulator > remaining {
+                    record_discarded_demand(metrics, accumulator - remaining, false);
+                }
+                accumulator = accumulator.min(remaining);
             }
             if resilient && retry.is_none() {
                 apply_queued_commands(simulation, commands, false)?;
@@ -1223,17 +1254,23 @@ async fn run_simulation_loop(
                 multiplier_started_simulation_time,
                 completed_at.duration_since(multiplier_started_at),
             );
-            add_scaled_elapsed(
+            admit_elapsed(
                 &mut accumulator,
                 completed_at.duration_since(previous),
-                current_multiplier * load_speed,
+                current_multiplier,
+                load_speed,
+                recovery_policy,
+                time_horizon
+                    .borrow()
+                    .map(|horizon| horizon.saturating_sub(*simulation_time)),
+                metrics,
             )?;
             previous = completed_at;
             let measured = simulation
                 .metrics()
                 .average_step_duration
                 .saturating_add(simulation.metrics().task_wait_duration);
-            load_speed = load_speed_for_step(
+            load_speed = load_speed_for_policy(
                 step_duration,
                 measured,
                 if adaptive_policy {
@@ -1241,6 +1278,7 @@ async fn run_simulation_loop(
                 } else {
                     current_multiplier
                 },
+                resilient,
             );
             let debt = simulation_debt(accumulator, step_duration);
             simulation.set_runtime_status(SimulationState::Running, debt);
@@ -1278,6 +1316,22 @@ fn load_speed_for_step(budget: Duration, average: Duration, multiplier: f64) -> 
     }
 }
 
+fn load_speed_for_policy(
+    budget: Duration,
+    average: Duration,
+    multiplier: f64,
+    resilient: bool,
+) -> f64 {
+    if !resilient {
+        return load_speed_for_step(budget, average, multiplier);
+    }
+    if average.is_zero() {
+        1.0
+    } else {
+        (budget.as_secs_f64() / average.as_secs_f64() / multiplier).clamp(0.0, 1.0)
+    }
+}
+
 fn next_publication_revision(
     snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
 ) -> Result<u64, SimulationError> {
@@ -1297,9 +1351,20 @@ fn choose_runtime_step(
     match simulation.config().time_step_policy {
         TimeStepPolicy::Fixed => Ok(((accumulated >= fixed_step).then_some(fixed_step), false)),
         TimeStepPolicy::Adaptive(_) => {
-            let target =
-                Duration::try_from_secs_f64(simulation.config().fixed_step_seconds() * multiplier)
-                    .map_err(|_| SimulationError::SimulationTimeOverflow)?;
+            let target = match Duration::try_from_secs_f64(
+                simulation.config().fixed_step_seconds() * multiplier,
+            ) {
+                Ok(target) => target,
+                Err(_)
+                    if matches!(
+                        simulation.config().step_recovery_policy,
+                        StepRecoveryPolicy::Resilient(_)
+                    ) =>
+                {
+                    Duration::MAX
+                }
+                Err(_) => return Err(SimulationError::SimulationTimeOverflow),
+            };
             let world = simulation.world().map_err(SimulationError::from)?;
             Ok(
                 match choose_step(world, simulation.config(), target, accumulated, fixed_step) {
@@ -1710,6 +1775,51 @@ fn add_scaled_elapsed(
     add_elapsed(accumulator, scaled)
 }
 
+fn record_discarded_demand(
+    metrics: &watch::Sender<SimulationMetrics>,
+    discarded: Duration,
+    saturated: bool,
+) {
+    if discarded.is_zero() && !saturated {
+        return;
+    }
+    metrics.send_modify(|value| {
+        let total = value.discarded_simulation_demand.checked_add(discarded);
+        value.discarded_simulation_demand = total.unwrap_or(Duration::MAX);
+        value.discarded_demand_saturated |= saturated || total.is_none();
+    });
+}
+
+fn admit_elapsed(
+    accumulator: &mut Duration,
+    elapsed: Duration,
+    multiplier: f64,
+    load_speed: f64,
+    policy: StepRecoveryPolicy,
+    horizon_remaining: Option<Duration>,
+    metrics: &watch::Sender<SimulationMetrics>,
+) -> Result<(), SimulationError> {
+    let StepRecoveryPolicy::Resilient(config) = policy else {
+        return add_scaled_elapsed(accumulator, elapsed, multiplier * load_speed);
+    };
+    let requested = Duration::try_from_secs_f64(elapsed.as_secs_f64() * multiplier);
+    let requested_saturated = requested.is_err();
+    let requested = requested.unwrap_or(Duration::MAX);
+    let paced =
+        Duration::try_from_secs_f64(requested.as_secs_f64() * load_speed).unwrap_or(Duration::MAX);
+    let cap = horizon_remaining.map_or(config.max_simulation_debt, |remaining| {
+        remaining.min(config.max_simulation_debt)
+    });
+    let admitted = paced.min(cap.saturating_sub(*accumulator));
+    *accumulator += admitted;
+    record_discarded_demand(
+        metrics,
+        requested.saturating_sub(admitted),
+        requested_saturated,
+    );
+    Ok(())
+}
+
 fn measured_time_multiplier(
     simulation_time: Duration,
     start_simulation_time: Duration,
@@ -1764,6 +1874,11 @@ fn publish_runtime_metrics(
     load_speed: f64,
 ) {
     let mut snapshot = simulation.metrics().clone();
+    {
+        let current = metrics.borrow();
+        snapshot.discarded_simulation_demand = current.discarded_simulation_demand;
+        snapshot.discarded_demand_saturated = current.discarded_demand_saturated;
+    }
     snapshot.requested_time_multiplier = requested_multiplier;
     snapshot.actual_time_multiplier = actual_multiplier;
     snapshot.adaptive_step_limited = adaptive_step_limited;
@@ -1777,6 +1892,126 @@ mod chunk_tests;
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn huge_finite_warp_progresses_with_bounded_admission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut settings = config(100);
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+        let mut simulation = Simulation::new_from_config(settings)?;
+        simulation.set_time_multiplier(f64::MAX)?;
+        simulation.set_time_horizon(Some(Duration::from_millis(10)));
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while simulation.client().snapshot().simulation_time().is_zero() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(
+            simulation.client().snapshot().simulation_time(),
+            Duration::from_millis(10)
+        );
+        assert!(simulation.metrics().discarded_demand_saturated);
+        assert!(simulation.metrics().simulation_time_debt <= Duration::from_secs(1));
+        simulation.stop().await?;
+        assert!(simulation.metrics().discarded_demand_saturated);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn overload_discards_demand_without_discarding_committed_physics()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut settings = config(100);
+        settings.max_catch_up_steps = 1;
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+        let mut simulation = Simulation::new_from_config(settings)?;
+        simulation.set_time_horizon(Some(Duration::from_millis(10)));
+        let runner = simulation.simulation.as_mut().ok_or("runner")?;
+        let mut moving = dynamic_body();
+        moving.set_linear_velocity(Vec3::X)?;
+        let body = runner.world_mut()?.add_body(moving)?;
+        let mut reference = kapitsa_core::world::PhysicsWorld::new();
+        let mut reference_moving = dynamic_body();
+        reference_moving.set_linear_velocity(Vec3::X)?;
+        let reference_body = reference.add_body(reference_moving)?;
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = mpsc::channel();
+        runner.gate_next_step(entered, release_rx);
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        entered_rx.await?;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        release.send(())?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while simulation.client().snapshot().step() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let snapshot = simulation.client().snapshot();
+        reference.step(snapshot.simulation_time().as_secs_f64())?;
+        assert_eq!(
+            *snapshot.body(body).ok_or("body")?,
+            *reference.body(reference_body).ok_or("reference")?.state()
+        );
+        assert!(simulation.metrics().discarded_simulation_demand >= Duration::from_secs(10));
+        assert_eq!(
+            simulation.metrics().recovery_status,
+            RecoveryStatus::Healthy
+        );
+        simulation.stop().await?;
+        Ok(())
+    }
+
+    #[test]
+    fn resilient_admission_bounds_debt_and_reports_discarded_demand()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{admit_elapsed, load_speed_for_policy};
+        let (metrics, _) =
+            tokio::sync::watch::channel(crate::runtime::SimulationMetrics::default());
+        let policy = StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+        let mut accumulator = Duration::ZERO;
+        admit_elapsed(
+            &mut accumulator,
+            Duration::from_secs(10),
+            1.0,
+            0.5,
+            policy,
+            None,
+            &metrics,
+        )?;
+        assert_eq!(accumulator, Duration::from_secs(1));
+        assert_eq!(
+            metrics.borrow().discarded_simulation_demand,
+            Duration::from_secs(9)
+        );
+        assert!(!metrics.borrow().discarded_demand_saturated);
+        assert!(
+            load_speed_for_policy(Duration::from_millis(1), Duration::from_secs(10), 1.0, true)
+                < 0.3
+        );
+        admit_elapsed(
+            &mut accumulator,
+            Duration::from_secs(1),
+            f64::MAX,
+            1.0,
+            policy,
+            None,
+            &metrics,
+        )?;
+        assert_eq!(accumulator, Duration::from_secs(1));
+        assert!(metrics.borrow().discarded_demand_saturated);
+        assert_eq!(metrics.borrow().discarded_simulation_demand, Duration::MAX);
+        Ok(())
+    }
+
     #[test]
     fn snapshot_revision_overflow_is_reported() {
         use super::{SimulationError, next_publication_revision};

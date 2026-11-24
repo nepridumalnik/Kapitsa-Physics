@@ -181,6 +181,12 @@ service attempts emit neither event stream; core tests
 break rollback respectively. Event channels are bounded and stale snapshots are
 owned by readers, not kept in a producer queue.
 
+Task 4.1 bounds admitted time by recovery debt and the remaining horizon,
+records discarded demand with explicit saturation, removes the resilient load
+floor, and caps unrepresentable adaptive targets. Tests cover huge finite warp,
+the lower admission factor, demand limits and a gated overloaded successful
+step compared with a reference world. Paired release measurements remain in 6.3.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the
