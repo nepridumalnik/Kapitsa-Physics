@@ -128,6 +128,8 @@ struct StepRunner {
     last_metrics: SimulationMetrics,
     #[cfg(test)]
     step_gate: Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    #[cfg(test)]
+    reject_next_step: bool,
 }
 
 impl StepRunner {
@@ -179,6 +181,8 @@ impl StepRunner {
             last_metrics,
             #[cfg(test)]
             step_gate: None,
+            #[cfg(test)]
+            reject_next_step: false,
         })
     }
 
@@ -293,6 +297,8 @@ impl StepRunner {
         let started_at = Instant::now();
         #[cfg(test)]
         let step_gate = self.step_gate.take();
+        #[cfg(test)]
+        let reject_step = std::mem::take(&mut self.reject_next_step);
 
         self.dispatch
             .as_ref()
@@ -305,6 +311,14 @@ impl StepRunner {
                 }
 
                 let mut engine = engine;
+                #[cfg(test)]
+                if reject_step {
+                    let result = Err(Error::from(StepError::Collision(Error::from(
+                        CollisionError::CcdLimitExceeded,
+                    ))));
+                    let _ = result_sender.send(StepOutput { engine, result });
+                    return;
+                }
                 let result = match catch_unwind(AssertUnwindSafe(|| {
                     engine.step_with_dt(Duration::ZERO, physics_dt)
                 })) {

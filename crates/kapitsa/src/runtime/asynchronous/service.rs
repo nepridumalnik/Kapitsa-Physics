@@ -33,6 +33,7 @@ use crate::runtime::{
     TimeStepPolicy,
     adaptive_step::{StepChoice, choose_step},
     executor::RayonExecutor,
+    recovery::{RetryDecision, classify, decide},
 };
 
 struct ServiceTaskOutput {
@@ -769,6 +770,8 @@ async fn run_simulation_loop(
     let mut accumulator = Duration::ZERO;
     let mut reusable_snapshot = None;
     let mut was_horizon_reached = false;
+    let mut retry: Option<(Duration, usize, Error)> = None;
+    let mut retry_ceiling: Option<Duration> = None;
     let minimum_interval = match simulation.config().time_step_policy {
         TimeStepPolicy::Fixed => step_duration,
         TimeStepPolicy::Adaptive(config) => match simulation.config().step_recovery_policy {
@@ -807,6 +810,14 @@ async fn run_simulation_loop(
         }
         was_horizon_reached = horizon_reached;
         if effective_multiplier == 0.0 && commands.pending.is_some() {
+            if let Some((_, _, cause)) = retry.take() {
+                publish_failed_command_results(
+                    commands,
+                    events,
+                    simulation.metrics().total_steps.saturating_add(1),
+                    cause,
+                );
+            }
             apply_queued_commands(simulation, commands)?;
             let step = simulation.metrics().total_steps;
             for result in &mut commands.pending_results {
@@ -822,7 +833,11 @@ async fn run_simulation_loop(
         }
         let (mut ready_step, mut step_limited) =
             choose_runtime_step(simulation, accumulator, effective_multiplier, step_duration)?;
-        if current_multiplier != 0.0 && step_limited && has_queued_request(commands) {
+        if retry.is_none()
+            && current_multiplier != 0.0
+            && step_limited
+            && has_queued_request(commands)
+        {
             apply_queued_commands(simulation, commands)?;
             (ready_step, step_limited) =
                 choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
@@ -918,14 +933,14 @@ async fn run_simulation_loop(
             if let Some(horizon) = *time_horizon.borrow() {
                 accumulator = accumulator.min(horizon.saturating_sub(*simulation_time));
             }
-            if resilient {
+            if resilient && retry.is_none() {
                 apply_queued_commands(simulation, commands)?;
             }
             let (physics_step, limited) =
                 choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
-            let Some(physics_step) = physics_step else {
+            let Some(mut physics_step) = physics_step else {
                 if limited {
-                    if has_queued_request(commands) {
+                    if retry.is_none() && has_queued_request(commands) {
                         apply_queued_commands(simulation, commands)?;
                     }
                     let (_, still_limited) = choose_runtime_step(
@@ -957,6 +972,11 @@ async fn run_simulation_loop(
                 }
                 break;
             };
+            if let Some((ceiling, _, _)) = &retry {
+                physics_step = physics_step.min(*ceiling);
+            } else if let Some(ceiling) = retry_ceiling {
+                physics_step = physics_step.min(ceiling);
+            }
             if time_horizon
                 .borrow()
                 .is_some_and(|horizon| physics_step > horizon.saturating_sub(*simulation_time))
@@ -976,6 +996,23 @@ async fn run_simulation_loop(
                 simulation.step().await
             };
             if let Err(error) = step_result {
+                if let (StepRecoveryPolicy::Resilient(config), StepRunnerError::Physics(cause)) =
+                    (simulation.config().step_recovery_policy, &error)
+                {
+                    let retries = retry.as_ref().map_or(0, |(_, count, _)| *count);
+                    let class = classify(cause, simulation.config().error_policy, false);
+                    if let RetryDecision::Retry(next) = decide(
+                        class,
+                        physics_step,
+                        physics_step,
+                        config.minimum_step,
+                        retries,
+                        config.max_retries,
+                    ) {
+                        retry = Some((next, retries + 1, cause.clone()));
+                        continue;
+                    }
+                }
                 publish_failed_command_results(
                     commands,
                     events,
@@ -983,6 +1020,11 @@ async fn run_simulation_loop(
                     step_error_for_result(&error),
                 );
                 return Err(error.into());
+            }
+            if retry.take().is_some() {
+                retry_ceiling = Some(physics_step.saturating_mul(2));
+            } else if let Some(ceiling) = retry_ceiling {
+                retry_ceiling = Some(ceiling.saturating_mul(2));
             }
             *simulation_time = next_simulation_time;
 
@@ -1071,6 +1113,14 @@ async fn run_simulation_loop(
         }
     }
 
+    if let Some((_, _, cause)) = retry.take() {
+        publish_failed_command_results(
+            commands,
+            events,
+            simulation.metrics().total_steps.saturating_add(1),
+            cause,
+        );
+    }
     Ok(())
 }
 
@@ -1817,6 +1867,165 @@ mod tests {
         let snapshot = simulation.client().snapshot();
         assert_eq!(snapshot.simulation_time(), horizon);
         assert_eq!(snapshot.step(), 1);
+        simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resilient_retry_commits_only_the_successful_half_step()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut settings = config(100);
+        settings.max_catch_up_steps = 1;
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        settings.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+        let mut simulation = Simulation::new_from_config(settings)?;
+        simulation.set_time_horizon(Some(Duration::from_millis(10)));
+        let runner = simulation.simulation.as_mut().ok_or("missing runner")?;
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = runner
+            .world_mut()?
+            .add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        runner.reject_next_step = true;
+        let client = simulation.client();
+        let mut results = client.subscribe_batch_results();
+        simulation.start()?;
+        let mut commands = client.commands();
+        commands.apply_impulse(body, Vec3::X);
+        let batch = client.try_submit(commands)?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let result = results.next_result().await?;
+        assert_eq!(result.batch_id, batch);
+        result.result?;
+        let snapshot = client.snapshot();
+        assert_eq!(snapshot.step(), 1);
+        assert_eq!(snapshot.simulation_time(), Duration::from_millis(5));
+        assert_eq!(
+            snapshot.body(body).ok_or("body")?.linear_velocity(),
+            Vec3::X
+        );
+        simulation.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_matches_reference_contact_and_joint_step()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use kapitsa_core::{
+            collision::CcdLimitPolicy,
+            joint::SpringJoint,
+            material::PhysicsMaterial,
+            rigid_body::CcdMode,
+            shape::Cuboid,
+            world::{ErrorPolicy, PhysicsWorld},
+        };
+        fn fixture(
+            world: &mut PhysicsWorld,
+        ) -> Result<
+            (kapitsa_core::world::BodyId, kapitsa_core::world::BodyId),
+            Box<dyn std::error::Error>,
+        > {
+            let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+            for x in [0.0, 10.0] {
+                let wall = world.add_body(RigidBody::new_static(Transform::new(
+                    Vec3::X * x,
+                    kapitsa_math::Quat::IDENTITY,
+                )?))?;
+                let collider = world.add_collider(
+                    wall,
+                    Collider::new(
+                        Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+                        Transform::identity(),
+                    ),
+                )?;
+                world.set_collider_material(collider, Some(material))?;
+            }
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let mut moving = RigidBody::new_dynamic(
+                Transform::new(Vec3::X * 0.7, kapitsa_math::Quat::IDENTITY)?,
+                mass,
+            )?;
+            moving.set_linear_velocity(Vec3::X * -2000.0)?;
+            moving.set_ccd_mode(CcdMode::Continuous);
+            let body = world.add_body(moving)?;
+            let collider = world.add_collider(
+                body,
+                Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+            )?;
+            world.set_collider_material(collider, Some(material))?;
+            let fixed = world.add_body(RigidBody::new_static(Transform::new(
+                Vec3::Y * 50.0,
+                kapitsa_math::Quat::IDENTITY,
+            )?))?;
+            let constrained = world.add_body(RigidBody::new_dynamic(
+                Transform::new(Vec3::new(2.0, 50.0, 0.0), kapitsa_math::Quat::IDENTITY)?,
+                mass,
+            )?)?;
+            world.add_joint(
+                fixed,
+                constrained,
+                Joint::Spring(SpringJoint::new(
+                    JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY),
+                    2.0,
+                    10.0,
+                    0.0,
+                )),
+            )?;
+            world.set_error_policy(ErrorPolicy::Strict);
+            world.set_collision_config(
+                kapitsa_core::collision::CollisionConfig::builder()
+                    .max_ccd_impacts(1)
+                    .ccd_limit_policy(CcdLimitPolicy::AbortStep)
+                    .build(),
+            )?;
+            Ok((body, constrained))
+        }
+        let mut settings = config(100);
+        settings.max_catch_up_steps = 1;
+        settings.error_policy = ErrorPolicy::Strict;
+        settings.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig {
+            minimum_step: Duration::from_micros(1),
+            maximum_step: Duration::from_millis(10),
+            relative_error_tolerance: 1.0,
+        });
+        settings.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(crate::runtime::RecoveryConfig::default());
+        let mut simulation = Simulation::new_from_config(settings)?;
+        simulation.set_time_horizon(Some(Duration::from_millis(10)));
+        let runner = simulation.simulation.as_mut().ok_or("runner")?;
+        let (body, constrained) = fixture(runner.world_mut()?)?;
+        runner.reject_next_step = true;
+        let mut reference = PhysicsWorld::new();
+        let (reference_body, reference_constrained) = fixture(&mut reference)?;
+        let client = simulation.client();
+        let mut events = client.subscribe_collision_events();
+        simulation.start()?;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let event = tokio::time::timeout(Duration::from_secs(1), events.next_batch()).await??;
+        assert!(!event.events().is_empty());
+        let snapshot = client.snapshot();
+        let dt = snapshot.simulation_time();
+        assert!(dt > Duration::ZERO && dt < Duration::from_millis(10));
+        reference.step(dt.as_secs_f64())?;
+        assert_eq!(
+            *snapshot.body(body).ok_or("body")?,
+            *reference.body(reference_body).ok_or("reference")?.state()
+        );
+        assert_eq!(
+            *snapshot.body(constrained).ok_or("joint body")?,
+            *reference
+                .body(reference_constrained)
+                .ok_or("reference joint body")?
+                .state()
+        );
+        assert_eq!(event.events().len(), reference.collision_events().len());
+        for (actual, expected) in event.events().iter().zip(reference.collision_events()) {
+            assert_eq!(actual.kind, expected.kind);
+            assert_eq!(actual.sensor, expected.sensor);
+            assert_eq!(actual.contact, expected.contact);
+        }
         simulation.stop().await?;
         Ok(())
     }

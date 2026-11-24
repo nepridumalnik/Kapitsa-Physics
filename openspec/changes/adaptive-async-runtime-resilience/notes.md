@@ -120,9 +120,16 @@ equivalent-reference tests remain tasks 1.1–1.2.
 | `StepError::Gravity`, `Aerodynamics`, `ForceSource`, `WeldBalance`, `WeldSplit` | individual preparation rollback exists; not a general proof for all variants | corrective input or fatal if integrity is uncertain; no blanket retry | `failed_step_restores_body_after_aerodynamics_and_gravity_preparation` |
 | unknown cause, lost worker/world, `InvalidStepResults` | integrity not established | fatal if ownership or rollback cannot be established; never silently retry | `failed_step_reports_runner_cause_instead_of_collision_failure` |
 
-The service-independent retry decision is currently test-gated until task 2.4
-wires it into the service. A real strict-policy CCD fixture demonstrates that a
+The service-independent retry decision is now wired into the in-progress task 2.4
+service path. A real strict-policy CCD fixture demonstrates that a
 rejected 10 ms step can commit at 5 ms without changing the CCD policy. Unknown
 causes and unverified worker failures are fatal; an intact-worker retry decision
 requires explicit integrity evidence and remains bounded. `NonConvergent` and
 arithmetic overflow are not classified as universally dt-sensitive.
+
+Task 2.4 carries a reduced retry duration across turns and counts attempts against
+the turn limit. An injected rejection verifies a single impulse and a 5 ms commit;
+a separate high-speed contact and spring-joint fixture compares committed state
+and collision event content with a reference world. Failure exhaustion and
+corrective-command behaviour remain task 2.5: the current path still terminates
+on exhausted retries and is not yet the complete resilient service contract.

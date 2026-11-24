@@ -15,7 +15,7 @@ pub mod metrics;
 mod modular_rocket_fixture;
 mod physics_system;
 mod planner;
-#[cfg(all(test, feature = "service"))]
+#[cfg(feature = "service")]
 mod recovery;
 pub use physics_system::{PhysicsSystem, PhysicsSystemBuilder};
 #[cfg(all(test, feature = "service"))]
