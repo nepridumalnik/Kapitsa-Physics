@@ -193,6 +193,13 @@ with a saturated blocked queue, pause/horizon changes during a gated attempt,
 and repeated overload with bounded debt and reference physics. Existing blocked
 and retry-budget regressions exercise idle waiting and retries across turns.
 
+Task 4.3 publishes active retry details, selected and attempted durations,
+attempt/retry/rejection counts, consecutive failures, the last typed failure,
+and committed simulation time. Historical diagnostics survive a successful
+retry and stop; tests cover retry, blocked, recovered and fatal states alongside
+the overload checks. The latest selected safe duration is distinct from the
+actual retry duration; it is not presented as the raw physical estimator bound.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the

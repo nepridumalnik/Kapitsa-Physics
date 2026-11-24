@@ -32,7 +32,7 @@ All tasks are unchecked intentionally. Implement in order; each numbered group i
 
 - [x] 4.1 In resilient mode remove the nonzero admission floor; bound accumulator by configured simulated-time debt and horizon, expose discarded demand and handle huge finite warp safely. Preserve successful physics under heavy load.
 - [x] 4.2 Count attempts against per-turn work limit, yield fairly, prioritize stop/pause/horizon and bound command work/backlog. Test with paused Tokio clock, gated executor, sustained overload and saturated command queue. No busy spin in Blocked.
-- [ ] 4.3 Expose typed active recovery state, historical failure/attempt diagnostics, actual committed dt/time, load and debt metrics without conflating overload with physics failure. Test metrics across success, retry, block, recovery and fatal paths.
+- [x] 4.3 Expose typed active recovery state, historical failure/attempt diagnostics, actual committed dt/time, load and debt metrics without conflating overload with physics failure. Test metrics across success, retry, block, recovery and fatal paths.
 - [ ] 4.4 Verify dedicated Tokio and owned/shared bounded Rayon pool lifecycle; add additive spawn entry only if required to compose both existing APIs. Ensure last snapshot readable during in-flight work, stop waits only for active attempt and resolves requests, restart preserves world if valid, and dropping simulation does not shut down caller-owned pools. Test both pool modes and cancellation; no claim of forcibly interrupting a permanently hung thread.
 
 ## 5. Host contract and documentation (P0)

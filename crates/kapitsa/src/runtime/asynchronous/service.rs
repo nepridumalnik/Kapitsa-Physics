@@ -545,10 +545,7 @@ impl Simulation {
         let mut simulation = simulation;
         simulation.set_runtime_status(SimulationState::Running, Duration::ZERO);
         let mut initial_metrics = simulation.metrics().clone();
-        initial_metrics.discarded_simulation_demand =
-            self.metrics_rx.borrow().discarded_simulation_demand;
-        initial_metrics.discarded_demand_saturated =
-            self.metrics_rx.borrow().discarded_demand_saturated;
+        initial_metrics.copy_runtime_diagnostics_from(&self.metrics_rx.borrow());
         initial_metrics.requested_time_multiplier = *self.time_multiplier_tx.borrow();
         initial_metrics.actual_time_multiplier = 0.0;
         initial_metrics.load_speed_factor = 1.0;
@@ -596,16 +593,14 @@ impl Simulation {
                 let adaptive_step_limited = metrics.adaptive_step_limited;
                 let load_speed_factor = metrics.load_speed_factor;
                 let recovery_status = metrics.recovery_status.clone();
-                let discarded_simulation_demand = metrics.discarded_simulation_demand;
-                let discarded_demand_saturated = metrics.discarded_demand_saturated;
+                let previous = metrics.clone();
                 *metrics = simulation.metrics().clone();
+                metrics.copy_runtime_diagnostics_from(&previous);
                 metrics.requested_time_multiplier = requested_multiplier;
                 metrics.actual_time_multiplier = actual_multiplier;
                 metrics.adaptive_step_limited = adaptive_step_limited;
                 metrics.load_speed_factor = load_speed_factor;
                 metrics.recovery_status = recovery_status;
-                metrics.discarded_simulation_demand = discarded_simulation_demand;
-                metrics.discarded_demand_saturated = discarded_demand_saturated;
             });
             ServiceTaskOutput {
                 simulation,
@@ -932,6 +927,7 @@ async fn run_simulation_loop(
                     simulation.metrics().total_steps.saturating_add(1),
                     cause,
                 );
+                metrics.send_modify(|value| value.recovery_status = RecoveryStatus::Healthy);
             }
             apply_queued_commands(simulation, commands, false)?;
             let step = simulation.metrics().total_steps;
@@ -1123,6 +1119,7 @@ async fn run_simulation_loop(
                 }
                 break;
             };
+            let safe_step = physics_step;
             if let Some((ceiling, _, _)) = &retry {
                 physics_step = physics_step.min(*ceiling);
             } else if let Some(ceiling) = retry_ceiling {
@@ -1142,12 +1139,26 @@ async fn run_simulation_loop(
             if !resilient {
                 apply_queued_commands(simulation, commands, false)?;
             }
+            metrics.send_modify(|value| {
+                value.total_attempts = value.total_attempts.saturating_add(1);
+                if retry.is_some() {
+                    value.total_retries = value.total_retries.saturating_add(1);
+                }
+                value.last_safe_step = safe_step;
+                value.last_attempted_step = physics_step;
+            });
             let step_result = if adaptive_policy {
                 simulation.step_with_dt(physics_step.as_secs_f64()).await
             } else {
                 simulation.step().await
             };
             if let Err(error) = step_result {
+                let failure = step_error_for_result(&error);
+                metrics.send_modify(|value| {
+                    value.total_rejections = value.total_rejections.saturating_add(1);
+                    value.consecutive_rejections = value.consecutive_rejections.saturating_add(1);
+                    value.last_failure = Some(failure.clone());
+                });
                 if let (
                     StepRecoveryPolicy::Resilient(config),
                     StepRunnerError::Physics(cause, intact_worker),
@@ -1166,6 +1177,13 @@ async fn run_simulation_loop(
                     match decision {
                         RetryDecision::Retry(next) => {
                             retry = Some((next, retries + 1, cause.clone()));
+                            metrics.send_modify(|value| {
+                                value.recovery_status = RecoveryStatus::Retrying {
+                                    cause: cause.clone(),
+                                    next_step: next,
+                                    retry_count: retries + 1,
+                                }
+                            });
                             continue;
                         }
                         RetryDecision::RetryWorker => {
@@ -1173,6 +1191,13 @@ async fn run_simulation_loop(
                                 Instant::now().checked_add(config.worker_retry_backoff)
                             {
                                 retry = Some((physics_step, retries + 1, cause.clone()));
+                                metrics.send_modify(|value| {
+                                    value.recovery_status = RecoveryStatus::Retrying {
+                                        cause: cause.clone(),
+                                        next_step: physics_step,
+                                        retry_count: retries + 1,
+                                    }
+                                });
                                 worker_retry_deadline = Some(deadline);
                                 break;
                             }
@@ -1237,6 +1262,11 @@ async fn run_simulation_loop(
             snapshot.set_revision(revision);
             let previous_snapshot = snapshots.send_replace(Arc::new(snapshot));
             PhysicsSnapshot::recycle(previous_snapshot, &mut reusable_snapshot);
+            metrics.send_modify(|value| {
+                value.committed_simulation_time = *simulation_time;
+                value.consecutive_rejections = 0;
+                value.recovery_status = RecoveryStatus::Healthy;
+            });
             publish_command_results(commands, events);
             if events.collisions.receiver_count() > 0 {
                 let batch = CollisionEventBatch::new(
@@ -1320,6 +1350,7 @@ async fn run_simulation_loop(
             simulation.metrics().total_steps.saturating_add(1),
             cause,
         );
+        metrics.send_modify(|value| value.recovery_status = RecoveryStatus::Healthy);
     }
     Ok(())
 }
@@ -1892,8 +1923,8 @@ fn publish_runtime_metrics(
     let mut snapshot = simulation.metrics().clone();
     {
         let current = metrics.borrow();
-        snapshot.discarded_simulation_demand = current.discarded_simulation_demand;
-        snapshot.discarded_demand_saturated = current.discarded_demand_saturated;
+        snapshot.copy_runtime_diagnostics_from(&current);
+        snapshot.recovery_status = current.recovery_status.clone();
     }
     snapshot.requested_time_multiplier = requested_multiplier;
     snapshot.actual_time_multiplier = actual_multiplier;
@@ -3007,6 +3038,20 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(simulation.client().snapshot().step(), 0);
+        let pending = simulation.metrics();
+        assert!(matches!(
+            pending.recovery_status,
+            RecoveryStatus::Retrying { retry_count: 1, .. }
+        ));
+        assert_eq!(
+            (
+                pending.total_attempts,
+                pending.total_rejections,
+                pending.total_retries
+            ),
+            (1, 1, 0)
+        );
+        assert_eq!(pending.last_attempted_step, Duration::from_millis(10));
         tokio::time::advance(Duration::from_millis(9)).await;
         for _ in 0..20 {
             tokio::task::yield_now().await;
@@ -3021,6 +3066,28 @@ mod tests {
         .await?;
         assert_eq!(
             simulation.client().snapshot().simulation_time(),
+            Duration::from_millis(10)
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while simulation.metrics().committed_simulation_time.is_zero() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let completed = simulation.metrics();
+        assert_eq!(
+            (
+                completed.total_attempts,
+                completed.total_rejections,
+                completed.total_retries
+            ),
+            (2, 1, 1)
+        );
+        assert_eq!(completed.consecutive_rejections, 0);
+        assert!(completed.last_failure.is_some());
+        assert_eq!(completed.recovery_status, RecoveryStatus::Healthy);
+        assert_eq!(
+            completed.committed_simulation_time,
             Duration::from_millis(10)
         );
         simulation.stop().await?;
@@ -3148,6 +3215,17 @@ mod tests {
         .await?;
         assert_eq!(simulation.state(), SimulationState::Running);
         assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
+        let blocked_metrics = simulation.metrics();
+        assert_eq!(
+            (
+                blocked_metrics.total_attempts,
+                blocked_metrics.total_retries,
+                blocked_metrics.total_rejections
+            ),
+            (2, 1, 2)
+        );
+        assert_eq!(blocked_metrics.consecutive_rejections, 2);
+        assert!(blocked_metrics.last_failure.is_some());
         let mut collision = Box::pin(collisions.next_batch());
         assert!(matches!(poll_once(collision.as_mut()), Poll::Pending));
         drop(collision);
@@ -3228,11 +3306,17 @@ mod tests {
         );
         tokio::time::advance(Duration::from_millis(10)).await;
         tokio::time::timeout(Duration::from_secs(1), async {
-            while client.snapshot().step() == 0 {
+            while client.snapshot().step() == 0
+                || simulation.metrics().committed_simulation_time.is_zero()
+            {
                 tokio::task::yield_now().await;
             }
         })
         .await?;
+        let recovered = simulation.metrics();
+        assert_eq!(recovered.consecutive_rejections, 0);
+        assert!(recovered.last_failure.is_some());
+        assert_eq!(recovered.recovery_status, RecoveryStatus::Healthy);
         assert!(client.snapshot().simulation_time() <= Duration::from_millis(20));
         simulation.stop().await?;
         Ok(())
@@ -3476,6 +3560,8 @@ mod tests {
             simulation.metrics().recovery_status,
             RecoveryStatus::Fatal(_)
         ));
+        assert_eq!(simulation.metrics().total_rejections, 1);
+        assert!(simulation.metrics().last_failure.is_some());
         assert_eq!(simulation.client().snapshot().step(), 0);
         assert!(simulation.stop().await.is_err());
         assert!(simulation.start().is_err());
