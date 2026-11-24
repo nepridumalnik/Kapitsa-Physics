@@ -207,6 +207,11 @@ restart and caller pool reuse. Existing `spawn_on_rayon` coverage checks its
 dedicated runtime and independent shared-pool lifetimes; no thread termination
 is claimed for permanently hung work.
 
+Task 5.1: `cargo run -p kapitsa --features service --example resilient_host`
+completed and reported 200 ms committed time. The example uses an owned clock
+runtime, a host-owned Rayon pool, bounded submission, persistent force, zero
+horizon setup, acknowledged environment update and a later horizon extension.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the

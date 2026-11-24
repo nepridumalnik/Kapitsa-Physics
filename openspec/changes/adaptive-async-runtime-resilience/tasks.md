@@ -37,7 +37,7 @@ All tasks are unchecked intentionally. Implement in order; each numbered group i
 
 ## 5. Host contract and documentation (P0)
 
-- [ ] 5.1 Add runnable dedicated-runtime example using mock nonblocking host loop, try_submit, persistent loads, committed snapshots and clean async shutdown. Show zero-horizon setup, acknowledged environment boundary and horizon extension. No Delta-V code.
+- [x] 5.1 Add runnable dedicated-runtime example using mock nonblocking host loop, try_submit, persistent loads, committed snapshots and clean async shutdown. Show zero-horizon setup, acknowledged environment boundary and horizon extension. No Delta-V code.
 - [ ] 5.2 Update docs/runtime.md, crate README/public docs and relevant error/metric comments. Document compatibility, typed recovery matrix, bounds, exactly-once semantics, below-minimum stepping, overload vs numerical failure, host time ownership, pause/horizon and explicit impossibility of progressing invalid/unrecoverable worlds.
 - [ ] 5.3 Review public API snapshot scripts and release/version policy; regenerate/check baseline following repository instructions. Verify no Tokio dependency in default and parallel-only configurations.
 

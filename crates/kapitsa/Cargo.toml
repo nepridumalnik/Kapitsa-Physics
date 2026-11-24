@@ -61,6 +61,10 @@ required-features = ["service"]
 name = "rocket_flight"
 required-features = ["service"]
 
+[[example]]
+name = "resilient_host"
+required-features = ["service"]
+
 [[bench]]
 name = "collisions"
 harness = false
