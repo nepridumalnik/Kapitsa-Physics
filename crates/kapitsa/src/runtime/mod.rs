@@ -67,7 +67,8 @@ mod bench_counter_tests {
 }
 
 pub use config::{
-    AdaptiveTimeStepConfig, ConfigError, SchedulerConfig, SimulationConfig, TimeStepPolicy,
+    AdaptiveTimeStepConfig, ConfigError, RecoveryConfig, SchedulerConfig, SimulationConfig,
+    StepRecoveryPolicy, TimeStepPolicy,
 };
 #[cfg(feature = "parallel")]
 pub use executor::RayonExecutor;

@@ -191,6 +191,15 @@ impl SimulationBuilder {
         self
     }
 
+    /// Selects the autonomous service's step recovery policy.
+    pub fn step_recovery_policy(
+        mut self,
+        policy: super::super::config::StepRecoveryPolicy,
+    ) -> Self {
+        self.config.step_recovery_policy = policy;
+        self
+    }
+
     /// Replaces the simulation settings while preserving atmosphere and sound speed.
     /// The configuration is validated when the simulation is spawned.
     pub fn config(mut self, config: SimulationConfig) -> Self {
@@ -1375,6 +1384,24 @@ mod tests {
         let lost = step_error_for_result(&StepRunnerError::WorldLost);
         assert_eq!(lost.kind(), kapitsa_core::ErrorKind::Runtime);
         assert!(lost.to_string().contains("world was lost"));
+    }
+
+    #[tokio::test]
+    async fn invalid_recovery_policy_is_rejected_before_spawn()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::runtime::{RecoveryConfig, StepRecoveryPolicy};
+        let pool = std::sync::Arc::new(rayon::ThreadPoolBuilder::new().num_threads(1).build()?);
+        for use_pool in [false, true] {
+            let builder = Simulation::builder()
+                .step_recovery_policy(StepRecoveryPolicy::Resilient(RecoveryConfig::default()));
+            let result = if use_pool {
+                builder.spawn_on_rayon(pool.clone())
+            } else {
+                builder.spawn_on_tokio(&tokio::runtime::Handle::current())
+            };
+            assert!(result.is_err());
+        }
+        Ok(())
     }
 
     #[tokio::test]

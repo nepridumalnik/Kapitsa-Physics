@@ -17,6 +17,7 @@ pub struct SimulationConfig {
     pub(crate) tick_rate: u32,
     pub(crate) max_catch_up_steps: usize,
     pub(crate) time_step_policy: TimeStepPolicy,
+    pub(crate) step_recovery_policy: StepRecoveryPolicy,
     pub(crate) scheduler: SchedulerConfig,
     pub(crate) workers: WorkerConfig,
 }
@@ -28,6 +29,7 @@ impl Default for SimulationConfig {
             tick_rate: DEFAULT_TICK_RATE,
             max_catch_up_steps: DEFAULT_MAX_CATCH_UP_STEPS,
             time_step_policy: TimeStepPolicy::Fixed,
+            step_recovery_policy: StepRecoveryPolicy::FailFast,
             scheduler: SchedulerConfig::default(),
             workers: WorkerConfig::default(),
         }
@@ -66,6 +68,11 @@ impl SimulationConfigBuilder {
 
     pub fn time_step_policy(mut self, value: TimeStepPolicy) -> Self {
         self.config.time_step_policy = value;
+        self
+    }
+
+    pub fn step_recovery_policy(mut self, value: StepRecoveryPolicy) -> Self {
+        self.config.step_recovery_policy = value;
         self
     }
 
@@ -110,6 +117,10 @@ impl SimulationConfig {
         self.time_step_policy
     }
 
+    pub fn step_recovery_policy(&self) -> StepRecoveryPolicy {
+        self.step_recovery_policy
+    }
+
     pub fn scheduler(&self) -> SchedulerConfig {
         self.scheduler.clone()
     }
@@ -128,6 +139,19 @@ impl SimulationConfig {
         if let TimeStepPolicy::Adaptive(config) = self.time_step_policy {
             config.validate()?;
         }
+        if let StepRecoveryPolicy::Resilient(recovery) = self.step_recovery_policy {
+            let TimeStepPolicy::Adaptive(adaptive) = self.time_step_policy else {
+                return Err(ConfigError::InvalidRecoveryConfig);
+            };
+            if recovery.minimum_step.is_zero()
+                || recovery.minimum_step > adaptive.minimum_step
+                || recovery.max_retries == 0
+                || recovery.max_simulation_debt < self.step_budget()
+                || recovery.worker_retry_backoff.is_zero()
+            {
+                return Err(ConfigError::InvalidRecoveryConfig);
+            }
+        }
         self.scheduler.validate()?;
         self.workers
             .validate()
@@ -140,6 +164,82 @@ impl SimulationConfig {
 
     pub fn step_budget(&self) -> Duration {
         Duration::from_secs_f64(self.fixed_step_seconds())
+    }
+}
+
+/// Recovery mode for the autonomous service; synchronous updates remain single attempts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StepRecoveryPolicy {
+    #[default]
+    FailFast,
+    Resilient(RecoveryConfig),
+}
+
+/// Resource bounds for opt-in adaptive recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RecoveryConfig {
+    pub(crate) minimum_step: Duration,
+    pub(crate) max_retries: usize,
+    pub(crate) max_simulation_debt: Duration,
+    pub(crate) worker_retry_backoff: Duration,
+}
+
+impl Default for RecoveryConfig {
+    fn default() -> Self {
+        Self {
+            minimum_step: Duration::from_nanos(1),
+            max_retries: 8,
+            max_simulation_debt: Duration::from_secs(1),
+            worker_retry_backoff: Duration::from_millis(10),
+        }
+    }
+}
+
+/// Builds recovery resource bounds; the containing simulation validates them before spawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RecoveryConfigBuilder {
+    config: RecoveryConfig,
+}
+
+impl RecoveryConfigBuilder {
+    pub fn minimum_step(mut self, value: Duration) -> Self {
+        self.config.minimum_step = value;
+        self
+    }
+    pub fn max_retries(mut self, value: usize) -> Self {
+        self.config.max_retries = value;
+        self
+    }
+    pub fn max_simulation_debt(mut self, value: Duration) -> Self {
+        self.config.max_simulation_debt = value;
+        self
+    }
+    pub fn worker_retry_backoff(mut self, value: Duration) -> Self {
+        self.config.worker_retry_backoff = value;
+        self
+    }
+    pub fn build(self) -> RecoveryConfig {
+        self.config
+    }
+}
+
+impl RecoveryConfig {
+    pub fn builder() -> RecoveryConfigBuilder {
+        RecoveryConfigBuilder::default()
+    }
+    pub fn minimum_step(&self) -> Duration {
+        self.minimum_step
+    }
+    pub fn max_retries(&self) -> usize {
+        self.max_retries
+    }
+    pub fn max_simulation_debt(&self) -> Duration {
+        self.max_simulation_debt
+    }
+    pub fn worker_retry_backoff(&self) -> Duration {
+        self.worker_retry_backoff
     }
 }
 
@@ -300,6 +400,7 @@ pub enum ConfigError {
     InvalidTickRate,
     ZeroCatchUpSteps,
     InvalidAdaptiveTimeStep,
+    InvalidRecoveryConfig,
     ZeroBatchSize,
     ZeroBatchesPerWorker,
     InvalidWorkerConfig(WorkerConfigError),
@@ -313,6 +414,7 @@ impl std::fmt::Display for ConfigError {
             Self::InvalidAdaptiveTimeStep => formatter.write_str(
                 "adaptive timestep requires 0 < minimum_step <= maximum_step and relative_error_tolerance in (0, 1]",
             ),
+            Self::InvalidRecoveryConfig => formatter.write_str("resilient recovery requires adaptive stepping, a valid step floor, positive retry and backoff bounds, and debt of at least one base step"),
             Self::ZeroBatchSize => formatter.write_str("min_batch_size must be positive"),
             Self::ZeroBatchesPerWorker => {
                 formatter.write_str("max_batches_per_worker must be positive")
@@ -342,8 +444,49 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        AdaptiveTimeStepConfig, ConfigError, SchedulerConfig, SimulationConfig, TimeStepPolicy,
+        AdaptiveTimeStepConfig, ConfigError, RecoveryConfig, SchedulerConfig, SimulationConfig,
+        StepRecoveryPolicy, TimeStepPolicy,
     };
+
+    #[test]
+    fn resilient_policy_requires_valid_adaptive_resource_bounds() {
+        assert_eq!(
+            SimulationConfig::default().step_recovery_policy(),
+            StepRecoveryPolicy::FailFast
+        );
+        let adaptive = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+        let valid = SimulationConfig::builder()
+            .time_step_policy(adaptive)
+            .step_recovery_policy(StepRecoveryPolicy::Resilient(RecoveryConfig::default()))
+            .build();
+        assert_eq!(valid.validate(), Ok(()));
+        let fixed = SimulationConfig::builder()
+            .step_recovery_policy(StepRecoveryPolicy::Resilient(RecoveryConfig::default()))
+            .build();
+        assert_eq!(fixed.validate(), Err(ConfigError::InvalidRecoveryConfig));
+        let invalid = [
+            RecoveryConfig::builder()
+                .minimum_step(Duration::ZERO)
+                .build(),
+            RecoveryConfig::builder()
+                .minimum_step(Duration::from_secs(1))
+                .build(),
+            RecoveryConfig::builder().max_retries(0).build(),
+            RecoveryConfig::builder()
+                .max_simulation_debt(Duration::ZERO)
+                .build(),
+            RecoveryConfig::builder()
+                .worker_retry_backoff(Duration::ZERO)
+                .build(),
+        ];
+        for recovery in invalid {
+            let config = SimulationConfig::builder()
+                .time_step_policy(adaptive)
+                .step_recovery_policy(StepRecoveryPolicy::Resilient(recovery))
+                .build();
+            assert_eq!(config.validate(), Err(ConfigError::InvalidRecoveryConfig));
+        }
+    }
 
     #[test]
     fn defaults_use_a_fixed_sixty_hertz_step() {
