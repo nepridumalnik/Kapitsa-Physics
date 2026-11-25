@@ -355,6 +355,14 @@ boundary marker and eight consecutive repeated runs completed
 (`benchmark-service-completed.txt`, `benchmark-service-repeat.txt`). The
 intermittent delay is not diagnosed or asserted fixed. Output logs retain it.
 
+After the scheduler fix, `cargo test --workspace --all-features --no-fail-fast
+--quiet` again completed with the same two baseline-reproduced failing targets;
+the core library passed 1442 tests with 20 ignored. The focused adaptive suite
+passed 16 tests with one ignored, the service suite passed 66 with two ignored,
+and focused all-target/all-feature clippy passed. The test for the physical
+bound below the preferred minimum was also extended to use the service's new
+scheduler selection path and passed.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the
