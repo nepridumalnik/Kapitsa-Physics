@@ -31,7 +31,7 @@ use super::{
 use crate::runtime::{
     ConfigError, RecoveryBlock, RecoveryStatus, SimulationConfig, SimulationMetrics,
     SimulationState, StepRecoveryPolicy, TimeStepPolicy,
-    adaptive_step::{StepChoice, choose_step},
+    adaptive_step::{StepChoice, choose_scheduled_step},
     executor::RayonExecutor,
     recovery::{RetryDecision, classify, decide},
 };
@@ -968,16 +968,26 @@ async fn run_simulation_loop(
             tokio::task::yield_now().await;
             continue;
         }
-        let (mut ready_step, mut step_limited) =
-            choose_runtime_step(simulation, accumulator, effective_multiplier, step_duration)?;
+        let (mut ready_step, mut step_limited) = choose_runtime_step(
+            simulation,
+            accumulator,
+            effective_multiplier,
+            step_duration,
+            available,
+        )?;
         if retry.is_none()
             && current_multiplier != 0.0
             && step_limited
             && has_queued_request(commands)
         {
             apply_queued_commands(simulation, commands, false)?;
-            (ready_step, step_limited) =
-                choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
+            (ready_step, step_limited) = choose_runtime_step(
+                simulation,
+                accumulator,
+                current_multiplier,
+                step_duration,
+                available,
+            )?;
         }
         let has_ready_step = effective_multiplier != 0.0
             && (ready_step.is_some()
@@ -1094,8 +1104,15 @@ async fn run_simulation_loop(
             if resilient && retry.is_none() {
                 apply_queued_commands(simulation, commands, false)?;
             }
-            let (physics_step, limited) =
-                choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
+            let (physics_step, limited) = choose_runtime_step(
+                simulation,
+                accumulator,
+                current_multiplier,
+                step_duration,
+                time_horizon
+                    .borrow()
+                    .map(|horizon| horizon.saturating_sub(*simulation_time)),
+            )?;
             let Some(mut physics_step) = physics_step else {
                 if limited {
                     if resilient {
@@ -1119,6 +1136,9 @@ async fn run_simulation_loop(
                         accumulator,
                         current_multiplier,
                         step_duration,
+                        time_horizon
+                            .borrow()
+                            .map(|horizon| horizon.saturating_sub(*simulation_time)),
                     )?;
                     if still_limited {
                         let completed_at = Instant::now();
@@ -1418,6 +1438,7 @@ fn choose_runtime_step(
     accumulated: Duration,
     multiplier: f64,
     fixed_step: Duration,
+    horizon_remaining: Option<Duration>,
 ) -> Result<(Option<Duration>, bool), SimulationError> {
     match simulation.config().time_step_policy {
         TimeStepPolicy::Fixed => Ok(((accumulated >= fixed_step).then_some(fixed_step), false)),
@@ -1438,7 +1459,14 @@ fn choose_runtime_step(
             };
             let world = simulation.world().map_err(SimulationError::from)?;
             Ok(
-                match choose_step(world, simulation.config(), target, accumulated, fixed_step) {
+                match choose_scheduled_step(
+                    world,
+                    simulation.config(),
+                    target,
+                    accumulated,
+                    fixed_step,
+                    horizon_remaining,
+                ) {
                     StepChoice::Wait => (None, false),
                     StepChoice::Limited => (None, true),
                     StepChoice::Step(step) => (Some(step), false),

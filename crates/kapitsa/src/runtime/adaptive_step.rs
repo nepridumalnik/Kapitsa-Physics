@@ -78,6 +78,34 @@ pub(super) fn choose_step(
     }
 }
 
+pub(super) fn choose_scheduled_step(
+    world: &PhysicsWorld,
+    config: &SimulationConfig,
+    target_step: Duration,
+    accumulated: Duration,
+    base_step: Duration,
+    horizon_remaining: Option<Duration>,
+) -> StepChoice {
+    let choice = choose_step(world, config, target_step, accumulated, base_step);
+    if let (
+        StepRecoveryPolicy::Resilient(_),
+        super::config::TimeStepPolicy::Adaptive(adaptive),
+        StepChoice::Step(step),
+    ) = (
+        config.step_recovery_policy,
+        config.time_step_policy,
+        &choice,
+    ) && accumulated < adaptive.minimum_step
+        && horizon_remaining.is_none_or(|remaining| remaining > accumulated)
+    {
+        let preferred = choose_step(world, config, target_step, adaptive.minimum_step, base_step);
+        if matches!(preferred, StepChoice::Step(physical) if physical > *step) {
+            return StepChoice::Wait;
+        }
+    }
+    choice
+}
+
 fn estimate_motion_limit(
     world: &PhysicsWorld,
     adaptive: AdaptiveTimeStepConfig,
@@ -1704,6 +1732,35 @@ mod tests {
         assert!(
             matches!(selected, StepChoice::Step(step) if !step.is_zero() && step <= Duration::from_nanos(866_025)),
             "{selected:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resilient_scheduler_waits_for_preferred_demand_when_physics_allows_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = adaptive_config();
+        config.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig {
+            minimum_step: Duration::from_millis(5),
+            maximum_step: Duration::from_millis(10),
+            relative_error_tolerance: 0.01,
+        });
+        config.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(super::super::config::RecoveryConfig::default());
+        let world = PhysicsWorld::new();
+        assert!(matches!(
+            super::choose_scheduled_step(
+                &world,
+                &config,
+                Duration::from_millis(10),
+                Duration::from_micros(50),
+                config.step_budget(),
+                None
+            ),
+            StepChoice::Wait
+        ));
+        assert!(
+            matches!(super::choose_scheduled_step(&world, &config, Duration::from_millis(10), Duration::from_micros(50), config.step_budget(), Some(Duration::from_micros(50))), StepChoice::Step(step) if step == Duration::from_micros(50))
         );
         Ok(())
     }

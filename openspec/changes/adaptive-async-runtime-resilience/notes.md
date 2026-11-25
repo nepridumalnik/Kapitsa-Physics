@@ -331,6 +331,22 @@ them and `snapshot_keeps_committed_diagnostics_after_world_advances` verifies
 the snapshot retains the prior step's diagnostics after the world advances.
 Task 6.4 remains open while remaining verification is resolved.
 
+The equal-committed-time `service-benchmark` compares a baseline adaptive
+service and resilient service with 50 ms warmup, 200 ms measured horizon and
+five repetitions. Raw baseline and initial candidate output are in
+`benchmark-service-baseline.txt` and `benchmark-service-before.txt`. In an
+ordinary world the initial resilient service performed 25,268–26,513 steps,
+versus 79–92 at baseline: it repeatedly consumed tiny newly admitted demand.
+The scheduler now waits for the preferred minimum when the physical bound and
+horizon permit; smaller physical bounds and short horizon remainders remain
+eligible. `resilient_scheduler_waits_for_preferred_demand_when_physics_allows_it`
+checks this policy. Its five ordinary follow-up samples took 88–103 steps, in
+`benchmark-service-after.txt`. The follow-up contact run completed three samples
+then failed to complete, so it was interrupted; no complete performance claim
+is made. The harness samples step durations through the metrics watch channel,
+which can skip steps, and its nominal overload scene does not demonstrate
+sustained CPU overload. Allocation and queue-pressure measurements remain open.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the
