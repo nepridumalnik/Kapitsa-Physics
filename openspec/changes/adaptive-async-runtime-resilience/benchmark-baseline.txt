@@ -1,0 +1,205 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/kapitsa-f01598a49a419ad0)
+
+running 1 test
+test runtime::asynchronous::service::benchmarks::benchmark_time_warp_scheduler_overhead ... Time Warp phases: Tokio workers=4, Rayon workers=4, bodies=100, warmup=32, samples=5 x 128
+tokio::select! ready branch: 0.005/0.005/0.005 us/iteration
+PhysicsWorld::step (100 bodies): 90.327/90.553/94.515 us/step
+Rayon spawn + oneshot round trip: 0.260/1.633/9.197 us/task
+StepRunner::step total: 71.504/75.179/78.302 us/step
+StepRunner engine CPU p50/p95/p99=65.621/79.287/83.984 us; dispatch+wait p50/p95/p99=5.981/6.543/8.245 us
+select! + zero-delay scaled timer: 1063.392/1071.913/1074.452 us/iteration
+yield_now: 0.012/0.012/0.013 us/yield
+scaled timer remaining=1ms multiplier=1x: 2091.429/2097.672/2130.248 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=10x: 1057.023/1065.341/1465.611 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=100x: 1065.308/1065.651/1072.195 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=1000x: 1057.983/1064.747/1066.160 us/wait; observed_wakes/wait=1.000
+snapshot rebuild (100 bodies): 0.274/0.275/0.397 us/step
+watch snapshot publication: 0.062/0.062/0.066 us/step
+snapshot rebuild + Arc/watch publication: 0.381/0.383/0.499 us/step
+empty collision-event batch + broadcast: 0.020/0.020/0.077 us/step
+metrics clone + watch publication: 0.083/0.084/0.130 us/step
+empty command poll + result drain: 0.016/0.016/0.057 us/step
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=0.1x steps=4 sim_s=0.0333 wall_s=0.3018 measured_actual=0.11x recent_metric=0.1x steps_s=13.3
+step_cpu_us observed=4 p50/p95/p99=134.258/149.686/149.686; allocs_per_step=3.000 requested_bytes_per_step=376.0 setup_live_heap_bytes=1788756 peak_extra_live_bytes=264 peak_live_heap_bytes=1789020 deadlines=0 peak_debt_ms=0.000 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=244519.7/328030.9/328048.7
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=1.0x steps=36 sim_s=0.3000 wall_s=0.3027 measured_actual=0.99x recent_metric=1.0x steps_s=118.9
+step_cpu_us observed=36 p50/p95/p99=112.698/131.593/197.354; allocs_per_step=3.028 requested_bytes_per_step=418.2 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790540 deadlines=0 peak_debt_ms=0.000 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=21997.6/30221.7/30244.9
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=10.0x steps=361 sim_s=3.0083 wall_s=0.3020 measured_actual=9.96x recent_metric=10.0x steps_s=1195.6
+step_cpu_us observed=217 p50/p95/p99=84.666/107.117/113.890; allocs_per_step=3.022 requested_bytes_per_step=402.0 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790540 deadlines=0 peak_debt_ms=9.756 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=3664.2/3883.3/3887.1
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=100.0x steps=3583 sim_s=29.8500 wall_s=0.3014 measured_actual=99.03x recent_metric=99.1x steps_s=11887.3
+step_cpu_us observed=300 p50/p95/p99=69.598/78.535/90.447; allocs_per_step=3.017 requested_bytes_per_step=400.3 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1912 peak_live_heap_bytes=1790668 deadlines=0 peak_debt_ms=118.783 collisions=0 lost_event_batches=0 settled=false
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=477.4/579.0/602.9
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=1000.0x steps=3875 sim_s=32.2917 wall_s=0.3011 measured_actual=107.24x recent_metric=107.2x steps_s=12869.0
+step_cpu_us observed=300 p50/p95/p99=66.933/71.331/76.832; allocs_per_step=3.017 requested_bytes_per_step=400.4 setup_live_heap_bytes=1788948 peak_extra_live_bytes=1848 peak_live_heap_bytes=1790796 deadlines=0 peak_debt_ms=58850.167 collisions=0 lost_event_batches=0 settled=false
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=449.8/601.6/609.5
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 3.78s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/kapitsa-f01598a49a419ad0)
+
+running 1 test
+test runtime::asynchronous::service::benchmarks::benchmark_time_warp_scheduler_overhead ... Time Warp phases: Tokio workers=4, Rayon workers=4, bodies=100, warmup=32, samples=5 x 128
+tokio::select! ready branch: 0.006/0.006/0.007 us/iteration
+PhysicsWorld::step (100 bodies): 88.884/89.810/92.844 us/step
+Rayon spawn + oneshot round trip: 0.230/0.822/22.050 us/task
+StepRunner::step total: 71.094/74.474/74.858 us/step
+StepRunner engine CPU p50/p95/p99=65.872/71.252/79.596 us; dispatch+wait p50/p95/p99=6.601/7.856/11.520 us
+select! + zero-delay scaled timer: 1063.326/1065.142/1070.330 us/iteration
+yield_now: 0.014/0.014/0.015 us/yield
+scaled timer remaining=1ms multiplier=1x: 2066.290/2068.017/2076.848 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=10x: 1055.875/1065.058/1266.576 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=100x: 1063.645/1065.998/1067.587 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=1000x: 1064.266/1075.159/1081.200 us/wait; observed_wakes/wait=1.000
+snapshot rebuild (100 bodies): 0.316/0.317/0.317 us/step
+watch snapshot publication: 0.073/0.074/0.077 us/step
+snapshot rebuild + Arc/watch publication: 0.451/0.453/0.590 us/step
+empty collision-event batch + broadcast: 0.036/0.037/0.043 us/step
+metrics clone + watch publication: 0.084/0.106/0.109 us/step
+empty command poll + result drain: 0.016/0.016/0.073 us/step
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=0.1x steps=3 sim_s=0.0250 wall_s=0.3017 measured_actual=0.08x recent_metric=0.1x steps_s=9.9
+step_cpu_us observed=3 p50/p95/p99=133.426/162.380/162.380; allocs_per_step=3.000 requested_bytes_per_step=376.0 setup_live_heap_bytes=1788756 peak_extra_live_bytes=264 peak_live_heap_bytes=1789020 deadlines=0 peak_debt_ms=0.000 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=170224.2/252773.1/252794.1
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=1.0x steps=36 sim_s=0.3000 wall_s=0.3013 measured_actual=1.00x recent_metric=1.0x steps_s=119.5
+step_cpu_us observed=36 p50/p95/p99=109.622/128.527/142.202; allocs_per_step=3.028 requested_bytes_per_step=418.2 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790540 deadlines=0 peak_debt_ms=0.000 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=22936.2/32190.1/32211.9
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=10.0x steps=361 sim_s=3.0083 wall_s=0.3021 measured_actual=9.96x recent_metric=10.0x steps_s=1195.1
+step_cpu_us observed=218 p50/p95/p99=86.399/102.499/109.061; allocs_per_step=3.022 requested_bytes_per_step=402.0 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790540 deadlines=0 peak_debt_ms=9.631 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=2584.0/2816.6/2819.3
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=100.0x steps=3587 sim_s=29.8917 wall_s=0.3018 measured_actual=99.04x recent_metric=99.0x steps_s=11884.4
+step_cpu_us observed=299 p50/p95/p99=68.186/79.577/90.126; allocs_per_step=3.017 requested_bytes_per_step=400.3 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1912 peak_live_heap_bytes=1790668 deadlines=0 peak_debt_ms=126.796 collisions=0 lost_event_batches=0 settled=false
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=389.4/496.6/502.6
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=1000.0x steps=3846 sim_s=32.0500 wall_s=0.3019 measured_actual=106.15x recent_metric=106.2x steps_s=12738.4
+step_cpu_us observed=301 p50/p95/p99=67.665/77.593/86.269; allocs_per_step=3.016 requested_bytes_per_step=400.2 setup_live_heap_bytes=1788884 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790668 deadlines=0 peak_debt_ms=59338.691 collisions=0 lost_event_batches=0 settled=false
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=407.1/514.4/522.2
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 3.70s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/kapitsa-f01598a49a419ad0)
+
+running 1 test
+test runtime::asynchronous::service::benchmarks::benchmark_time_warp_scheduler_overhead ... Time Warp phases: Tokio workers=4, Rayon workers=4, bodies=100, warmup=32, samples=5 x 128
+tokio::select! ready branch: 0.005/0.005/0.006 us/iteration
+PhysicsWorld::step (100 bodies): 89.084/89.132/90.203 us/step
+Rayon spawn + oneshot round trip: 0.360/0.791/6.141 us/task
+StepRunner::step total: 73.909/76.217/79.721 us/step
+StepRunner engine CPU p50/p95/p99=71.001/79.888/89.054 us; dispatch+wait p50/p95/p99=6.452/8.655/11.642 us
+select! + zero-delay scaled timer: 937.231/1065.454/1072.305 us/iteration
+yield_now: 0.013/0.013/0.013 us/yield
+scaled timer remaining=1ms multiplier=1x: 2065.094/2067.617/2076.293 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=10x: 1066.843/1068.943/1278.646 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=100x: 859.367/1070.668/1072.339 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=1000x: 1067.020/1069.825/1072.211 us/wait; observed_wakes/wait=1.000
+snapshot rebuild (100 bodies): 0.275/0.278/0.283 us/step
+watch snapshot publication: 0.062/0.062/0.067 us/step
+snapshot rebuild + Arc/watch publication: 0.395/0.470/0.698 us/step
+empty collision-event batch + broadcast: 0.020/0.020/0.029 us/step
+metrics clone + watch publication: 0.070/0.070/0.073 us/step
+empty command poll + result drain: 0.014/0.014/0.066 us/step
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=0.1x steps=3 sim_s=0.0250 wall_s=0.3013 measured_actual=0.08x recent_metric=0.1x steps_s=10.0
+step_cpu_us observed=3 p50/p95/p99=140.779/147.192/147.192; allocs_per_step=3.000 requested_bytes_per_step=376.0 setup_live_heap_bytes=1788756 peak_extra_live_bytes=264 peak_live_heap_bytes=1789020 deadlines=0 peak_debt_ms=0.000 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=177267.4/260763.3/260808.8
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=1.0x steps=36 sim_s=0.3000 wall_s=0.3020 measured_actual=0.99x recent_metric=1.0x steps_s=119.2
+step_cpu_us observed=36 p50/p95/p99=101.257/124.300/136.682; allocs_per_step=3.028 requested_bytes_per_step=418.2 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790540 deadlines=0 peak_debt_ms=0.000 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=21843.5/31094.0/31128.9
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=10.0x steps=361 sim_s=3.0083 wall_s=0.3016 measured_actual=9.98x recent_metric=10.0x steps_s=1197.1
+step_cpu_us observed=211 p50/p95/p99=85.899/104.262/122.156; allocs_per_step=3.022 requested_bytes_per_step=402.0 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790540 deadlines=0 peak_debt_ms=9.129 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=2666.0/4915.6/4923.3
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=100.0x steps=3585 sim_s=29.8750 wall_s=0.3014 measured_actual=99.10x recent_metric=99.1x steps_s=11892.5
+step_cpu_us observed=297 p50/p95/p99=67.384/79.687/89.495; allocs_per_step=3.017 requested_bytes_per_step=400.3 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1912 peak_live_heap_bytes=1790668 deadlines=0 peak_debt_ms=116.261 collisions=0 lost_event_batches=0 settled=false
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=416.1/514.9/531.6
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=1000.0x steps=3806 sim_s=31.7167 wall_s=0.3011 measured_actual=105.34x recent_metric=105.3x steps_s=12640.3
+step_cpu_us observed=300 p50/p95/p99=68.006/77.463/84.907; allocs_per_step=3.016 requested_bytes_per_step=400.0 setup_live_heap_bytes=1788884 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790668 deadlines=0 peak_debt_ms=59491.628 collisions=0 lost_event_batches=0 settled=false
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=386.8/501.1/536.5
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 3.70s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/kapitsa-f01598a49a419ad0)
+
+running 1 test
+test runtime::asynchronous::service::benchmarks::benchmark_time_warp_scheduler_overhead ... Time Warp phases: Tokio workers=4, Rayon workers=4, bodies=100, warmup=32, samples=5 x 128
+tokio::select! ready branch: 0.006/0.006/0.007 us/iteration
+PhysicsWorld::step (100 bodies): 89.240/89.462/89.625 us/step
+Rayon spawn + oneshot round trip: 0.531/0.711/16.741 us/task
+StepRunner::step total: 69.729/71.735/72.367 us/step
+StepRunner engine CPU p50/p95/p99=64.348/69.408/79.056 us; dispatch+wait p50/p95/p99=5.411/6.722/8.496 us
+select! + zero-delay scaled timer: 1061.988/1065.371/1068.127 us/iteration
+yield_now: 0.009/0.010/0.010 us/yield
+scaled timer remaining=1ms multiplier=1x: 2066.068/2067.667/2083.917 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=10x: 1065.222/1269.603/1310.945 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=100x: 1064.377/1065.086/1067.973 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=1000x: 1064.785/1071.322/1073.137 us/wait; observed_wakes/wait=1.000
+snapshot rebuild (100 bodies): 0.317/0.317/0.319 us/step
+watch snapshot publication: 0.073/0.074/0.078 us/step
+snapshot rebuild + Arc/watch publication: 0.451/0.453/0.586 us/step
+empty collision-event batch + broadcast: 0.024/0.024/0.080 us/step
+metrics clone + watch publication: 0.083/0.084/0.084 us/step
+empty command poll + result drain: 0.016/0.016/0.061 us/step
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=0.1x steps=4 sim_s=0.0333 wall_s=0.3020 measured_actual=0.11x recent_metric=0.1x steps_s=13.2
+step_cpu_us observed=4 p50/p95/p99=137.172/137.423/137.423; allocs_per_step=3.000 requested_bytes_per_step=376.0 setup_live_heap_bytes=1788756 peak_extra_live_bytes=264 peak_live_heap_bytes=1789020 deadlines=0 peak_debt_ms=0.000 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=245438.2/328858.9/328900.3
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=1.0x steps=36 sim_s=0.3000 wall_s=0.3017 measured_actual=0.99x recent_metric=1.0x steps_s=119.3
+step_cpu_us observed=36 p50/p95/p99=102.018/115.053/123.277; allocs_per_step=3.028 requested_bytes_per_step=418.2 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790540 deadlines=0 peak_debt_ms=0.000 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=22817.7/32023.6/32050.3
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=10.0x steps=361 sim_s=3.0083 wall_s=0.3020 measured_actual=9.96x recent_metric=10.0x steps_s=1195.6
+step_cpu_us observed=212 p50/p95/p99=87.191/110.814/121.724; allocs_per_step=3.017 requested_bytes_per_step=401.3 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790540 deadlines=0 peak_debt_ms=9.852 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=1581.4/3819.8/3826.5
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=100.0x steps=3588 sim_s=29.9000 wall_s=0.3022 measured_actual=98.96x recent_metric=99.0x steps_s=11874.7
+step_cpu_us observed=297 p50/p95/p99=67.435/80.539/89.054; allocs_per_step=3.017 requested_bytes_per_step=400.3 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1912 peak_live_heap_bytes=1790668 deadlines=0 peak_debt_ms=123.174 collisions=0 lost_event_batches=0 settled=false
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=389.9/511.3/551.9
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=1000.0x steps=3657 sim_s=30.4750 wall_s=0.3023 measured_actual=100.80x recent_metric=100.8x steps_s=12095.7
+step_cpu_us observed=302 p50/p95/p99=70.149/88.112/353.832; allocs_per_step=3.017 requested_bytes_per_step=400.2 setup_live_heap_bytes=1788884 peak_extra_live_bytes=1912 peak_live_heap_bytes=1790796 deadlines=0 peak_debt_ms=61049.199 collisions=0 lost_event_batches=0 settled=false
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=443.7/542.1/561.9
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 3.77s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/kapitsa-f01598a49a419ad0)
+
+running 1 test
+test runtime::asynchronous::service::benchmarks::benchmark_time_warp_scheduler_overhead ... Time Warp phases: Tokio workers=4, Rayon workers=4, bodies=100, warmup=32, samples=5 x 128
+tokio::select! ready branch: 0.005/0.005/0.006 us/iteration
+PhysicsWorld::step (100 bodies): 88.959/89.130/89.265 us/step
+Rayon spawn + oneshot round trip: 0.291/3.767/16.781 us/task
+StepRunner::step total: 70.651/72.549/74.457 us/step
+StepRunner engine CPU p50/p95/p99=65.170/72.864/83.233 us; dispatch+wait p50/p95/p99=5.970/7.464/9.648 us
+select! + zero-delay scaled timer: 1061.957/1066.056/1071.741 us/iteration
+yield_now: 0.012/0.012/0.012 us/yield
+scaled timer remaining=1ms multiplier=1x: 2084.736/2097.632/2102.351 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=10x: 1063.671/1090.220/1306.984 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=100x: 1061.289/1064.882/1073.538 us/wait; observed_wakes/wait=1.000
+scaled timer remaining=1ms multiplier=1000x: 1064.068/1065.755/1084.516 us/wait; observed_wakes/wait=1.000
+snapshot rebuild (100 bodies): 0.271/0.272/0.346 us/step
+watch snapshot publication: 0.062/0.062/0.066 us/step
+snapshot rebuild + Arc/watch publication: 0.383/0.384/0.654 us/step
+empty collision-event batch + broadcast: 0.020/0.020/0.026 us/step
+metrics clone + watch publication: 0.071/0.072/0.072 us/step
+empty command poll + result drain: 0.013/0.014/0.068 us/step
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=0.1x steps=3 sim_s=0.0250 wall_s=0.3017 measured_actual=0.08x recent_metric=0.1x steps_s=9.9
+step_cpu_us observed=3 p50/p95/p99=128.267/142.623/142.623; allocs_per_step=3.000 requested_bytes_per_step=376.0 setup_live_heap_bytes=1788756 peak_extra_live_bytes=264 peak_live_heap_bytes=1789020 deadlines=0 peak_debt_ms=0.000 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=250275.3/333709.0/333742.8
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=1.0x steps=36 sim_s=0.3000 wall_s=0.3014 measured_actual=1.00x recent_metric=1.0x steps_s=119.4
+step_cpu_us observed=36 p50/p95/p99=107.899/122.877/181.625; allocs_per_step=3.028 requested_bytes_per_step=418.2 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790540 deadlines=0 peak_debt_ms=0.000 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=21006.1/29266.7/29275.1
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=10.0x steps=362 sim_s=3.0167 wall_s=0.3021 measured_actual=9.98x recent_metric=10.0x steps_s=1198.1
+step_cpu_us observed=210 p50/p95/p99=85.267/101.257/106.306; allocs_per_step=3.017 requested_bytes_per_step=401.2 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790540 deadlines=0 peak_debt_ms=9.975 collisions=0 lost_event_batches=0 settled=true
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=2682.2/2885.4/2897.0
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=100.0x steps=3592 sim_s=29.9333 wall_s=0.3017 measured_actual=99.23x recent_metric=99.2x steps_s=11907.5
+step_cpu_us observed=298 p50/p95/p99=67.385/77.012/82.632; allocs_per_step=3.017 requested_bytes_per_step=400.2 setup_live_heap_bytes=1788756 peak_extra_live_bytes=1912 peak_live_heap_bytes=1790668 deadlines=0 peak_debt_ms=138.592 collisions=0 lost_event_batches=0 settled=false
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=358.5/491.5/510.2
+time warp scheduler bodies=100 dynamic=100 colliders=100 sources=0 workers=4/4 requested=1000.0x steps=3863 sim_s=32.1917 wall_s=0.3019 measured_actual=106.62x recent_metric=106.6x steps_s=12794.4
+step_cpu_us observed=301 p50/p95/p99=67.033/76.091/109.642; allocs_per_step=3.016 requested_bytes_per_step=400.1 setup_live_heap_bytes=1788948 peak_extra_live_bytes=1784 peak_live_heap_bytes=1790732 deadlines=0 peak_debt_ms=59230.728 collisions=0 lost_event_batches=0 settled=false
+commands batches=32 commands=4096 QueueFull=0 failed=0 ack_us p50/p95/p99=698.9/864.7/874.2
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 3.78s
+

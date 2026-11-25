@@ -240,12 +240,30 @@ nonconvergence. The isolated test fails identically at baseline `f603ae4`, with
 the same reported body state. This is a pre-existing deterministic failure;
 remaining all-features tests are being run with `--no-fail-fast`.
 
+The completed `--all-features --no-fail-fast` run failed two targets: the
+baseline-identical landing nonconvergence and the baseline-reproduced
+shape-worker queue race. Core all-features library tests passed 1442 with 20
+ignored; the other executed targets completed. Task 6.1 remains unchecked.
+
 Task 6.2: all three requested `kapitsa --no-default-features` test commands
 passed (plain, `parallel`, `service`); the resilient host example ran to 200 ms.
 The suites include `explicit_step` and legacy fail-fast step-failure tests.
 Plain and parallel builds initially warned about a service-only helper; it was
 feature-gated and both corresponding all-target clippy checks now pass with
 warnings denied.
+
+Task 6.3 partial evidence (not complete): release service tests passed 66,
+2 ignored. On AMD Ryzen 7 255, rustc 1.99.1, the existing scheduler benchmark
+was warmed up and run five times per revision using 100 bodies and four Tokio /
+Rayon workers. Raw output is in `benchmark-baseline.txt` and
+`benchmark-candidate.txt`. At requested 1x both committed 0.3000 simulated
+seconds per sample, achieving 0.99–1.00x. Median of the five reported runner
+medians was 74.474 µs baseline and 72.875 µs candidate; median of reported CPU
+p95 values was 72.864 and 73.806 µs. These are diagnostic and noisy; the
+benchmark uses the legacy policy, measures publication rather than snapshot
+read latency, and its overload runs do not commit equal simulated time. It
+does not establish resilient high-speed/contact/overload performance, retry
+counts, or the required complete paired report, so 6.3 remains unchecked.
 
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
