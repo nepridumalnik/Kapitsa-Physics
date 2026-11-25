@@ -1,0 +1,14 @@
+   Compiling kapitsa v0.7.0 (/tmp/kapitsa-adaptive-async-runtime-resilience/crates/kapitsa)
+    Finished `release` profile [optimized] target(s) in 9.49s
+     Running unittests src/lib.rs (target/release/deps/kapitsa-f01598a49a419ad0)
+
+running 1 test
+test runtime::asynchronous::service::benchmarks::benchmark_resilient_rejected_step ... repetition=1 committed_ns=5000000 wall_ns=11215478 steps=2 attempts=3 retries=1 rejections=1 debt_ns=0 allocations=23 allocated_bytes=281395 peak_extra_bytes=280195
+repetition=2 committed_ns=5000000 wall_ns=11165936 steps=2 attempts=3 retries=1 rejections=1 debt_ns=0 allocations=22 allocated_bytes=281331 peak_extra_bytes=280131
+repetition=3 committed_ns=5000000 wall_ns=11196964 steps=2 attempts=3 retries=1 rejections=1 debt_ns=0 allocations=22 allocated_bytes=281331 peak_extra_bytes=280131
+repetition=4 committed_ns=5000000 wall_ns=11192556 steps=2 attempts=3 retries=1 rejections=1 debt_ns=0 allocations=22 allocated_bytes=281331 peak_extra_bytes=280131
+repetition=5 committed_ns=5000000 wall_ns=11260661 steps=2 attempts=3 retries=1 rejections=1 debt_ns=0 allocations=23 allocated_bytes=282851 peak_extra_bytes=281623
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 230 filtered out; finished in 0.07s
+

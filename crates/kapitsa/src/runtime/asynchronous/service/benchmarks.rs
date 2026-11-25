@@ -33,6 +33,56 @@ use super::{
 use crate::runtime::{PhysicsBatchResults, PhysicsSubmitError, SimulationConfig, WorkerConfig};
 use kapitsa_core::command::PhysicsCommandBuffer;
 
+#[test]
+#[ignore = "Release injected-rejection recovery benchmark"]
+fn benchmark_resilient_rejected_step() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::runtime::{
+        AdaptiveTimeStepConfig, RecoveryConfig, StepRecoveryPolicy, TimeStepPolicy,
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        for repetition in 0..6 {
+            let mut config = benchmark_config();
+            config.tick_rate = 100;
+            config.max_catch_up_steps = 1;
+            config.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+            config.step_recovery_policy = StepRecoveryPolicy::Resilient(RecoveryConfig::default());
+            let mut simulation = Simulation::new_from_config(config)?;
+            let body = simulation.simulation.as_mut().ok_or("runner")?.world_mut()?.add_body(benchmark_body(0, true)?)?;
+            simulation.simulation.as_mut().ok_or("runner")?.reject_steps_remaining = 1;
+            simulation.set_time_horizon(Some(Duration::from_millis(5)));
+            let client = simulation.client();
+            let mut reference = PhysicsWorld::new();
+            let reference_body = reference.add_body(benchmark_body(0, true)?)?;
+            simulation.start()?;
+            crate::runtime::asynchronous::marshalling::allocation_tracking::start();
+            let start = Instant::now();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while client.snapshot().simulation_time() < Duration::from_millis(5) {
+                    tokio::task::yield_now().await;
+                }
+            }).await?;
+            let wall = start.elapsed();
+            let (allocations, allocated_bytes, peak_extra, _) = crate::runtime::asynchronous::marshalling::allocation_tracking::stop();
+            let snapshot = client.snapshot();
+            let metrics = simulation.metrics();
+            reference.step(0.0025)?;
+            reference.step(0.0025)?;
+            assert_eq!(*snapshot.body(body).ok_or("body")?, *reference.body(reference_body).ok_or("reference")?.state());
+            assert_eq!(metrics.total_retries, 1);
+            assert_eq!(metrics.total_rejections, 1);
+            if repetition > 0 {
+                println!("repetition={repetition} committed_ns={} wall_ns={} steps={} attempts={} retries={} rejections={} debt_ns={} allocations={allocations} allocated_bytes={allocated_bytes} peak_extra_bytes={peak_extra}", snapshot.simulation_time().as_nanos(), wall.as_nanos(), snapshot.step(), metrics.total_attempts, metrics.total_retries, metrics.total_rejections, metrics.simulation_time_debt.as_nanos());
+            }
+            simulation.stop().await?;
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
 mod mission {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

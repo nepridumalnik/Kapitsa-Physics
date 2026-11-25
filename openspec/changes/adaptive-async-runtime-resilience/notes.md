@@ -373,6 +373,21 @@ tests are noted above. Full 6.3 remains open pending a retrying fault workload,
 allocation/queue evidence under that workload, and interpretation of the observed
 timing spread.
 
+`cargo test -p kapitsa --release --features service,bench-internals --lib
+benchmark_resilient_rejected_step -- --ignored --nocapture --test-threads=1`
+ran one warmup and five measured injected-rejection episodes, each committing
+5 ms with two successful 2.5 ms steps matching a reference, three attempts,
+one retry and one rejection. Wall times were 11.166–11.261 ms including pacing;
+process-wide tracked allocations were 22–23 calls and 281,331–282,851 bytes.
+These include runtime and measurement activity, not just physics. Raw output is
+`benchmark-retry.txt`; this test is candidate-only because the baseline exits
+on the injected rejection. Queue limits are 1024 requests and 1024 deferred
+results, with the saturated blocked-queue test above. The existing ignored
+`benchmark_rocket_flight_runtime_queue_pressure` did not finish filling its
+queue while the service consumed paused commands; it was interrupted after
+about one minute (`benchmark-queue-interrupted.txt`). No completed allocation or
+latency claim is made for that queue benchmark.
+
 After the scheduler fix, `cargo test --workspace --all-features --no-fail-fast
 --quiet` again completed with the same two baseline-reproduced failing targets;
 the core library passed 1442 tests with 20 ignored. The focused adaptive suite
