@@ -1733,6 +1733,17 @@ mod tests {
             matches!(selected, StepChoice::Step(step) if !step.is_zero() && step <= Duration::from_nanos(866_025)),
             "{selected:?}"
         );
+        let scheduled = super::choose_scheduled_step(
+            &world,
+            &config,
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+            config.step_budget(),
+            None,
+        );
+        assert!(
+            matches!(scheduled, StepChoice::Step(step) if !step.is_zero() && step <= Duration::from_nanos(866_025))
+        );
         Ok(())
     }
 
