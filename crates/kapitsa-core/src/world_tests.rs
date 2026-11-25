@@ -1464,9 +1464,9 @@ impl StepExecutor for ScopedThreadExecutor {
     }
 }
 
-struct FailingExecutor {
-    fail_on_call: usize,
-    calls: AtomicUsize,
+pub(super) struct FailingExecutor {
+    pub(super) fail_on_call: usize,
+    pub(super) calls: AtomicUsize,
 }
 
 impl FailingExecutor {
@@ -2141,6 +2141,39 @@ fn joint_break_force_is_in_newtons_and_removes_the_joint() {
         (force - 30.0).abs() <= 1.0e-6,
         "expected the 0.5 kg*m/s impulse over 1/60 s to read as 30 N, got {force}"
     );
+}
+
+#[test]
+fn aborted_precommit_discards_staged_joint_break() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::execution::SequentialExecutor;
+    let mut world = PhysicsWorld::new();
+    let first = world.add_body(body_at(Vec3::ZERO, 1.0))?;
+    let mut moving = body_at(Vec3::ZERO, 1.0);
+    moving.set_linear_velocity(Vec3::X)?;
+    let second = world.add_body(moving)?;
+    let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    common.break_force = Some(0.1);
+    let joint = world.add_joint(first, second, Joint::Fixed(FixedJoint::new(common)))?;
+    let dt = 1.0 / 60.0;
+    world.collision_system.begin_step();
+    world.prepare_joint_collision_pairs()?;
+    let predictions = world
+        .bodies()
+        .map(|(id, body)| Ok((id, super::predict(body, dt)?)))
+        .collect::<Result<Vec<_>, Error>>()?;
+    for (id, state) in predictions {
+        world.collision_system.stage_prediction(id, state);
+    }
+    world.prepare_collision_candidates(dt, 1, &SequentialExecutor)?;
+    world.process_collision_candidates(1, &SequentialExecutor, dt)?;
+    assert_eq!(world.collision_system.joint_break_events().len(), 1);
+    world.collision_system.abort_step();
+    assert!(world.joint_events().is_empty());
+    assert!(world.joint(joint).is_some());
+    world.step(dt)?;
+    assert_eq!(world.joint_events().len(), 1);
+    assert!(world.joint(joint).is_none());
+    Ok(())
 }
 
 #[test]
@@ -4159,6 +4192,174 @@ fn sharded_collision_solver_error_rolls_back_force_sources_and_can_retry() {
 }
 
 #[test]
+fn rejected_prediction_then_smaller_step_matches_reference_after_force_preparation()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn fixture() -> Result<(PhysicsWorld, BodyId, BodyId), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut body =
+            RigidBody::new_dynamic(Transform::new(Vec3::X * 1.0e308, Quat::IDENTITY)?, mass)?;
+        body.set_linear_velocity(Vec3::X * 1.0e308)?;
+        body.apply_force(Vec3::Y)?;
+        let id = world.add_body(body)?;
+        world.add_force_source(id, Vec3::ZERO, Vec3::Y)?;
+        let mut sleeping = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        sleeping.sleep()?;
+        let sleeping_id = world.add_body(sleeping)?;
+        Ok((world, id, sleeping_id))
+    }
+
+    for sharded in [false, true] {
+        let (mut attempted, attempted_id, attempted_sleeping) = fixture()?;
+        let (mut reference, reference_id, reference_sleeping) = fixture()?;
+        let before = attempted
+            .body(attempted_id)
+            .ok_or(WorldError::InvalidBodyId)?
+            .motion();
+        let mut shards = vec![Vec::new(); 4];
+        let failure = if sharded {
+            attempted.step_with_shards(1.0, &mut shards, &ScopedThreadExecutor, 4)
+        } else {
+            attempted.step(1.0)
+        };
+        assert!(
+            matches!(step_cause(&failure), Some(StepError::BodyIntegration { cause, .. }) if cause.downcast_ref::<IntegrationError>() == Some(&IntegrationError::ArithmeticOverflow))
+        );
+        assert_eq!(
+            attempted
+                .body(attempted_id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion(),
+            before
+        );
+        assert!(
+            attempted
+                .body(attempted_sleeping)
+                .ok_or(WorldError::InvalidBodyId)?
+                .state()
+                .is_sleeping()
+        );
+        if sharded {
+            attempted.step_with_shards(0.5, &mut shards, &ScopedThreadExecutor, 4)?;
+            let mut reference_shards = vec![Vec::new(); 4];
+            reference.step_with_shards(0.5, &mut reference_shards, &ScopedThreadExecutor, 4)?;
+        } else {
+            attempted.step(0.5)?;
+            reference.step(0.5)?;
+        }
+        assert_eq!(
+            attempted
+                .body(attempted_id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion(),
+            reference
+                .body(reference_id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion()
+        );
+        assert_eq!(
+            attempted
+                .body(attempted_sleeping)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion(),
+            reference
+                .body(reference_sleeping)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion()
+        );
+        assert_eq!(
+            attempted.collision_events().len(),
+            reference.collision_events().len()
+        );
+        assert_eq!(
+            attempted.contact_impulses().len(),
+            reference.contact_impulses().len()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn rejected_collision_work_then_smaller_step_matches_reference()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn fixture() -> Result<(PhysicsWorld, Vec<BodyId>), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut ids = Vec::new();
+        for x in [0.0, 1.5, 5.0, 6.5] {
+            let mut body =
+                RigidBody::new_dynamic(Transform::new(Vec3::X * x, Quat::IDENTITY)?, mass)?;
+            body.apply_force(Vec3::Y)?;
+            let id = world.add_body(body)?;
+            world.add_collider(id, collider(1.0))?;
+            world.add_force_source(id, Vec3::ZERO, Vec3::X)?;
+            ids.push(id);
+        }
+        Ok((world, ids))
+    }
+    let (mut attempted, attempted_ids) = fixture()?;
+    let (mut reference, reference_ids) = fixture()?;
+    attempted.step(0.01)?;
+    reference.step(0.01)?;
+    let before_events = attempted.collision_events().to_vec();
+    let before_impulses = attempted.contact_impulses().to_vec();
+    let before_states = attempted_ids
+        .iter()
+        .map(|id| {
+            attempted
+                .body(*id)
+                .map(RigidBody::motion)
+                .ok_or(WorldError::InvalidBodyId)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let executor = FailingExecutor {
+        fail_on_call: 2,
+        calls: AtomicUsize::new(0),
+    };
+    let mut shards = vec![Vec::new(); 4];
+    let failure = attempted.step_with_shards(0.1, &mut shards, &executor, 4);
+    assert!(
+        matches!(step_cause(&failure), Some(StepError::Collision(cause)) if cause.downcast_ref::<CollisionError>() == Some(&CollisionError::WorkerFailed))
+    );
+    assert_eq!(executor.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(attempted.collision_events(), before_events);
+    assert_eq!(attempted.contact_impulses(), before_impulses);
+    for (id, before) in attempted_ids.iter().zip(before_states) {
+        assert_eq!(
+            attempted
+                .body(*id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion(),
+            before
+        );
+    }
+    attempted.step_with_shards(0.05, &mut shards, &ScopedThreadExecutor, 4)?;
+    let mut reference_shards = vec![Vec::new(); 4];
+    reference.step_with_shards(0.05, &mut reference_shards, &ScopedThreadExecutor, 4)?;
+    for (attempted_id, reference_id) in attempted_ids.into_iter().zip(reference_ids) {
+        assert_eq!(
+            attempted
+                .body(attempted_id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion(),
+            reference
+                .body(reference_id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .motion()
+        );
+    }
+    assert_eq!(
+        attempted.collision_events().len(),
+        reference.collision_events().len()
+    );
+    assert_eq!(
+        attempted.contact_impulses().len(),
+        reference.contact_impulses().len()
+    );
+    Ok(())
+}
+
+#[test]
 fn body_removal_invalidates_its_force_sources_and_disable_stops_force() {
     let mut world = PhysicsWorld::new();
     let body = world.add_body(dynamic_body()).expect("body");
@@ -4654,6 +4855,91 @@ fn seeded_independent_ccd_stress_matches_across_worker_counts()
             assert!(world.collision_step_metrics().ccd_parallel_island_count >= workers);
         }
     }
+    Ok(())
+}
+
+#[test]
+fn overlapping_resting_ccd_mesh_contacts_match_parallel_execution()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn fixture() -> Result<PhysicsWorld, Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        for index in 0..16 {
+            let offset = Vec3::new(f64::from(index) * 10.0, 0.0, 0.0);
+            let terrain = world.add_body(RigidBody::new_static(Transform::new(
+                offset,
+                Quat::IDENTITY,
+            )?))?;
+            let mesh = TriangleMesh::new(
+                vec![
+                    Vec3::new(-4.0, 0.0, -4.0),
+                    Vec3::new(-4.0, 0.0, 4.0),
+                    Vec3::new(4.0, 0.0, -4.0),
+                    Vec3::new(4.0, 0.0, 4.0),
+                ],
+                vec![[0, 1, 2], [2, 1, 3]],
+            )?;
+            world.add_collider(
+                terrain,
+                Collider::new(Shape::TriangleMesh(mesh), Transform::identity()),
+            )?;
+            let shape = Shape::Sphere(Sphere::new(0.5)?);
+            let mass = MassProperties::from_shape(&shape, 1000.0)?;
+            let mut body = RigidBody::new_dynamic(
+                Transform::new(
+                    offset + Vec3::new(0.0, 0.49488301722105243, 0.0),
+                    Quat::new(
+                        0.046935096721610156,
+                        -0.13341348444447113,
+                        -0.10182661294500514,
+                        -0.9846975575070073,
+                    ),
+                )?,
+                mass,
+            )?;
+            body.set_linear_velocity(Vec3::new(
+                1.495068051234299,
+                -1.1185496973098452e-14,
+                -0.31762955302109125,
+            ))?;
+            body.set_angular_velocity(Vec3::new(
+                -0.6352591060421824,
+                -0.049721466185059585,
+                -2.990136102468593,
+            ))?;
+            body.set_ccd_mode(CcdMode::Continuous);
+            body.apply_force(-Vec3::Y * (mass.mass() * 9.81))?;
+            let body = world.add_body(body)?;
+            world.add_collider(body, Collider::new(shape, Transform::identity()))?;
+        }
+        Ok(world)
+    }
+    let mut sequential = fixture()?;
+    sequential.step(0.02)?;
+    let mut parallel = fixture()?;
+    parallel.step_with_executor(0.02, &ScopedThreadExecutor, 4)?;
+    assert!(sequential.collision_events().iter().all(|event| {
+        event.kind != crate::collision::CollisionEventKind::Impact
+            || event
+                .contact
+                .is_some_and(|contact| contact.normal_impulse > 0.0)
+    }));
+    for ((_, actual), (_, expected)) in parallel.bodies().zip(sequential.bodies()) {
+        assert_eq!(actual.state(), expected.state());
+    }
+    assert_eq!(
+        parallel.collision_events().len(),
+        sequential.collision_events().len()
+    );
+    for (actual, expected) in parallel
+        .collision_events()
+        .iter()
+        .zip(sequential.collision_events())
+    {
+        assert_eq!(actual.kind, expected.kind);
+        assert_eq!(actual.contact, expected.contact);
+    }
+    #[cfg(feature = "bench-internals")]
+    assert!(parallel.collision_step_metrics().ccd_parallel_island_count >= 4);
     Ok(())
 }
 

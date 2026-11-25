@@ -1,0 +1,5 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/kapitsa-f01598a49a419ad0)
+
+running 1 test
+test runtime::asynchronous::service::benchmarks::benchmark_rocket_flight_runtime_queue_pressure ... 

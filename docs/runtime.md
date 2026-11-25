@@ -15,8 +15,9 @@ service with motion gated while bodies and terrain are registered through its
 client. `Simulation::set_time_horizon(Some(target))` permits autonomous world
 advancement up to an absolute simulation time. `None` removes the limit.
 The runtime retains ownership of scheduling, integration and snapshot publication.
-Fixed intervals are not shortened to fit a target. Adaptive intervals respect
-the configured minimum; a smaller remainder waits for an extended horizon.
+Fixed intervals are not shortened to fit a target. Fail-fast adaptive intervals
+respect the configured minimum; resilient adaptive intervals may use a safe
+remainder below that preferred minimum, down to the recovery floor.
 At the limit, commands and queries continue and waiting time adds no catch-up
 debt. A changed limit does not undo an already completed or in-flight interval.
 
@@ -27,9 +28,12 @@ while paused. They also exist as `PhysicsCommand` variants for single-command
 submission; they are not atomic body-motion batch commands.
 Replacing central gravity does not remove separately registered gravity fields.
 
-`kapitsa` exposes one clock-driven `Simulation`. The host application provides
-the Tokio runtime; Kapitsa creates its worker pool internally. Construction
-outside Tokio returns `SimulationError::MissingRuntime`.
+`kapitsa` exposes one clock-driven `Simulation`. `spawn_on_tokio` uses the
+supplied Tokio runtime and a Kapitsa-owned worker pool. `spawn_on_rayon` uses a
+caller-owned Rayon pool and a dedicated Kapitsa clock runtime;
+`spawn_on_tokio_and_rayon` accepts both a Tokio handle and a caller-owned pool.
+Dropping the simulation releases its pool reference, not the host's pool.
+`Simulation::new` outside Tokio returns `SimulationError::MissingRuntime`.
 
 ```rust,no_run
 use std::error::Error;
@@ -83,8 +87,9 @@ preserves the world so the same simulation can be started again.
 `PhysicsClient` is cloneable and thread-safe. Use awaited methods for structural
 operations such as adding or removing bodies, colliders, force sources, and
 joints. Joint creation is awaited so it can return a generational `JointId`.
-Successful world-changing calls complete only after their physics step succeeds
-and the corresponding snapshot has been published. Thus, after `add_body`
+Successful world-changing calls complete after the corresponding snapshot has
+been published, either after a step or at a paused, horizon-limited or blocked
+command boundary. Thus, after `add_body`
 returns, `snapshot().body(id)` is present; after `remove_body` returns, it is
 absent. `next_snapshot()` can still skip later intermediate publications.
 
@@ -92,8 +97,8 @@ Use `PhysicsCommandBuffer` and `try_submit` for ordered changes during a
 synchronous game tick. Existing joints can be updated, enabled, disabled, or
 removed in an atomic batch. `try_submit()` means only that the complete buffer was
 accepted into the bounded queue. A successful `PhysicsBatchResult` means the
-batch was applied atomically, its step completed, and that step's snapshot was
-published. The result's `step` identifies that publication; the latest snapshot
+batch was applied atomically and its snapshot was published. The result's `step`
+identifies the last committed integration, including for command-only boundaries; the latest snapshot
 may have a greater step because snapshots can skip intermediate steps.
 
 Command validation failures preserve the original error and command index, and
@@ -125,11 +130,59 @@ the accumulator. `TimeStepPolicy::Adaptive` uses the same accumulated time but
 chooses a world-wide physical substep from the configured maximum and bounds
 estimated from motion, forces, gravity, contacts, and joints. Adaptive bounds
 are safety estimates, not a formal global error guarantee. The minimum step
-prevents unbounded subdivision; if a physical bound falls below it, the runtime
+prevents unbounded subdivision in the default fail-fast policy; if a physical bound falls below it, the runtime
 holds physics, reports `adaptive_step_limited`, and lowers achieved warp instead
 of silently advancing at a larger step. Commands can still change the world in
 this state, and their results remain pending until a later successful step is
 published.
+
+## Opt-in resilient adaptive service
+
+Select `StepRecoveryPolicy::Resilient(RecoveryConfig::default())` together with
+`TimeStepPolicy::Adaptive`; fixed-step resilience is rejected during validation.
+Defaults remain fail-fast, and synchronous `PhysicsSystem::update(dt)` always
+performs exactly one attempt. The default recovery floor is 1 ns, the retry
+budget is eight, simulated-time admission is capped at one second, and the
+verified-worker backoff is 10 ms. Configuration validates a positive floor no
+greater than the adaptive minimum, positive retry and backoff bounds, and a debt
+cap of at least one base step. A safe interval below the adaptive preferred
+minimum can run down to the recovery floor; an unsafe interval is never enlarged.
+
+| Typed condition | Resilient response |
+| --- | --- |
+| `CollisionError::CcdLimitExceeded` | Retry the rolled-back interval with a strictly smaller safe step, within the retry budget. |
+| Other known collision, integration, force, gravity or aerodynamic input failures | Block for corrective input; retain the original cause. |
+| `WorkerFailed` without proven world integrity, invalid step results, weld-split failure or unknown cause | Fatal; preserve the last snapshot and do not retry an uncertain world. |
+| Verified transient worker failure with an intact world | Bounded retry with backoff. Current Rayon dispatch does not expose such a verified transient failure. |
+| Physical bound below the recovery floor or exhausted retries | Block without spinning or accumulating new demand; a relevant mutation permits reevaluation. |
+
+`RecoveryStatus` distinguishes healthy, retrying, blocked and fatal states from
+CPU load. Metrics retain attempt, retry and rejection counts, last typed failure,
+selected safe and attempted durations, last committed step duration and simulation
+time. Success clears the active recovery status and consecutive failures while
+retaining historical counts and the last error. A slow but successful step is not
+a physics failure. In resilient mode admission can fall below the legacy 30% floor;
+`discarded_simulation_demand` reports requested time not admitted and
+`discarded_demand_saturated` indicates that its duration overflowed. The debt cap
+and absolute horizon limit admission; discarded time is never counted as simulated.
+
+Commands are applied once at a boundary, not replayed on retries. A one-shot force
+survives rejected attempts until a successful step consumes it; persistent sources
+act on each committed interval. Rejected atomic batches have no partial effect.
+On block, fatal failure or stop before a step commits, an applied command reports
+`StepFailedAfterApply` rather than a rejection; retain its effect and do not replay
+it. Read-only queries keep their FIFO observation even if the following step fails.
+Once submitted, cancelling a request future does not cancel an accepted command.
+Queues, deferred outcomes and event streams are bounded; slow subscribers must
+handle explicit lag.
+
+The host owns its time boundary: establish an absolute horizon before advancing,
+wait for the boundary and acknowledge environment or structural updates on a
+control task, then extend the horizon. An already running attempt is not shortened
+by a later horizon change. Pause and horizon holds admit no new demand. Invalid or
+unrecoverable worlds may be unable to advance; neither resilience nor a timeout
+can safely terminate a permanently hung worker. The runnable host example is
+`cargo run -p kapitsa --features service --example resilient_host`.
 
 Catch-up remains bounded by `max_catch_up_steps` per scheduling turn.
 `last_physics_step` reports the most recent simulated-time interval, while
@@ -147,7 +200,10 @@ persistent `ForceSource` applies its body-local force at its body-local point on
 every step until it is updated, disabled, or removed. Deleting its body removes
 its force sources too.
 
-Snapshots are immutable and may skip intermediate steps. Collision events are
+Snapshots are immutable and may skip intermediate publications. `revision()`
+increases on each publication, including command-only boundaries and restart;
+step and simulation time advance only for committed integration. Each snapshot
+also contains the latest committed `step_diagnostics()`. Collision events are
 published in bounded batches and report their committed step. Lagging event
 subscribers receive an `Error` with `lagged_batches()` set to the number of discarded
 batches.

@@ -240,7 +240,31 @@ pub struct ShapeRegistry {
     registry_id: u64,
 }
 
+pub(crate) struct ShapeInsertCheckpoint {
+    pool: crate::containers::dense_pool::InsertCheckpoint,
+    registry_id: u64,
+}
+
 impl ShapeRegistry {
+    pub(crate) fn insert_checkpoint(&self) -> ShapeInsertCheckpoint {
+        ShapeInsertCheckpoint {
+            pool: self.shapes.insert_checkpoint(),
+            registry_id: self.registry_id,
+        }
+    }
+
+    pub(crate) fn undo_insertion(
+        &mut self,
+        id: ShapeId,
+        checkpoint: ShapeInsertCheckpoint,
+    ) -> Option<CookedShape> {
+        if id.registry != self.registry_id {
+            return None;
+        }
+        let shape = self.shapes.undo_insertion(id.dense, checkpoint.pool)?;
+        self.registry_id = checkpoint.registry_id;
+        Some(shape)
+    }
     /// Creates an empty registry. Its identity is allocated on first insert.
     pub const fn new() -> Self {
         Self {

@@ -58,6 +58,7 @@ fn wing_control_ids_survive_deflection_but_not_replacement()
     let surface = wing(Transform::identity())?.with_control(WingControl::new(0.0, 0.2, 1.0)?);
     world.set_part_aerodynamic_wings(part, vec![surface.clone()])?;
     let id = world.part_wing_id(part, 0).ok_or("missing wing")?;
+    assert_eq!(world.part_wing(id), Some(&surface));
     use crate::command::{PhysicsCommand, PhysicsCommandResult};
     assert_eq!(
         world.apply_command(PhysicsCommand::GetPartWingId { part, index: 0 })?,
@@ -70,6 +71,7 @@ fn wing_control_ids_survive_deflection_but_not_replacement()
     assert_eq!(world.body_revision, revision);
     world.set_part_aerodynamic_wings(part, vec![surface])?;
     assert_ne!(world.part_wing_id(part, 0), Some(id));
+    assert!(world.part_wing(id).is_none());
     assert_eq!(
         world.apply_command(PhysicsCommand::GetPartWingId { part, index: 1 })?,
         PhysicsCommandResult::PartWingId(None)

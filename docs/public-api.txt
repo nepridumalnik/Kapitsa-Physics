@@ -153,6 +153,9 @@ RayHit
 RayonExecutor
 RayonPool
 RayonPoolError
+RecoveryBlock
+RecoveryConfig
+RecoveryStatus
 RemoveChunkBatchError
 RigidBody
 RigidBody}
@@ -178,6 +181,7 @@ StepDiagnostics
 StepError
 StepExecutor
 StepMeasurement
+StepRecoveryPolicy
 StepResults
 StepStats
 TaperedCapsule

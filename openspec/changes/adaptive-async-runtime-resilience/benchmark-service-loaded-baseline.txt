@@ -1,0 +1,108 @@
+   Compiling resilience-service-benchmark v0.1.0 (/tmp/kapitsa-service-benchmark)
+    Finished `release` profile [optimized] target(s) in 0.74s
+     Running `target/release/resilience-service-benchmark`
+scenario=ordinary repetition=0 phase=setup
+scenario=ordinary repetition=0 phase=warmup
+scenario=ordinary repetition=0 phase=boundary
+scenario=ordinary repetition=0 phase=measure
+scenario=ordinary repetition=0 phase=stop
+scenario=ordinary repetition=1 phase=setup
+scenario=ordinary repetition=1 phase=warmup
+scenario=ordinary repetition=1 phase=boundary
+scenario=ordinary repetition=1 phase=measure
+scenario=ordinary repetition=1 committed_ns=200000000 wall_ns=204822293 warp=0.976 steps=95 observed=18 step_wall_median_ns=5851 step_wall_p95_ns=8986 snapshot_median_ns=171 snapshot_p95_ns=541 max_debt_ns=0 discarded_ns=0 retries=0
+scenario=ordinary repetition=1 phase=stop
+scenario=ordinary repetition=2 phase=setup
+scenario=ordinary repetition=2 phase=warmup
+scenario=ordinary repetition=2 phase=boundary
+scenario=ordinary repetition=2 phase=measure
+scenario=ordinary repetition=2 committed_ns=200000000 wall_ns=204007432 warp=0.980 steps=93 observed=18 step_wall_median_ns=5319 step_wall_p95_ns=8355 snapshot_median_ns=130 snapshot_p95_ns=371 max_debt_ns=0 discarded_ns=0 retries=0
+scenario=ordinary repetition=2 phase=stop
+scenario=ordinary repetition=3 phase=setup
+scenario=ordinary repetition=3 phase=warmup
+scenario=ordinary repetition=3 phase=boundary
+scenario=ordinary repetition=3 phase=measure
+scenario=ordinary repetition=3 committed_ns=200000000 wall_ns=205584189 warp=0.973 steps=95 observed=20 step_wall_median_ns=7203 step_wall_p95_ns=17072 snapshot_median_ns=160 snapshot_p95_ns=431 max_debt_ns=0 discarded_ns=0 retries=0
+scenario=ordinary repetition=3 phase=stop
+scenario=ordinary repetition=4 phase=setup
+scenario=ordinary repetition=4 phase=warmup
+scenario=ordinary repetition=4 phase=boundary
+scenario=ordinary repetition=4 phase=measure
+scenario=ordinary repetition=4 committed_ns=200000000 wall_ns=201656146 warp=0.992 steps=84 observed=18 step_wall_median_ns=5029 step_wall_p95_ns=8726 snapshot_median_ns=150 snapshot_p95_ns=551 max_debt_ns=0 discarded_ns=0 retries=0
+scenario=ordinary repetition=4 phase=stop
+scenario=ordinary repetition=5 phase=setup
+scenario=ordinary repetition=5 phase=warmup
+scenario=ordinary repetition=5 phase=boundary
+scenario=ordinary repetition=5 phase=measure
+scenario=ordinary repetition=5 committed_ns=200000000 wall_ns=206485220 warp=0.969 steps=113 observed=18 step_wall_median_ns=6792 step_wall_p95_ns=8536 snapshot_median_ns=210 snapshot_p95_ns=712 max_debt_ns=0 discarded_ns=0 retries=0
+scenario=ordinary repetition=5 phase=stop
+scenario=contact repetition=0 phase=setup
+scenario=contact repetition=0 phase=warmup
+scenario=contact repetition=0 phase=boundary
+scenario=contact repetition=0 phase=measure
+scenario=contact repetition=0 phase=stop
+scenario=contact repetition=1 phase=setup
+scenario=contact repetition=1 phase=warmup
+scenario=contact repetition=1 phase=boundary
+scenario=contact repetition=1 phase=measure
+scenario=contact repetition=1 committed_ns=200000000 wall_ns=201433777 warp=0.993 steps=428 observed=25 step_wall_median_ns=8436 step_wall_p95_ns=15428 snapshot_median_ns=130 snapshot_p95_ns=331 max_debt_ns=0 discarded_ns=0 retries=0
+scenario=contact repetition=1 phase=stop
+scenario=contact repetition=2 phase=setup
+scenario=contact repetition=2 phase=warmup
+scenario=contact repetition=2 phase=boundary
+scenario=contact repetition=2 phase=measure
+scenario=contact repetition=2 committed_ns=200000000 wall_ns=210610376 warp=0.950 steps=395 observed=24 step_wall_median_ns=8466 step_wall_p95_ns=41667 snapshot_median_ns=140 snapshot_p95_ns=401 max_debt_ns=0 discarded_ns=0 retries=0
+scenario=contact repetition=2 phase=stop
+scenario=contact repetition=3 phase=setup
+scenario=contact repetition=3 phase=warmup
+scenario=contact repetition=3 phase=boundary
+scenario=contact repetition=3 phase=measure
+scenario=contact repetition=3 committed_ns=200000000 wall_ns=210213313 warp=0.951 steps=402 observed=26 step_wall_median_ns=8807 step_wall_p95_ns=47868 snapshot_median_ns=160 snapshot_p95_ns=441 max_debt_ns=0 discarded_ns=0 retries=0
+scenario=contact repetition=3 phase=stop
+scenario=contact repetition=4 phase=setup
+scenario=contact repetition=4 phase=warmup
+scenario=contact repetition=4 phase=boundary
+scenario=contact repetition=4 phase=measure
+scenario=contact repetition=4 committed_ns=200000000 wall_ns=211622492 warp=0.945 steps=410 observed=26 step_wall_median_ns=8896 step_wall_p95_ns=24846 snapshot_median_ns=140 snapshot_p95_ns=381 max_debt_ns=0 discarded_ns=0 retries=0
+scenario=contact repetition=4 phase=stop
+scenario=contact repetition=5 phase=setup
+scenario=contact repetition=5 phase=warmup
+scenario=contact repetition=5 phase=boundary
+scenario=contact repetition=5 phase=measure
+scenario=contact repetition=5 committed_ns=200000000 wall_ns=211630937 warp=0.945 steps=363 observed=28 step_wall_median_ns=8435 step_wall_p95_ns=43600 snapshot_median_ns=140 snapshot_p95_ns=401 max_debt_ns=0 discarded_ns=0 retries=0
+scenario=contact repetition=5 phase=stop
+scenario=overload repetition=0 phase=setup
+scenario=overload repetition=0 phase=warmup
+scenario=overload repetition=0 phase=boundary
+scenario=overload repetition=0 phase=measure
+scenario=overload repetition=0 phase=stop
+scenario=overload repetition=1 phase=setup
+scenario=overload repetition=1 phase=warmup
+scenario=overload repetition=1 phase=boundary
+scenario=overload repetition=1 phase=measure
+scenario=overload repetition=1 committed_ns=1000000000 wall_ns=127543189 warp=7.840 steps=100 observed=96 step_wall_median_ns=1088106 step_wall_p95_ns=1163245 snapshot_median_ns=111 snapshot_p95_ns=370 max_debt_ns=2344676000 discarded_ns=0 retries=0
+scenario=overload repetition=1 phase=stop
+scenario=overload repetition=2 phase=setup
+scenario=overload repetition=2 phase=warmup
+scenario=overload repetition=2 phase=boundary
+scenario=overload repetition=2 phase=measure
+scenario=overload repetition=2 committed_ns=1000000000 wall_ns=127046323 warp=7.871 steps=100 observed=93 step_wall_median_ns=1098275 step_wall_p95_ns=1204902 snapshot_median_ns=130 snapshot_p95_ns=541 max_debt_ns=2485345000 discarded_ns=0 retries=0
+scenario=overload repetition=2 phase=stop
+scenario=overload repetition=3 phase=setup
+scenario=overload repetition=3 phase=warmup
+scenario=overload repetition=3 phase=boundary
+scenario=overload repetition=3 phase=measure
+scenario=overload repetition=3 committed_ns=1000000000 wall_ns=125876366 warp=7.944 steps=100 observed=99 step_wall_median_ns=1089879 step_wall_p95_ns=1141725 snapshot_median_ns=121 snapshot_p95_ns=361 max_debt_ns=2601870000 discarded_ns=0 retries=0
+scenario=overload repetition=3 phase=stop
+scenario=overload repetition=4 phase=setup
+scenario=overload repetition=4 phase=warmup
+scenario=overload repetition=4 phase=boundary
+scenario=overload repetition=4 phase=measure
+scenario=overload repetition=4 committed_ns=1000000000 wall_ns=128879132 warp=7.759 steps=100 observed=98 step_wall_median_ns=1099527 step_wall_p95_ns=1189042 snapshot_median_ns=131 snapshot_p95_ns=380 max_debt_ns=2745685000 discarded_ns=0 retries=0
+scenario=overload repetition=4 phase=stop
+scenario=overload repetition=5 phase=setup
+scenario=overload repetition=5 phase=warmup
+scenario=overload repetition=5 phase=boundary
+scenario=overload repetition=5 phase=measure
+scenario=overload repetition=5 committed_ns=1000000000 wall_ns=128135983 warp=7.804 steps=100 observed=98 step_wall_median_ns=1090019 step_wall_p95_ns=1169115 snapshot_median_ns=131 snapshot_p95_ns=320 max_debt_ns=2502547000 discarded_ns=0 retries=0
+scenario=overload repetition=5 phase=stop

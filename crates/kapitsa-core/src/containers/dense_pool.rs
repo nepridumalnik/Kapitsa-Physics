@@ -63,7 +63,53 @@ pub struct DensePool<T> {
     free_head: Option<u32>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct InsertCheckpoint {
+    values_len: usize,
+    slots_len: usize,
+    free_head: Option<u32>,
+}
+
 impl<T> DensePool<T> {
+    pub(crate) fn insert_checkpoint(&self) -> InsertCheckpoint {
+        InsertCheckpoint {
+            values_len: self.values.len(),
+            slots_len: self.slots.len(),
+            free_head: self.free_head,
+        }
+    }
+
+    /// Undo the most recent insertion before it is externally observable.
+    pub(crate) fn undo_insertion(
+        &mut self,
+        id: DenseId,
+        checkpoint: InsertCheckpoint,
+    ) -> Option<T> {
+        if self.values.len() != checkpoint.values_len.checked_add(1)?
+            || self.dense_to_slot.last().copied() != Some(id.index)
+            || self.indices(id)?.1 != checkpoint.values_len
+        {
+            return None;
+        }
+        let slot_index = usize::try_from(id.index).ok()?;
+        if let Some(free) = checkpoint.free_head {
+            if free != id.index || self.slots.len() != checkpoint.slots_len {
+                return None;
+            }
+            self.slots.get_mut(slot_index)?.state = SlotState::Free {
+                next: self.free_head,
+            };
+        } else if slot_index != checkpoint.slots_len
+            || self.slots.len() != checkpoint.slots_len.checked_add(1)?
+        {
+            return None;
+        } else {
+            self.slots.pop();
+        }
+        self.free_head = checkpoint.free_head;
+        self.dense_to_slot.pop();
+        self.values.pop()
+    }
     pub const fn new() -> Self {
         Self {
             values: Vec::new(),

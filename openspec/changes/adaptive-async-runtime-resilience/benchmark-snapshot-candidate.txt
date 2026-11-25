@@ -1,0 +1,11 @@
+   Compiling kapitsa-math v0.7.0 (/tmp/kapitsa-adaptive-async-runtime-resilience/crates/kapitsa-math)
+   Compiling kapitsa-core v0.7.0 (/tmp/kapitsa-adaptive-async-runtime-resilience/crates/kapitsa-core)
+   Compiling kapitsa v0.7.0 (/tmp/kapitsa-adaptive-async-runtime-resilience/crates/kapitsa)
+   Compiling snapshot-bench v0.1.0 (/tmp/kapitsa-snapshot-bench)
+    Finished `release` profile [optimized] target(s) in 11.33s
+     Running `target/release/snapshot-bench`
+sample=0 reads=100000 median_ns=30 p95_ns=40
+sample=1 reads=100000 median_ns=30 p95_ns=30
+sample=2 reads=100000 median_ns=30 p95_ns=30
+sample=3 reads=100000 median_ns=30 p95_ns=30
+sample=4 reads=100000 median_ns=30 p95_ns=31

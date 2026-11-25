@@ -1,0 +1,12 @@
+   Compiling kapitsa-core v0.7.0 (/tmp/kapitsa-runtime-baseline/crates/kapitsa-core)
+   Compiling kapitsa v0.7.0 (/tmp/kapitsa-runtime-baseline/crates/kapitsa)
+    Finished `bench` profile [optimized] target(s) in 9.13s
+     Running benches/collisions.rs (target/release/deps/collisions-03b658d89f34b9bb)
+Kapitsa collision baseline: warmups=1, samples=5, steps=8, statistics=min/median/max
+256 body step                3.66/    3.69/    4.03 ms min/median/max / 8 steps  speedup=1.00x
+4096 body step              58.09/   58.25/   59.97 ms min/median/max / 8 steps  speedup=1.00x
+20000 body step            258.63/  259.87/  265.60 ms min/median/max / 8 steps  speedup=1.00x
+
+Independent GJK CCD islands (one step/sample)
+256 bodies, median=5.839 ms
+1024 bodies, median=24.337 ms

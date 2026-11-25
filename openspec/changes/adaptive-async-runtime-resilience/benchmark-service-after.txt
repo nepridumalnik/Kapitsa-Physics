@@ -1,0 +1,12 @@
+   Compiling kapitsa v0.7.0 (/tmp/kapitsa-adaptive-async-runtime-resilience/crates/kapitsa)
+   Compiling resilience-service-benchmark v0.1.0 (/tmp/kapitsa-adaptive-async-runtime-resilience/openspec/changes/adaptive-async-runtime-resilience/service-benchmark)
+    Finished `release` profile [optimized] target(s) in 3.65s
+     Running `target/release/resilience-service-benchmark`
+scenario=ordinary repetition=1 committed_ns=200000000 wall_ns=204849492 warp=0.976 steps=96 observed=21 step_median_ns=1192 step_p95_ns=5921 snapshot_median_ns=130 snapshot_p95_ns=321 max_debt_ns=0 retries=0
+scenario=ordinary repetition=2 committed_ns=200000000 wall_ns=205953687 warp=0.971 steps=91 observed=21 step_median_ns=1373 step_p95_ns=5149 snapshot_median_ns=141 snapshot_p95_ns=411 max_debt_ns=0 retries=0
+scenario=ordinary repetition=3 committed_ns=200000000 wall_ns=201972068 warp=0.990 steps=88 observed=19 step_median_ns=1092 step_p95_ns=5710 snapshot_median_ns=130 snapshot_p95_ns=271 max_debt_ns=0 retries=0
+scenario=ordinary repetition=4 committed_ns=200000000 wall_ns=205204617 warp=0.975 steps=95 observed=18 step_median_ns=1011 step_p95_ns=2394 snapshot_median_ns=140 snapshot_p95_ns=421 max_debt_ns=0 retries=0
+scenario=ordinary repetition=5 committed_ns=200000000 wall_ns=206075092 warp=0.971 steps=103 observed=22 step_median_ns=1353 step_p95_ns=5490 snapshot_median_ns=140 snapshot_p95_ns=381 max_debt_ns=0 retries=0
+scenario=contact repetition=1 committed_ns=200000000 wall_ns=204563756 warp=0.978 steps=460 observed=23 step_median_ns=2545 step_p95_ns=5059 snapshot_median_ns=130 snapshot_p95_ns=321 max_debt_ns=0 retries=0
+scenario=contact repetition=2 committed_ns=200000000 wall_ns=212435157 warp=0.941 steps=484 observed=25 step_median_ns=2594 step_p95_ns=5971 snapshot_median_ns=151 snapshot_p95_ns=351 max_debt_ns=0 retries=0
+scenario=contact repetition=3 committed_ns=200000000 wall_ns=208384278 warp=0.960 steps=435 observed=21 step_median_ns=2385 step_p95_ns=5270 snapshot_median_ns=131 snapshot_p95_ns=330 max_debt_ns=0 retries=0

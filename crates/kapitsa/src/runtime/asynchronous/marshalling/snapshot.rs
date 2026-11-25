@@ -10,7 +10,7 @@ use std::{
 
 use kapitsa_core::{
     rigid_body::BodyState,
-    world::{BodyId, PhysicsWorld},
+    world::{BodyId, PhysicsWorld, StepDiagnostics},
 };
 
 #[derive(Clone, Copy)]
@@ -24,13 +24,15 @@ enum SnapshotIndex {
     Sparse(HashMap<BodyId, usize>),
 }
 
-/// Immutable body states published after a successful simulation step.
+/// Immutable body states published at a committed step or command boundary.
 ///
 /// Body lookup uses the complete world-scoped generational ID, so IDs from
 /// other worlds and stale IDs cannot resolve to a live body.
 pub struct PhysicsSnapshot {
     step: u64,
+    revision: u64,
     simulation_time: Duration,
+    diagnostics: StepDiagnostics,
     entries: Vec<SnapshotEntry>,
     index: SnapshotIndex,
 }
@@ -39,7 +41,9 @@ impl PhysicsSnapshot {
     fn empty() -> Self {
         Self {
             step: 0,
+            revision: 0,
             simulation_time: Duration::ZERO,
+            diagnostics: StepDiagnostics::default(),
             entries: Vec::new(),
             index: SnapshotIndex::Sparse(HashMap::new()),
         }
@@ -92,6 +96,7 @@ impl PhysicsSnapshot {
     }
 
     pub(crate) fn rebuild(&mut self, world: &PhysicsWorld, step: u64, simulation_time: Duration) {
+        self.diagnostics = world.step_diagnostics();
         let body_count = world.body_count();
         if body_count != 0 && body_count == self.entries.len() {
             let mut same_order = true;
@@ -141,9 +146,23 @@ impl PhysicsSnapshot {
         self.step
     }
 
+    /// Returns the monotonically increasing publication revision.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub(crate) fn set_revision(&mut self, revision: u64) {
+        self.revision = revision;
+    }
+
     /// Returns accumulated simulated time represented by this snapshot.
     pub fn simulation_time(&self) -> Duration {
         self.simulation_time
+    }
+
+    /// Returns diagnostics from the latest committed physics step.
+    pub fn step_diagnostics(&self) -> StepDiagnostics {
+        self.diagnostics
     }
 
     /// Looks up a body by its complete world-scoped generational ID in expected O(1) time.
@@ -256,6 +275,64 @@ mod tests {
     use kapitsa_math::Vec3;
 
     use super::PhysicsSnapshot;
+
+    #[test]
+    fn snapshot_keeps_committed_diagnostics_after_world_advances()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use kapitsa_core::{
+            collider::Collider,
+            collision::{CcdLimitPolicy, CollisionConfig},
+            mass::MassProperties,
+            material::PhysicsMaterial,
+            rigid_body::CcdMode,
+            shape::{Cuboid, Shape, Sphere},
+        };
+        use kapitsa_math::{Mat3, Quat};
+        let mut world = PhysicsWorld::new();
+        let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+        for x in [0.0, 10.0] {
+            let wall = world.add_body(RigidBody::new_static(Transform::new(
+                Vec3::X * x,
+                Quat::IDENTITY,
+            )?))?;
+            let collider = world.add_collider(
+                wall,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+                    Transform::identity(),
+                ),
+            )?;
+            world.set_collider_material(collider, Some(material))?;
+        }
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::X * 5.0, Quat::IDENTITY)?,
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+        )?;
+        body.set_linear_velocity(Vec3::X * -2000.0)?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let id = world.add_body(body)?;
+        let collider = world.add_collider(
+            id,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?;
+        world.set_collider_material(collider, Some(material))?;
+        world.set_collision_config(
+            CollisionConfig::builder()
+                .max_ccd_impacts(1)
+                .ccd_limit_policy(CcdLimitPolicy::ClipIsland)
+                .build(),
+        )?;
+        world.step(0.01)?;
+        let mut snapshot = PhysicsSnapshot::from_world(&world, 1, Duration::from_millis(10));
+        assert!(snapshot.step_diagnostics().used_fallback());
+        assert_eq!(snapshot.step_diagnostics(), world.step_diagnostics());
+        world.step(0.001)?;
+        assert!(snapshot.step_diagnostics().used_fallback());
+        assert!(!world.step_diagnostics().used_fallback());
+        snapshot.rebuild(&world, 2, Duration::from_millis(11));
+        assert_eq!(snapshot.step_diagnostics(), world.step_diagnostics());
+        Ok(())
+    }
 
     fn add_bodies(world: &mut PhysicsWorld, count: usize) -> Vec<kapitsa_core::world::BodyId> {
         (0..count)

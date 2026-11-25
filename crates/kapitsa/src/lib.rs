@@ -170,8 +170,9 @@ pub use kapitsa_core::{
 };
 
 pub use runtime::{
-    AdaptiveTimeStepConfig, ConfigError, SchedulerConfig, SimulationConfig, SimulationMetrics,
-    SimulationState, StepMeasurement, StepStats, TimeStepPolicy, WorkerConfig, WorkerConfigError,
+    AdaptiveTimeStepConfig, ConfigError, RecoveryBlock, RecoveryConfig, RecoveryStatus,
+    SchedulerConfig, SimulationConfig, SimulationMetrics, SimulationState, StepMeasurement,
+    StepRecoveryPolicy, StepStats, TimeStepPolicy, WorkerConfig, WorkerConfigError,
 };
 
 #[cfg(feature = "service")]

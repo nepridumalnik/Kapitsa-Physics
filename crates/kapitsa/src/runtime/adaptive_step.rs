@@ -8,7 +8,7 @@ use kapitsa_core::{
 };
 use kapitsa_math::Vec3;
 
-use super::config::{AdaptiveTimeStepConfig, SimulationConfig};
+use super::config::{AdaptiveTimeStepConfig, SimulationConfig, StepRecoveryPolicy};
 
 #[derive(Debug)]
 pub(super) enum StepChoice {
@@ -32,36 +32,78 @@ pub(super) fn choose_step(
         return StepChoice::Wait;
     };
 
-    if accumulated < adaptive.minimum_step {
+    let resilient_floor = match config.step_recovery_policy {
+        StepRecoveryPolicy::FailFast => None,
+        StepRecoveryPolicy::Resilient(recovery) => Some(recovery.minimum_step),
+    };
+    let minimum = resilient_floor.unwrap_or(adaptive.minimum_step);
+    if accumulated < minimum {
         return StepChoice::Wait;
     }
 
-    let mut limit = target_step
-        .max(adaptive.minimum_step)
-        .min(accumulated)
-        .min(adaptive.maximum_step)
-        .as_secs_f64();
+    let mut limit = adaptive.maximum_step.as_secs_f64();
     let characteristic_length = estimate_motion_limit(world, *adaptive, &mut limit);
     estimate_acceleration_limit(world, *adaptive, characteristic_length, &mut limit);
     estimate_contact_limit(world, base_step, &mut limit);
     estimate_joint_limit(world, *adaptive, base_step, &mut limit);
 
-    if limit < adaptive.minimum_step.as_secs_f64() {
-        return if accumulated >= adaptive.minimum_step {
+    if limit < minimum.as_secs_f64() {
+        return if accumulated >= minimum {
             StepChoice::Limited
         } else {
             StepChoice::Wait
         };
     }
 
-    let Ok(step) = Duration::try_from_secs_f64(limit) else {
+    let target = target_step
+        .max(minimum)
+        .min(accumulated)
+        .min(adaptive.maximum_step);
+    if resilient_floor.is_none() {
+        limit = limit.min(target.as_secs_f64());
+    }
+    let physical_step = if resilient_floor.is_some() {
+        duration_floor(limit)
+    } else {
+        Duration::try_from_secs_f64(limit).ok()
+    };
+    let Some(physical_step) = physical_step else {
         return StepChoice::Limited;
     };
-    if step < adaptive.minimum_step {
+    let step = physical_step.min(target);
+    if step < minimum {
         StepChoice::Wait
     } else {
         StepChoice::Step(step)
     }
+}
+
+pub(super) fn choose_scheduled_step(
+    world: &PhysicsWorld,
+    config: &SimulationConfig,
+    target_step: Duration,
+    accumulated: Duration,
+    base_step: Duration,
+    horizon_remaining: Option<Duration>,
+) -> StepChoice {
+    let choice = choose_step(world, config, target_step, accumulated, base_step);
+    if let (
+        StepRecoveryPolicy::Resilient(_),
+        super::config::TimeStepPolicy::Adaptive(adaptive),
+        StepChoice::Step(step),
+    ) = (
+        config.step_recovery_policy,
+        config.time_step_policy,
+        &choice,
+    ) && accumulated < adaptive.minimum_step
+        && horizon_remaining.is_none_or(|remaining| remaining > accumulated)
+    {
+        let preferred = choose_step(world, config, target_step, adaptive.minimum_step, base_step);
+        if matches!(preferred, StepChoice::Step(physical) if physical > *step) {
+            return StepChoice::Wait;
+        }
+    }
+    choice
 }
 
 fn estimate_motion_limit(
@@ -465,6 +507,52 @@ fn cap(limit: &mut f64, candidate: f64) {
     }
 }
 
+fn duration_floor(seconds: f64) -> Option<Duration> {
+    if seconds.is_nan() || seconds < 0.0 || seconds.is_infinite() {
+        return None;
+    }
+    if seconds == 0.0 {
+        return Some(Duration::ZERO);
+    }
+    let rounded = Duration::try_from_secs_f64(seconds).ok()?;
+    if !duration_within_f64(rounded, seconds) {
+        rounded.checked_sub(Duration::from_nanos(1))
+    } else {
+        Some(rounded)
+    }
+}
+
+fn duration_within_f64(duration: Duration, seconds: f64) -> bool {
+    let whole = seconds.trunc() as u64;
+    if duration.as_secs() != whole {
+        return duration.as_secs() < whole;
+    }
+    // The fractional part of a nonnegative finite f64 is exact; comparing
+    // integer nanoseconds against its exact binary rational avoids a rounded
+    // `Duration::as_secs_f64` turning an unsafe step into an apparent tie.
+    let fraction = seconds.fract();
+    if fraction == 0.0 {
+        return duration.subsec_nanos() == 0;
+    }
+    let bits = fraction.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let significand = if exponent == 0 {
+        bits & ((1_u64 << 52) - 1)
+    } else {
+        (1_u64 << 52) | (bits & ((1_u64 << 52) - 1))
+    };
+    let shift = if exponent == 0 {
+        1074
+    } else {
+        (1075 - exponent) as u32
+    };
+    let nanos = u128::from(duration.subsec_nanos());
+    if shift >= 128 || nanos > (u128::MAX >> shift) {
+        return nanos == 0;
+    }
+    (nanos << shift) <= u128::from(significand) * 1_000_000_000
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -485,8 +573,10 @@ mod tests {
     };
     use kapitsa_math::{Mat3, Quat, Vec3};
 
-    use super::{StepChoice, choose_step};
-    use crate::runtime::{AdaptiveTimeStepConfig, SimulationConfig, TimeStepPolicy};
+    use super::{StepChoice, choose_step, duration_floor, duration_within_f64};
+    use crate::runtime::{
+        AdaptiveTimeStepConfig, SimulationConfig, StepRecoveryPolicy, TimeStepPolicy,
+    };
 
     fn adaptive_config() -> SimulationConfig {
         SimulationConfig {
@@ -1610,6 +1700,144 @@ mod tests {
             choose_step(&world, &config, target, Duration::from_secs(1), base),
             StepChoice::Limited
         ));
+    }
+
+    #[test]
+    fn resilient_step_progresses_below_the_preferred_minimum()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = adaptive_config();
+        config.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig {
+            minimum_step: Duration::from_millis(5),
+            maximum_step: Duration::from_millis(10),
+            relative_error_tolerance: 0.01,
+        });
+        config.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(super::super::config::RecoveryConfig::default());
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut moving = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        moving.set_linear_velocity(Vec3::X * 100.0)?;
+        let body = world.add_body(moving)?;
+        world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?;
+        let selected = choose_step(
+            &world,
+            &config,
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+            config.step_budget(),
+        );
+        assert!(
+            matches!(selected, StepChoice::Step(step) if !step.is_zero() && step <= Duration::from_nanos(866_025)),
+            "{selected:?}"
+        );
+        let scheduled = super::choose_scheduled_step(
+            &world,
+            &config,
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+            config.step_budget(),
+            None,
+        );
+        assert!(
+            matches!(scheduled, StepChoice::Step(step) if !step.is_zero() && step <= Duration::from_nanos(866_025))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resilient_scheduler_waits_for_preferred_demand_when_physics_allows_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = adaptive_config();
+        config.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig {
+            minimum_step: Duration::from_millis(5),
+            maximum_step: Duration::from_millis(10),
+            relative_error_tolerance: 0.01,
+        });
+        config.step_recovery_policy =
+            StepRecoveryPolicy::Resilient(super::super::config::RecoveryConfig::default());
+        let world = PhysicsWorld::new();
+        assert!(matches!(
+            super::choose_scheduled_step(
+                &world,
+                &config,
+                Duration::from_millis(10),
+                Duration::from_micros(50),
+                config.step_budget(),
+                None
+            ),
+            StepChoice::Wait
+        ));
+        assert!(
+            matches!(super::choose_scheduled_step(&world, &config, Duration::from_millis(10), Duration::from_micros(50), config.step_budget(), Some(Duration::from_micros(50))), StepChoice::Step(step) if step == Duration::from_micros(50))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resilient_step_observes_floor_short_demand_and_duration_rounding()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = adaptive_config();
+        config.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig {
+            minimum_step: Duration::from_millis(5),
+            maximum_step: Duration::from_millis(10),
+            relative_error_tolerance: 0.01,
+        });
+        config.step_recovery_policy = StepRecoveryPolicy::Resilient(
+            super::super::config::RecoveryConfig::builder()
+                .minimum_step(Duration::from_micros(10))
+                .build(),
+        );
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut moving = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        moving.set_linear_velocity(Vec3::X * 10_000.0)?;
+        let body = world.add_body(moving)?;
+        world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?;
+        let base = config.step_budget();
+        assert!(matches!(
+            choose_step(
+                &world,
+                &config,
+                Duration::from_millis(10),
+                Duration::from_millis(10),
+                base
+            ),
+            StepChoice::Limited
+        ));
+        assert!(matches!(
+            choose_step(
+                &world,
+                &config,
+                Duration::from_millis(10),
+                Duration::from_micros(9),
+                base
+            ),
+            StepChoice::Wait
+        ));
+        let empty = PhysicsWorld::new();
+        assert!(
+            matches!(choose_step(&empty, &config, Duration::from_millis(10), Duration::from_micros(11), base), StepChoice::Step(step) if step == Duration::from_micros(11))
+        );
+        assert_eq!(duration_floor(1.9e-9), Some(Duration::from_nanos(1)));
+        assert_eq!(duration_floor(0.4e-9), Some(Duration::ZERO));
+        assert_eq!(duration_floor(f64::INFINITY), None);
+        assert_eq!(duration_floor(f64::MAX), None);
+        assert!(!duration_within_f64(Duration::from_nanos(2), 1.9e-9));
+        assert!(duration_within_f64(Duration::from_nanos(1), 1.9e-9));
+        let large = 9_007_199.254_740_993_f64;
+        let floored = duration_floor(large).ok_or("representable duration")?;
+        assert!(duration_within_f64(floored, large));
+        assert!(!duration_within_f64(
+            floored + Duration::from_nanos(1),
+            large
+        ));
+        Ok(())
     }
 
     #[test]

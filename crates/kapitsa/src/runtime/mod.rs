@@ -15,6 +15,8 @@ pub mod metrics;
 mod modular_rocket_fixture;
 mod physics_system;
 mod planner;
+#[cfg(feature = "service")]
+mod recovery;
 pub use physics_system::{PhysicsSystem, PhysicsSystemBuilder};
 #[cfg(all(test, feature = "service"))]
 mod sync;
@@ -65,13 +67,16 @@ mod bench_counter_tests {
 }
 
 pub use config::{
-    AdaptiveTimeStepConfig, ConfigError, SchedulerConfig, SimulationConfig, TimeStepPolicy,
+    AdaptiveTimeStepConfig, ConfigError, RecoveryConfig, SchedulerConfig, SimulationConfig,
+    StepRecoveryPolicy, TimeStepPolicy,
 };
 #[cfg(feature = "parallel")]
 pub use executor::RayonExecutor;
 #[cfg(feature = "service")]
 pub use executor::{RayonPool, RayonPoolError};
-pub use metrics::{SimulationMetrics, SimulationState, StepMeasurement, StepStats};
+pub use metrics::{
+    RecoveryBlock, RecoveryStatus, SimulationMetrics, SimulationState, StepMeasurement, StepStats,
+};
 pub use planner::{WorkerConfig, WorkerConfigError};
 
 #[cfg(feature = "service")]

@@ -33,6 +33,56 @@ use super::{
 use crate::runtime::{PhysicsBatchResults, PhysicsSubmitError, SimulationConfig, WorkerConfig};
 use kapitsa_core::command::PhysicsCommandBuffer;
 
+#[test]
+#[ignore = "Release injected-rejection recovery benchmark"]
+fn benchmark_resilient_rejected_step() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::runtime::{
+        AdaptiveTimeStepConfig, RecoveryConfig, StepRecoveryPolicy, TimeStepPolicy,
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        for repetition in 0..6 {
+            let mut config = benchmark_config();
+            config.tick_rate = 100;
+            config.max_catch_up_steps = 1;
+            config.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+            config.step_recovery_policy = StepRecoveryPolicy::Resilient(RecoveryConfig::default());
+            let mut simulation = Simulation::new_from_config(config)?;
+            let body = simulation.simulation.as_mut().ok_or("runner")?.world_mut()?.add_body(benchmark_body(0, true)?)?;
+            simulation.simulation.as_mut().ok_or("runner")?.reject_steps_remaining = 1;
+            simulation.set_time_horizon(Some(Duration::from_millis(5)));
+            let client = simulation.client();
+            let mut reference = PhysicsWorld::new();
+            let reference_body = reference.add_body(benchmark_body(0, true)?)?;
+            simulation.start()?;
+            crate::runtime::asynchronous::marshalling::allocation_tracking::start();
+            let start = Instant::now();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while client.snapshot().simulation_time() < Duration::from_millis(5) {
+                    tokio::task::yield_now().await;
+                }
+            }).await?;
+            let wall = start.elapsed();
+            let (allocations, allocated_bytes, peak_extra, _) = crate::runtime::asynchronous::marshalling::allocation_tracking::stop();
+            let snapshot = client.snapshot();
+            let metrics = simulation.metrics();
+            reference.step(0.0025)?;
+            reference.step(0.0025)?;
+            assert_eq!(*snapshot.body(body).ok_or("body")?, *reference.body(reference_body).ok_or("reference")?.state());
+            assert_eq!(metrics.total_retries, 1);
+            assert_eq!(metrics.total_rejections, 1);
+            if repetition > 0 {
+                println!("repetition={repetition} committed_ns={} wall_ns={} steps={} attempts={} retries={} rejections={} debt_ns={} allocations={allocations} allocated_bytes={allocated_bytes} peak_extra_bytes={peak_extra}", snapshot.simulation_time().as_nanos(), wall.as_nanos(), snapshot.step(), metrics.total_attempts, metrics.total_retries, metrics.total_rejections, metrics.simulation_time_debt.as_nanos());
+            }
+            simulation.stop().await?;
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+}
+
 mod mission {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -796,12 +846,15 @@ fn benchmark_time_warp_scheduler_overhead() -> Result<(), Box<dyn std::error::Er
         println!("Rayon spawn + oneshot round trip: {min:.3}/{median:.3}/{max:.3} us/task");
 
         let mut runner_wall_samples = Vec::with_capacity(SAMPLES);
+        let mut runner_step_samples = Vec::with_capacity(SAMPLES * STEPS_PER_SAMPLE);
         let mut engine_samples = Vec::with_capacity(SAMPLES * STEPS_PER_SAMPLE);
         let mut task_wait_samples = Vec::with_capacity(SAMPLES * STEPS_PER_SAMPLE);
         for _ in 0..SAMPLES {
             let started = Instant::now();
             for _ in 0..STEPS_PER_SAMPLE {
+                let step_started = Instant::now();
                 let stats = black_box(runner.step().await?);
+                runner_step_samples.push(step_started.elapsed());
                 engine_samples.push(stats.step_duration);
                 task_wait_samples.push(stats.task_wait_duration);
             }
@@ -809,6 +862,12 @@ fn benchmark_time_warp_scheduler_overhead() -> Result<(), Box<dyn std::error::Er
         }
         let (min, median, max) = duration_stats_us(&runner_wall_samples);
         println!("StepRunner::step total: {min:.3}/{median:.3}/{max:.3} us/step");
+        println!(
+            "StepRunner individual wall p50/p95/p99={:.3}/{:.3}/{:.3} us",
+            duration_quantile_us(&runner_step_samples, 0.50),
+            duration_quantile_us(&runner_step_samples, 0.95),
+            duration_quantile_us(&runner_step_samples, 0.99),
+        );
         println!(
             "StepRunner engine CPU p50/p95/p99={:.3}/{:.3}/{:.3} us; dispatch+wait p50/p95/p99={:.3}/{:.3}/{:.3} us",
             duration_quantile_us(&engine_samples, 0.50),
@@ -969,7 +1028,7 @@ fn benchmark_time_warp_scheduler_overhead() -> Result<(), Box<dyn std::error::Er
         for _ in 0..SAMPLES {
             let started = Instant::now();
             for _ in 0..STEPS_PER_SAMPLE {
-                apply_queued_commands(runner, &mut queue)?;
+                apply_queued_commands(runner, &mut queue, false)?;
                 publish_command_results(&mut queue, &events);
             }
             command_samples.push(started.elapsed().div_f64(STEPS_PER_SAMPLE as f64));
@@ -1038,12 +1097,30 @@ fn print_runtime_report(report: &RuntimeReport) {
 #[test]
 #[ignore = "Release bounded-queue saturation benchmark; run with bench-internals"]
 fn benchmark_rocket_flight_runtime_queue_pressure() -> Result<(), Box<dyn std::error::Error>> {
+    benchmark_queue_pressure(false)
+}
+
+#[test]
+#[ignore = "Release resilient bounded-queue saturation benchmark"]
+fn benchmark_resilient_queue_pressure() -> Result<(), Box<dyn std::error::Error>> {
+    benchmark_queue_pressure(true)
+}
+
+fn benchmark_queue_pressure(resilient: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::runtime::{
+        AdaptiveTimeStepConfig, RecoveryConfig, StepRecoveryPolicy, TimeStepPolicy,
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let mut simulation = Simulation::new_from_config(benchmark_config())?;
+        let mut config = benchmark_config();
+        if resilient {
+            config.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
+            config.step_recovery_policy = StepRecoveryPolicy::Resilient(RecoveryConfig::default());
+        }
+        let mut simulation = Simulation::new_from_config(config)?;
         let body = {
             let runner = simulation
                 .simulation
@@ -1062,9 +1139,15 @@ fn benchmark_rocket_flight_runtime_queue_pressure() -> Result<(), Box<dyn std::e
             .map_err(|error| io::Error::other(error.to_string()))?;
         let client = simulation.client();
         let mut results = client.subscribe_batch_results();
-        simulation.set_time_multiplier(0.0)?;
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        simulation
+            .simulation
+            .as_mut()
+            .ok_or_else(|| io::Error::other("missing step runner"))?
+            .gate_next_step(entered_tx, release_rx);
         simulation.start()?;
-        tokio::task::yield_now().await;
+        tokio::time::timeout(Duration::from_secs(10), entered_rx).await??;
 
         crate::runtime::asynchronous::marshalling::allocation_tracking::start();
         let mut writers = tokio::task::JoinSet::new();
@@ -1116,7 +1199,16 @@ fn benchmark_rocket_flight_runtime_queue_pressure() -> Result<(), Box<dyn std::e
             return Err(io::Error::other("bounded queue did not reach its expected full state").into());
         }
 
-        simulation.set_time_multiplier(1.0)?;
+        let completion_started = Instant::now();
+        release_tx.send(())?;
+        let first = tokio::time::timeout(Duration::from_secs(30), results.next_result()).await??;
+        let mut latencies = Vec::with_capacity(COMMAND_QUEUE_CAPACITY + 1);
+        let mut failures = 0usize;
+        match accepted.remove(&first.batch_id.get()) {
+            Some(submitted_at) if first.result.is_ok() => latencies.push(submitted_at.elapsed()),
+            Some(_) => failures += 1,
+            None => return Err(io::Error::other("received an unknown batch result").into()),
+        }
         let mut overflow = overflow.ok_or_else(|| io::Error::other("no QueueFull buffer was returned"))?;
         let (overflow_id, overflow_submitted_at) = loop {
             match client.try_submit(overflow) {
@@ -1134,10 +1226,7 @@ fn benchmark_rocket_flight_runtime_queue_pressure() -> Result<(), Box<dyn std::e
         };
         accepted.insert(overflow_id.get(), overflow_submitted_at);
 
-        let completion_started = Instant::now();
-        let mut latencies = Vec::with_capacity(COMMAND_QUEUE_CAPACITY + 1);
-        let mut failures = 0usize;
-        for _ in 0..COMMAND_QUEUE_CAPACITY + 1 {
+        for _ in 0..COMMAND_QUEUE_CAPACITY {
             let result = tokio::time::timeout(Duration::from_secs(30), results.next_result())
                 .await
                 .map_err(|_| io::Error::other("queued command results timed out"))??;

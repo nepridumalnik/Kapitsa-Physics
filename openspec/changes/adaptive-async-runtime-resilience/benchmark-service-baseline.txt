@@ -1,0 +1,18 @@
+   Compiling resilience-service-benchmark v0.1.0 (/tmp/kapitsa-service-benchmark)
+    Finished `release` profile [optimized] target(s) in 0.68s
+     Running `target/release/resilience-service-benchmark`
+scenario=ordinary repetition=1 committed_ns=200000000 wall_ns=203726281 warp=0.982 steps=87 observed=18 step_median_ns=1152 step_p95_ns=1673 snapshot_median_ns=130 snapshot_p95_ns=341 max_debt_ns=0 retries=0
+scenario=ordinary repetition=2 committed_ns=200000000 wall_ns=202883979 warp=0.986 steps=92 observed=18 step_median_ns=1132 step_p95_ns=1823 snapshot_median_ns=121 snapshot_p95_ns=291 max_debt_ns=0 retries=0
+scenario=ordinary repetition=3 committed_ns=200000000 wall_ns=204083681 warp=0.980 steps=86 observed=19 step_median_ns=1162 step_p95_ns=5160 snapshot_median_ns=141 snapshot_p95_ns=311 max_debt_ns=0 retries=0
+scenario=ordinary repetition=4 committed_ns=200000000 wall_ns=204804980 warp=0.977 steps=85 observed=18 step_median_ns=1082 step_p95_ns=1774 snapshot_median_ns=130 snapshot_p95_ns=361 max_debt_ns=0 retries=0
+scenario=ordinary repetition=5 committed_ns=200000000 wall_ns=203218385 warp=0.984 steps=79 observed=19 step_median_ns=1212 step_p95_ns=5700 snapshot_median_ns=150 snapshot_p95_ns=401 max_debt_ns=0 retries=0
+scenario=contact repetition=1 committed_ns=200000000 wall_ns=206764112 warp=0.967 steps=323 observed=21 step_median_ns=2184 step_p95_ns=11701 snapshot_median_ns=120 snapshot_p95_ns=321 max_debt_ns=0 retries=0
+scenario=contact repetition=2 committed_ns=200000000 wall_ns=210481615 warp=0.950 steps=474 observed=27 step_median_ns=3076 step_p95_ns=10669 snapshot_median_ns=120 snapshot_p95_ns=290 max_debt_ns=0 retries=0
+scenario=contact repetition=3 committed_ns=200000000 wall_ns=209170689 warp=0.956 steps=404 observed=23 step_median_ns=2575 step_p95_ns=5029 snapshot_median_ns=150 snapshot_p95_ns=330 max_debt_ns=0 retries=0
+scenario=contact repetition=4 committed_ns=200000000 wall_ns=201732395 warp=0.991 steps=524 observed=21 step_median_ns=2795 step_p95_ns=8035 snapshot_median_ns=140 snapshot_p95_ns=340 max_debt_ns=0 retries=0
+scenario=contact repetition=5 committed_ns=200000000 wall_ns=202031146 warp=0.990 steps=658 observed=24 step_median_ns=2614 step_p95_ns=5189 snapshot_median_ns=130 snapshot_p95_ns=280 max_debt_ns=0 retries=0
+scenario=overload repetition=1 committed_ns=200000000 wall_ns=11707355 warp=17.083 steps=1 observed=1 step_median_ns=4539 step_p95_ns=4539 snapshot_median_ns=130 snapshot_p95_ns=290 max_debt_ns=0 retries=0
+scenario=overload repetition=2 committed_ns=200000000 wall_ns=11772223 warp=16.989 steps=1 observed=1 step_median_ns=6291 step_p95_ns=6291 snapshot_median_ns=180 snapshot_p95_ns=291 max_debt_ns=0 retries=0
+scenario=overload repetition=3 committed_ns=200000000 wall_ns=11692256 warp=17.105 steps=1 observed=1 step_median_ns=6111 step_p95_ns=6111 snapshot_median_ns=111 snapshot_p95_ns=301 max_debt_ns=0 retries=0
+scenario=overload repetition=4 committed_ns=200000000 wall_ns=12870820 warp=15.539 steps=1 observed=1 step_median_ns=5900 step_p95_ns=5900 snapshot_median_ns=121 snapshot_p95_ns=250 max_debt_ns=0 retries=0
+scenario=overload repetition=5 committed_ns=200000000 wall_ns=12768831 warp=15.663 steps=1 observed=1 step_median_ns=5891 step_p95_ns=5891 snapshot_median_ns=101 snapshot_p95_ns=300 max_debt_ns=0 retries=0
