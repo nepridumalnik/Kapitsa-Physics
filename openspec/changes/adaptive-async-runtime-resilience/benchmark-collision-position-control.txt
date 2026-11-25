@@ -1,0 +1,8 @@
+Kapitsa collision baseline: warmups=1, samples=5, steps=8, statistics=min/median/max
+256 body step                3.71/    3.76/    3.95 ms min/median/max / 8 steps  speedup=1.00x
+4096 body step              60.05/   60.29/   61.16 ms min/median/max / 8 steps  speedup=1.00x
+20000 body step            261.62/  264.57/  272.76 ms min/median/max / 8 steps  speedup=1.00x
+
+Independent GJK CCD islands (one step/sample)
+256 bodies, median=5.873 ms
+1024 bodies, median=24.717 ms

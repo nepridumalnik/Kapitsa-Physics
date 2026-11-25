@@ -490,3 +490,23 @@ the baseline passed. Its loop checked `snapshot()` and then called
 race if the final horizon publication arrives between those calls. The test now
 waits on the same horizon condition under a single timeout without changing its
 state, time, or step assertions; the focused service suite passed afterward.
+# Follow-up verification: zero-impulse CCD correction
+
+The baseline landing failure can occur when the contact solver makes positional
+progress without increasing the normal impulse. A candidate correction checks
+for an initially overlapping zero-time contact, improved normal separation and
+non-approaching post-solve velocity. The 500-frame landing regression, 61 CCD
+tests, a focused positive/negative progress test, and both full workspace test
+configurations passed. `overlapping_resting_ccd_mesh_contacts_match_parallel_execution`
+reproduces the failing state across 16 independent mesh contacts, checks matching
+sequential and parallel states/events, and verifies parallel island execution.
+Temporarily rejecting zero-impulse corrections in either path makes it fail
+with `NonConvergent`; the instrumentation was removed after the checks.
+
+On the same host, consecutive release collision benchmarks (one warmup, five
+samples) recorded control/candidate medians of 3.76/3.74 ms (256 bodies),
+60.29/62.13 ms (4096), 264.57/267.83 ms (20000), and 5.873/5.987 ms
+and 24.717/24.966 ms for 256 and 1024 independent CCD islands. Raw results
+are in `benchmark-collision-position-control.txt` and
+`benchmark-collision-position-progress.txt`; timing noise and different source
+revisions limit attribution. The queue test was isolated in commit `7f40aab`.

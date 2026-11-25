@@ -11,7 +11,7 @@ use crate::{
         ContactManifold, ContactPoint, NarrowPhase,
     },
     execution::StepExecutor,
-    rigid_body::{BodyState, BodyType, CcdMode, predict, predict_from_state},
+    rigid_body::{BodyMotion, BodyState, BodyType, CcdMode, predict, predict_from_state},
     shape::Shape,
 };
 use kapitsa_math::Vec3;
@@ -35,6 +35,44 @@ fn contact_speed_roundoff(
         .max(1.0);
     kapitsa_math::numeric::roundoff_bound(scale, 32)
         .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
+}
+
+// A resting overlap may require positional projection without a velocity
+// impulse. Accept it only if the projection improves separation and the
+// corrected contact is not approaching beyond floating-point roundoff.
+fn zero_impulse_position_progress(
+    hit: &CcdHit,
+    body_a: BodyMotion,
+    body_b: BodyMotion,
+    solved_a: BodyState,
+    solved_b: BodyState,
+    manifold: &ContactManifold,
+) -> Result<bool, crate::Error> {
+    let point = manifold
+        .points()
+        .first()
+        .ok_or(CollisionError::InvalidContact)?;
+    let point_a = solved_a.transform().transform_point(point.local_a);
+    let point_b = solved_b.transform().transform_point(point.local_b);
+    let original = hit
+        .point_b
+        .checked_sub(hit.point_a)
+        .and_then(|v| v.checked_dot(hit.normal))
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let corrected = point_b
+        .checked_sub(point_a)
+        .and_then(|v| v.checked_dot(hit.normal))
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let velocity_a = body_point_velocity(body_a, solved_a, point_a)?;
+    let velocity_b = body_point_velocity(body_b, solved_b, point_b)?;
+    let normal_speed = velocity_b
+        .checked_sub(velocity_a)
+        .and_then(|v| v.checked_dot(hit.normal))
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    Ok(hit.toi == 0.0
+        && original < 0.0
+        && corrected > original
+        && normal_speed >= -contact_speed_roundoff(velocity_a, velocity_b, solved_a, solved_b)?)
 }
 
 impl PhysicsWorld {
@@ -630,7 +668,16 @@ impl PhysicsWorld {
                     if !normal_impulse.is_finite() || !impulse_delta.is_finite() {
                         return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
                     }
-                    if impulse_delta <= 0.0 {
+                    if impulse_delta <= 0.0
+                        && !zero_impulse_position_progress(
+                            &hit,
+                            body_a,
+                            body_b,
+                            solved_a,
+                            solved_b,
+                            &solved_manifold,
+                        )?
+                    {
                         return Err(crate::Error::from(CollisionError::NonConvergent));
                     }
                     self.collision_system
@@ -667,12 +714,14 @@ impl PhysicsWorld {
                                 penetration: solved_point.penetration,
                                 normal_impulse,
                             }),
-                            impact: true,
+                            impact: impulse_delta > 0.0,
                         },
                     )?;
                     #[cfg(feature = "bench-internals")]
                     {
-                        self.collision_system.record_ccd_impact();
+                        if impulse_delta > 0.0 {
+                            self.collision_system.record_ccd_impact();
+                        }
                         self.collision_system
                             .record_ccd_contact_resolution(contact_resolution_started.elapsed());
                     }
@@ -1001,7 +1050,9 @@ impl PhysicsWorld {
             self.mark_ccd_pair_processed(impact.pair, impact.impact_elapsed, time_tolerance)?;
             #[cfg(feature = "bench-internals")]
             {
-                self.collision_system.record_ccd_impact();
+                if impact.interaction.impact {
+                    self.collision_system.record_ccd_impact();
+                }
                 self.collision_system
                     .record_ccd_contact_resolution(impact.solve_time);
                 self.collision_system
@@ -1254,7 +1305,16 @@ impl PhysicsWorld {
         if !normal_impulse.is_finite() || !impulse_delta.is_finite() {
             return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
-        if impulse_delta <= 0.0 {
+        if impulse_delta <= 0.0
+            && !zero_impulse_position_progress(
+                &hit,
+                body_a,
+                body_b,
+                solved_a,
+                solved_b,
+                &solved_manifold,
+            )?
+        {
             return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         let solved_point = solved_manifold
@@ -1295,7 +1355,7 @@ impl PhysicsWorld {
                     penetration: solved_point.penetration,
                     normal_impulse,
                 }),
-                impact: true,
+                impact: impulse_delta > 0.0,
             },
             #[cfg(feature = "bench-internals")]
             solve_time,
@@ -2560,6 +2620,87 @@ impl PhysicsWorld {
                 self.collision_system.record_ccd_clipped_body();
             }
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod position_progress_tests {
+    use super::*;
+    use crate::{collider::Collider, rigid_body::RigidBody, shape::Sphere, transform::Transform};
+    use kapitsa_math::Quat;
+
+    #[test]
+    fn correction_requires_overlap_progress_and_nonapproaching_velocity() -> Result<(), crate::Error>
+    {
+        let mut world = PhysicsWorld::new();
+        let a = world.add_body(RigidBody::new_static(Transform::identity()))?;
+        let b = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
+        let shape = Shape::Sphere(Sphere::new(1.0)?);
+        let ca = world.add_collider(a, Collider::new(shape, Transform::identity()))?;
+        let cb = world.add_collider(
+            b,
+            Collider::new(Shape::Sphere(Sphere::new(1.0)?), Transform::identity()),
+        )?;
+        let pair = CollisionPair::new(ca, cb).ok_or(CollisionError::InvalidContact)?;
+        let hit = CcdHit {
+            toi: 0.0,
+            normal: Vec3::Y,
+            point_a: Vec3::ZERO,
+            point_b: -Vec3::Y * 0.01,
+        };
+        let mut manifold = ContactManifold::new(pair);
+        manifold.insert(
+            ContactPoint::from_world(
+                &Transform::identity(),
+                &Transform::identity(),
+                hit.point_a,
+                hit.point_b,
+                hit.normal,
+                0.01,
+                0,
+            )?,
+            Vec3::ZERO,
+        )?;
+        let body_a = BodyMotion::new_static(Transform::identity());
+        let mut body_b = BodyMotion::new_kinematic(Transform::identity());
+        let initial = *body_b.state();
+        body_b.set_transform(Transform::new(Vec3::Y * 0.005, Quat::IDENTITY)?)?;
+        assert!(zero_impulse_position_progress(
+            &hit,
+            body_a,
+            body_b,
+            *body_a.state(),
+            *body_b.state(),
+            &manifold
+        )?);
+        assert!(!zero_impulse_position_progress(
+            &hit,
+            body_a,
+            body_b,
+            *body_a.state(),
+            initial,
+            &manifold
+        )?);
+        body_b.set_linear_velocity(-Vec3::Y)?;
+        assert!(!zero_impulse_position_progress(
+            &hit,
+            body_a,
+            body_b,
+            *body_a.state(),
+            *body_b.state(),
+            &manifold
+        )?);
+        let later_hit = CcdHit { toi: 0.5, ..hit };
+        body_b.set_linear_velocity(Vec3::ZERO)?;
+        assert!(!zero_impulse_position_progress(
+            &later_hit,
+            body_a,
+            body_b,
+            *body_a.state(),
+            *body_b.state(),
+            &manifold
+        )?);
         Ok(())
     }
 }

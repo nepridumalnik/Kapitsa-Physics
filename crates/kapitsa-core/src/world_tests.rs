@@ -4859,6 +4859,91 @@ fn seeded_independent_ccd_stress_matches_across_worker_counts()
 }
 
 #[test]
+fn overlapping_resting_ccd_mesh_contacts_match_parallel_execution()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn fixture() -> Result<PhysicsWorld, Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        for index in 0..16 {
+            let offset = Vec3::new(f64::from(index) * 10.0, 0.0, 0.0);
+            let terrain = world.add_body(RigidBody::new_static(Transform::new(
+                offset,
+                Quat::IDENTITY,
+            )?))?;
+            let mesh = TriangleMesh::new(
+                vec![
+                    Vec3::new(-4.0, 0.0, -4.0),
+                    Vec3::new(-4.0, 0.0, 4.0),
+                    Vec3::new(4.0, 0.0, -4.0),
+                    Vec3::new(4.0, 0.0, 4.0),
+                ],
+                vec![[0, 1, 2], [2, 1, 3]],
+            )?;
+            world.add_collider(
+                terrain,
+                Collider::new(Shape::TriangleMesh(mesh), Transform::identity()),
+            )?;
+            let shape = Shape::Sphere(Sphere::new(0.5)?);
+            let mass = MassProperties::from_shape(&shape, 1000.0)?;
+            let mut body = RigidBody::new_dynamic(
+                Transform::new(
+                    offset + Vec3::new(0.0, 0.49488301722105243, 0.0),
+                    Quat::new(
+                        0.046935096721610156,
+                        -0.13341348444447113,
+                        -0.10182661294500514,
+                        -0.9846975575070073,
+                    ),
+                )?,
+                mass,
+            )?;
+            body.set_linear_velocity(Vec3::new(
+                1.495068051234299,
+                -1.1185496973098452e-14,
+                -0.31762955302109125,
+            ))?;
+            body.set_angular_velocity(Vec3::new(
+                -0.6352591060421824,
+                -0.049721466185059585,
+                -2.990136102468593,
+            ))?;
+            body.set_ccd_mode(CcdMode::Continuous);
+            body.apply_force(-Vec3::Y * (mass.mass() * 9.81))?;
+            let body = world.add_body(body)?;
+            world.add_collider(body, Collider::new(shape, Transform::identity()))?;
+        }
+        Ok(world)
+    }
+    let mut sequential = fixture()?;
+    sequential.step(0.02)?;
+    let mut parallel = fixture()?;
+    parallel.step_with_executor(0.02, &ScopedThreadExecutor, 4)?;
+    assert!(sequential.collision_events().iter().all(|event| {
+        event.kind != crate::collision::CollisionEventKind::Impact
+            || event
+                .contact
+                .is_some_and(|contact| contact.normal_impulse > 0.0)
+    }));
+    for ((_, actual), (_, expected)) in parallel.bodies().zip(sequential.bodies()) {
+        assert_eq!(actual.state(), expected.state());
+    }
+    assert_eq!(
+        parallel.collision_events().len(),
+        sequential.collision_events().len()
+    );
+    for (actual, expected) in parallel
+        .collision_events()
+        .iter()
+        .zip(sequential.collision_events())
+    {
+        assert_eq!(actual.kind, expected.kind);
+        assert_eq!(actual.contact, expected.contact);
+    }
+    #[cfg(feature = "bench-internals")]
+    assert!(parallel.collision_step_metrics().ccd_parallel_island_count >= 4);
+    Ok(())
+}
+
+#[test]
 fn parallel_ccd_abort_does_not_publish_completed_islands() -> Result<(), Box<dyn std::error::Error>>
 {
     const DT: f64 = 0.02;
