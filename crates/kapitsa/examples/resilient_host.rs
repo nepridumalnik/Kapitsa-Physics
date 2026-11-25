@@ -1,7 +1,7 @@
 use std::{error::Error, sync::Arc, time::Duration};
 
 use kapitsa::{
-    AdaptiveTimeStepConfig, MassProperties, RecoveryConfig, RigidBody, Simulation,
+    AdaptiveTimeStepConfig, CentralGravity, MassProperties, RecoveryConfig, RigidBody, Simulation,
     StepRecoveryPolicy, TimeStepPolicy, Transform,
     math::{Mat3, Vec3},
 };
@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::thread::sleep(Duration::from_millis(2));
     }
 
-    control.block_on(async {
+    let velocity_before_gravity = control.block_on(async {
         let result = results.next_result().await?;
         if Some(result.batch_id) != submitted {
             return Err("unexpected batch result".into());
@@ -61,8 +61,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         .await?;
         // The old horizon guarantees this acknowledgement precedes later physics.
-        physics.set_central_gravity(None).await?;
-        Ok::<_, Box<dyn Error>>(())
+        let velocity = physics
+            .snapshot()
+            .body(body)
+            .ok_or("missing body")?
+            .linear_velocity()
+            .x;
+        physics
+            .set_central_gravity(Some(CentralGravity::new(Vec3::X * -1000.0, 1_000_000.0)?))
+            .await?;
+        Ok::<_, Box<dyn Error>>(velocity)
     })?;
     simulation.set_time_horizon(Some(Duration::from_millis(200)));
     control.block_on(async {
@@ -72,6 +80,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         })
         .await?;
+        let velocity = physics
+            .snapshot()
+            .body(body)
+            .ok_or("missing body")?
+            .linear_velocity()
+            .x;
+        if velocity >= velocity_before_gravity {
+            return Err("updated gravity did not affect the committed motion".into());
+        }
         simulation.stop().await?;
         Ok::<_, Box<dyn Error>>(())
     })?;

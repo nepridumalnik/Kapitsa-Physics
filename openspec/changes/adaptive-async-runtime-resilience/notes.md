@@ -265,6 +265,54 @@ read latency, and its overload runs do not commit equal simulated time. It
 does not establish resilient high-speed/contact/overload performance, retry
 counts, or the required complete paired report, so 6.3 remains unchecked.
 
+Additional contact/CCD measurements: `cargo bench -p kapitsa --bench collisions`
+was run on `f603ae4` and `1fbd76c`, using the same release build, one warmup and
+five samples, eight 1/60 s contact steps or one 1/60 s CCD step per sample.
+The raw command outputs are in `benchmark-collision-baseline.txt` and
+`benchmark-collision-candidate.txt`. Median eight-step times for 256 / 4096 /
+20000 bodies were 3.69 / 58.25 / 259.87 ms baseline and 3.66 / 59.21 /
+260.33 ms candidate. The 256 / 1024-body CCD medians were 5.839 / 24.337 ms
+and 5.783 / 24.066 ms respectively. The existing benchmark prints aggregate
+min/median/max, and only a median for CCD; it does not retain raw individual
+samples or measure the service, so it does not satisfy task 6.3 by itself.
+Snapshot diagnostics were added subsequently in `779896e`; these core-only
+measurements do not assess that additional snapshot copy.
+
+Scenario audit against the delta specification (test names are reproducible via
+`cargo test -p kapitsa --features service NAME` unless noted):
+
+| Delta scenario | Evidence |
+| --- | --- |
+| Existing callers retain semantics | `explicit_step` integration suite; `applied_batch_reports_step_failure_without_rolling_back_commands` |
+| Invalid resilience configuration | `resilient_policy_requires_valid_adaptive_resource_bounds`; `invalid_recovery_policy_is_rejected_before_spawn` |
+| A queued mutation changes physical bounds | `resilient_step_uses_queued_impulse_force_and_joint_bounds` |
+| A safe step is below the preferred minimum | `resilient_step_progresses_below_the_preferred_minimum` |
+| No representable safe step | `resilient_step_observes_floor_short_demand_and_duration_rounding`; `unsafe_floor_blocks_until_motion_is_corrected` |
+| A short horizon remainder | `resilient_short_horizon_commits_exactly_its_remainder`; `pause_and_horizon_preempt_catchup_after_inflight_step` |
+| Transient numerical rejection | `resilient_retry_commits_only_the_successful_half_step`; `retry_matches_reference_contact_and_joint_step` |
+| Persistent failure | `exhausted_retries_block_without_spinning_and_corrective_command_resumes` |
+| Unknown or unrecoverable fault | `only_proven_causes_are_retryable`; `unverified_worker_failure_is_fatal_instead_of_retried` |
+| Executor failure | `intact_dispatch_failure_uses_bounded_backoff_before_retry`; `intact_dispatch_failure_stops_after_retry_budget`; `unverified_worker_failure_is_fatal_instead_of_retried` |
+| Failure after preparation or collision work | `kapitsa-core` tests `rejected_prediction_then_smaller_step_matches_reference_after_force_preparation` and `rejected_collision_work_then_smaller_step_matches_reference` |
+| A ready aerodynamic shape precedes a failed step | `kapitsa-core` test `failed_step_does_not_publish_a_ready_aerodynamic_shape` |
+| Impulse and force survive retry correctly | `retry_applies_impulse_and_one_shot_force_once_with_persistent_load` |
+| A command was applied but no step can commit | `stopping_after_rejection_resolves_applied_command_once`; `exhausted_retries_block_without_spinning_and_corrective_command_resumes`; `single_mutations_wait_for_snapshot_and_report_failed_step` |
+| A worker is gated | `retained_snapshot_and_lagging_events_do_not_block_stepping` |
+| Commands while blocked or horizon-limited | `pause_and_horizon_publish_distinct_revisions_without_step_events`; `unsafe_floor_blocks_until_motion_is_corrected` |
+| Slow subscriber | `lagged_batches_report_the_exact_loss_and_receiver_can_continue`; `retained_snapshot_and_lagging_events_do_not_block_stepping` |
+| Sustained overload | `sustained_overload_stays_bounded_and_advances_real_steps` |
+| Pause and resume | `pause_and_horizon_preempt_catchup_after_inflight_step`; `unsafe_floor_blocks_until_motion_is_corrected` |
+| Host uses a dedicated runtime | `owned_and_shared_pools_preserve_world_on_gated_stop_and_restart`; `resilient_host` example |
+| Corrective command resumes progress | `exhausted_retries_block_without_spinning_and_corrective_command_resumes` |
+| Host sets up environment at a boundary | `resilient_host` example; see limitation below |
+
+Audit: the host example now installs nonzero gravity at the acknowledged horizon
+and verifies its effect on subsequent committed velocity. A snapshot previously
+lacked its committed diagnostics; `779896e` adds
+them and `snapshot_keeps_committed_diagnostics_after_world_advances` verifies
+the snapshot retains the prior step's diagnostics after the world advances.
+Task 6.4 remains open while remaining verification is resolved.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the
