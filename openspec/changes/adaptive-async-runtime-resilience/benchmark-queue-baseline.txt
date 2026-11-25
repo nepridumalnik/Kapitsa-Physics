@@ -1,0 +1,46 @@
+   Compiling kapitsa v0.7.0 (/tmp/kapitsa-runtime-baseline/crates/kapitsa)
+    Finished `release` profile [optimized] target(s) in 8.53s
+     Running unittests src/lib.rs (target/release/deps/kapitsa-f01598a49a419ad0)
+
+running 1 test
+test runtime::asynchronous::service::benchmarks::benchmark_rocket_flight_runtime_queue_pressure ... queue pressure accepted=1025 full_rejections=8 overflow_buffer_len/cap=128/128 commands=131200 wall_ms=1065.339 ack_ms p50/p95/p99=535.445/1005.717/1047.092 failures=0 allocations=6658 requested_bytes=213232336 setup_live_heap_bytes=427840 peak_extra_live_bytes=108579792 peak_live_heap_bytes=109007632
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 1.09s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/kapitsa-f01598a49a419ad0)
+
+running 1 test
+test runtime::asynchronous::service::benchmarks::benchmark_rocket_flight_runtime_queue_pressure ... queue pressure accepted=1025 full_rejections=8 overflow_buffer_len/cap=128/128 commands=131200 wall_ms=1064.779 ack_ms p50/p95/p99=535.928/1006.099/1047.437 failures=0 allocations=6658 requested_bytes=213232336 setup_live_heap_bytes=427840 peak_extra_live_bytes=108648256 peak_live_heap_bytes=109076096
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 1.09s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/kapitsa-f01598a49a419ad0)
+
+running 1 test
+test runtime::asynchronous::service::benchmarks::benchmark_rocket_flight_runtime_queue_pressure ... queue pressure accepted=1025 full_rejections=8 overflow_buffer_len/cap=128/128 commands=131200 wall_ms=1065.151 ack_ms p50/p95/p99=535.866/1005.497/1047.757 failures=0 allocations=6658 requested_bytes=213232336 setup_live_heap_bytes=427840 peak_extra_live_bytes=108641672 peak_live_heap_bytes=109069512
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 1.09s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/kapitsa-f01598a49a419ad0)
+
+running 1 test
+test runtime::asynchronous::service::benchmarks::benchmark_rocket_flight_runtime_queue_pressure ... queue pressure accepted=1025 full_rejections=8 overflow_buffer_len/cap=128/128 commands=131200 wall_ms=1064.863 ack_ms p50/p95/p99=535.684/1006.576/1047.729 failures=0 allocations=6658 requested_bytes=213238352 setup_live_heap_bytes=427840 peak_extra_live_bytes=108477912 peak_live_heap_bytes=108905752
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 1.09s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/kapitsa-f01598a49a419ad0)
+
+running 1 test
+test runtime::asynchronous::service::benchmarks::benchmark_rocket_flight_runtime_queue_pressure ... queue pressure accepted=1025 full_rejections=8 overflow_buffer_len/cap=128/128 commands=131200 wall_ms=1065.807 ack_ms p50/p95/p99=535.829/1005.894/1047.216 failures=0 allocations=6658 requested_bytes=213232336 setup_live_heap_bytes=427840 peak_extra_live_bytes=108638600 peak_live_heap_bytes=109066440
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 1.09s
+

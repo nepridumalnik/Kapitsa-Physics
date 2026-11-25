@@ -388,6 +388,21 @@ queue while the service consumed paused commands; it was interrupted after
 about one minute (`benchmark-queue-interrupted.txt`). No completed allocation or
 latency claim is made for that queue benchmark.
 
+Queue benchmark follow-up: the fixture now gates an in-flight step before
+filling the queue and consumes the first result before resubmitting the retained
+overflow buffer. The same fixture was run five times against baseline `f603ae4`
+and the candidate in default mode, then five times with resilient adaptive
+mode. Raw logs are `benchmark-queue-baseline.txt`, `benchmark-queue-candidate.txt`
+and `benchmark-queue-resilient.txt`. Each run admitted 1025 batches (131200
+commands), observed eight full rejections, retained the 128-command overflow
+buffer, and reported zero failed commands. Baseline/default candidate/resilient
+median process-wide allocation calls were 6658/6658/6661; peak extra tracked
+heap was approximately 108.5–108.7 MB in all modes. Median per-run p95 command
+acknowledgement latencies were 1005.894/1005.718/11.768 ms. The first two use
+fixed steps, while resilient uses adaptive steps, so these acknowledgement
+times are workload descriptions rather than a like-for-like speedup claim.
+The allocation tracker is process-wide and includes benchmark setup and queues.
+
 After the scheduler fix, `cargo test --workspace --all-features --no-fail-fast
 --quiet` again completed with the same two baseline-reproduced failing targets;
 the core library passed 1442 tests with 20 ignored. The focused adaptive suite
