@@ -202,7 +202,8 @@ its force sources too.
 
 Snapshots are immutable and may skip intermediate publications. `revision()`
 increases on each publication, including command-only boundaries and restart;
-step and simulation time advance only for committed integration. Collision events are
+step and simulation time advance only for committed integration. Each snapshot
+also contains the latest committed `step_diagnostics()`. Collision events are
 published in bounded batches and report their committed step. Lagging event
 subscribers receive an `Error` with `lagged_batches()` set to the number of discarded
 batches.
