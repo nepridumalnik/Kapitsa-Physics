@@ -347,6 +347,14 @@ is made. The harness samples step durations through the metrics watch channel,
 which can skip steps, and its nominal overload scene does not demonstrate
 sustained CPU overload. Allocation and queue-pressure measurements remain open.
 
+Follow-up benchmark instrumentation put five-second timeouts around setup,
+boundary commands and stop. One run timed out during the contact warmup or
+following boundary command (`benchmark-service-timeout.txt`); the exact
+operation was not distinguished in that run. A subsequent run with an extra
+boundary marker and eight consecutive repeated runs completed
+(`benchmark-service-completed.txt`, `benchmark-service-repeat.txt`). The
+intermittent delay is not diagnosed or asserted fixed. Output logs retain it.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the

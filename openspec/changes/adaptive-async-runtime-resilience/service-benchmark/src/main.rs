@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     runtime.block_on(async {
         for scenario in ["ordinary", "contact", "overload"] {
             for repetition in 0..6 {
+                eprintln!("scenario={scenario} repetition={repetition} phase=setup");
                 let builder = Simulation::builder().frequency(100).max_workers(4)
                     .time_step_policy(TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default()))
                     .time_horizon(Duration::ZERO);
@@ -34,19 +35,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
                 let mut body = RigidBody::new_dynamic(Transform::new(Vec3::new(-2.0, 0.0, 0.0), Quat::IDENTITY)?, mass)?;
                 if scenario == "contact" { body.set_linear_velocity(Vec3::X * 100.0)?; body.set_ccd_mode(CcdMode::Continuous); }
-                let body_id = client.add_body(body).await?;
+                let body_id = tokio::time::timeout(Duration::from_secs(5), client.add_body(body)).await??;
                 if scenario == "contact" {
-                    client.add_collider(body_id, Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity())).await?;
-                    let wall = client.add_body(RigidBody::new_static(Transform::identity())).await?;
-                    client.add_collider(wall, Collider::new(Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?), Transform::identity())).await?;
+                    tokio::time::timeout(Duration::from_secs(5), client.add_collider(body_id, Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()))).await??;
+                    let wall = tokio::time::timeout(Duration::from_secs(5), client.add_body(RigidBody::new_static(Transform::identity()))).await??;
+                    tokio::time::timeout(Duration::from_secs(5), client.add_collider(wall, Collider::new(Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?), Transform::identity()))).await??;
                 }
-                client.set_linear_velocity(body_id, Vec3::ZERO).await?;
+                tokio::time::timeout(Duration::from_secs(5), client.set_linear_velocity(body_id, Vec3::ZERO)).await??;
+                eprintln!("scenario={scenario} repetition={repetition} phase=warmup");
                 simulation.set_time_multiplier(1.0)?;
                 simulation.set_time_horizon(Some(Duration::from_millis(50)));
                 tokio::time::timeout(Duration::from_secs(5), async {
                     while client.snapshot().simulation_time() < Duration::from_millis(50) { tokio::task::yield_now().await; }
                 }).await?;
-                if scenario == "contact" { client.set_linear_velocity(body_id, Vec3::X * 100.0).await?; }
+                eprintln!("scenario={scenario} repetition={repetition} phase=boundary");
+                if scenario == "contact" { tokio::time::timeout(Duration::from_secs(5), client.set_linear_velocity(body_id, Vec3::X * 100.0)).await??; }
+                eprintln!("scenario={scenario} repetition={repetition} phase=measure");
                 simulation.set_time_multiplier(if scenario == "overload" { 1000.0 } else { 1.0 })?;
                 let initial = simulation.metrics();
                 let start = Instant::now();
@@ -83,7 +87,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let retries = 0;
                     println!("scenario={scenario} repetition={repetition} committed_ns={} wall_ns={} warp={:.3} steps={} observed={} step_median_ns={step_median} step_p95_ns={step_p95} snapshot_median_ns={read_median} snapshot_p95_ns={read_p95} max_debt_ns={} retries={retries}", committed.as_nanos(), elapsed.as_nanos(), committed.as_secs_f64() / elapsed.as_secs_f64(), final_metrics.total_steps - initial.total_steps, steps.len(), max_debt.as_nanos());
                 }
-                simulation.stop().await?;
+                eprintln!("scenario={scenario} repetition={repetition} phase=stop");
+                tokio::time::timeout(Duration::from_secs(5), simulation.stop()).await??;
             }
         }
         Ok::<(), Box<dyn Error>>(())

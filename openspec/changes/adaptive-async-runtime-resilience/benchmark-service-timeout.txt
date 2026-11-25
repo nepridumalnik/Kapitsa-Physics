@@ -1,0 +1,54 @@
+   Compiling resilience-service-benchmark v0.1.0 (/tmp/kapitsa-adaptive-async-runtime-resilience/openspec/changes/adaptive-async-runtime-resilience/service-benchmark)
+    Finished `release` profile [optimized] target(s) in 0.68s
+     Running `target/release/resilience-service-benchmark`
+scenario=ordinary repetition=0 phase=setup
+scenario=ordinary repetition=0 phase=warmup
+scenario=ordinary repetition=0 phase=measure
+scenario=ordinary repetition=0 phase=stop
+scenario=ordinary repetition=1 phase=setup
+scenario=ordinary repetition=1 phase=warmup
+scenario=ordinary repetition=1 phase=measure
+scenario=ordinary repetition=1 committed_ns=200000000 wall_ns=205646977 warp=0.973 steps=121 observed=19 step_median_ns=1062 step_p95_ns=5189 snapshot_median_ns=120 snapshot_p95_ns=310 max_debt_ns=0 retries=0
+scenario=ordinary repetition=1 phase=stop
+scenario=ordinary repetition=2 phase=setup
+scenario=ordinary repetition=2 phase=warmup
+scenario=ordinary repetition=2 phase=measure
+scenario=ordinary repetition=2 committed_ns=200000000 wall_ns=203076448 warp=0.985 steps=99 observed=19 step_median_ns=1202 step_p95_ns=1793 snapshot_median_ns=130 snapshot_p95_ns=270 max_debt_ns=0 retries=0
+scenario=ordinary repetition=2 phase=stop
+scenario=ordinary repetition=3 phase=setup
+scenario=ordinary repetition=3 phase=warmup
+scenario=ordinary repetition=3 phase=measure
+scenario=ordinary repetition=3 committed_ns=200000000 wall_ns=203015646 warp=0.985 steps=109 observed=20 step_median_ns=1152 step_p95_ns=5360 snapshot_median_ns=130 snapshot_p95_ns=280 max_debt_ns=0 retries=0
+scenario=ordinary repetition=3 phase=stop
+scenario=ordinary repetition=4 phase=setup
+scenario=ordinary repetition=4 phase=warmup
+scenario=ordinary repetition=4 phase=measure
+scenario=ordinary repetition=4 committed_ns=200000000 wall_ns=203579234 warp=0.982 steps=98 observed=18 step_median_ns=1122 step_p95_ns=1533 snapshot_median_ns=130 snapshot_p95_ns=290 max_debt_ns=0 retries=0
+scenario=ordinary repetition=4 phase=stop
+scenario=ordinary repetition=5 phase=setup
+scenario=ordinary repetition=5 phase=warmup
+scenario=ordinary repetition=5 phase=measure
+scenario=ordinary repetition=5 committed_ns=200000000 wall_ns=202948722 warp=0.985 steps=88 observed=19 step_median_ns=1162 step_p95_ns=4849 snapshot_median_ns=140 snapshot_p95_ns=271 max_debt_ns=0 retries=0
+scenario=ordinary repetition=5 phase=stop
+scenario=contact repetition=0 phase=setup
+scenario=contact repetition=0 phase=warmup
+scenario=contact repetition=0 phase=measure
+scenario=contact repetition=0 phase=stop
+scenario=contact repetition=1 phase=setup
+scenario=contact repetition=1 phase=warmup
+scenario=contact repetition=1 phase=measure
+scenario=contact repetition=1 committed_ns=200000000 wall_ns=211657958 warp=0.945 steps=674 observed=29 step_median_ns=3066 step_p95_ns=7394 snapshot_median_ns=140 snapshot_p95_ns=300 max_debt_ns=0 retries=0
+scenario=contact repetition=1 phase=stop
+scenario=contact repetition=2 phase=setup
+scenario=contact repetition=2 phase=warmup
+scenario=contact repetition=2 phase=measure
+scenario=contact repetition=2 committed_ns=200000000 wall_ns=207825453 warp=0.962 steps=426 observed=24 step_median_ns=2274 step_p95_ns=7383 snapshot_median_ns=120 snapshot_p95_ns=280 max_debt_ns=0 retries=0
+scenario=contact repetition=2 phase=stop
+scenario=contact repetition=3 phase=setup
+scenario=contact repetition=3 phase=warmup
+scenario=contact repetition=3 phase=measure
+scenario=contact repetition=3 committed_ns=200000000 wall_ns=207013987 warp=0.966 steps=452 observed=28 step_median_ns=3306 step_p95_ns=22001 snapshot_median_ns=141 snapshot_p95_ns=521 max_debt_ns=0 retries=0
+scenario=contact repetition=3 phase=stop
+scenario=contact repetition=4 phase=setup
+scenario=contact repetition=4 phase=warmup
+Error: Elapsed(())
