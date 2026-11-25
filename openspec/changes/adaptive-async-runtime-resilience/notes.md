@@ -510,3 +510,10 @@ and 24.717/24.966 ms for 256 and 1024 independent CCD islands. Raw results
 are in `benchmark-collision-position-control.txt` and
 `benchmark-collision-position-progress.txt`; timing noise and different source
 revisions limit attribution. The queue test was isolated in commit `7f40aab`.
+
+Final verification: `cargo fmt --all -- --check`, `cargo clippy --workspace
+--all-targets --all-features -- -D warnings`, `cargo test --workspace`, and
+`cargo test --workspace --all-features` passed after the CCD and queue fixes.
+The parallel regression was added after the two full test runs and passed
+separately; clippy was repeated after adding it. The core CCD fix, focused
+regressions and measurements were committed in `aa7b17a`.
