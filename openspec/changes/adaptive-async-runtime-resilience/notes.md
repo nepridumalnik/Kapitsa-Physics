@@ -371,7 +371,9 @@ sequences and scheduler noise prevent interpreting them as physical-equivalence
 or precise overhead measurements. Existing allocation probes and bounded queue
 tests are noted above. Full 6.3 remains open pending a retrying fault workload,
 allocation/queue evidence under that workload, and interpretation of the observed
-timing spread.
+timing spread. The later direct-step measurements and paired queue probes below
+complete the specified measurement set; the recorded service p95 uncertainty
+and candidate-only injected-rejection measurement remain limitations.
 
 `cargo test -p kapitsa --release --features service,bench-internals --lib
 benchmark_resilient_rejected_step -- --ignored --nocapture --test-threads=1`
