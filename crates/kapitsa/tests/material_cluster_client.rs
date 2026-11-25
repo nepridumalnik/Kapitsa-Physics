@@ -436,6 +436,9 @@ async fn part_aerodynamic_geometry_commands_apply_loads_on_both_executors()
             client.poll_body_shape(id).await?,
             BodyShapeStatus::Ready(published)
         );
+        // Cancellation does not synchronously remove jobs from the bounded worker queue.
+        // Start the independent stale-publication scenario with an empty queue.
+        let worker = ShapeWorker::new(2)?;
         let (completion, result) = std::sync::mpsc::channel();
         client
             .queue_body_shape_with_completion(id, PendingAero::ZeroForce, &worker, Some(completion))
