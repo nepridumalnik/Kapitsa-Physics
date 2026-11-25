@@ -450,6 +450,24 @@ scheduler selection path and passed.
 library reported 1386 passed and 3 ignored. The all-features failures remain
 as recorded above, so task 6.1 is not marked complete.
 
+Additional diagnosis of the baseline-identical landing failure: a temporary
+backtrace at construction of `CollisionError::NonConvergent` identified
+`PhysicsWorld::process_continuous_collisions` in `world/ccd.rs`, at the check
+that rejects `impulse_delta <= 0` after CCD contact solving. The instrumentation
+was removed. This is not evidence that ignoring the zero impulse or altering
+the CCD policy is physically safe; resolving it requires an independent solver
+investigation outside this change's explicit no-unrelated-solver-rewrite scope.
+The worker queue failure arises from nonblocking `try_send`: cancellation marks a
+request but a canceled waiting request can still occupy the bounded channel
+until the worker receives it. The integration test submits multiple canceled
+cooks to a capacity-two worker without waiting for the queue to drain. Neither
+failure was suppressed or reclassified as a passing test.
+
+After the queue benchmark changes, `cargo fmt --all -- --check` and
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` passed.
+The first concurrent rebuild hit the tmpfs quota; cleaning reproducible debug
+outputs and rerunning clippy sequentially succeeded.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the
