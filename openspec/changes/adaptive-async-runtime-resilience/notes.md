@@ -396,6 +396,10 @@ and focused all-target/all-feature clippy passed. The test for the physical
 bound below the preferred minimum was also extended to use the service's new
 scheduler selection path and passed.
 
+`cargo test --workspace --quiet` passed after the scheduler change; the core
+library reported 1386 passed and 3 ignored. The all-features failures remain
+as recorded above, so task 6.1 is not marked complete.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the
