@@ -403,6 +403,19 @@ fixed steps, while resilient uses adaptive steps, so these acknowledgement
 times are workload descriptions rather than a like-for-like speedup claim.
 The allocation tracker is process-wide and includes benchmark setup and queues.
 
+Five further alternated pairs of the equal-committed-time service benchmark
+(five measurements per invocation, 25 per revision) are in
+`benchmark-paired-baseline.txt` and `benchmark-paired-resilient.txt`. For
+baseline/resilient respectively, medians of the per-run step wall medians were
+6.322/6.332 µs ordinary, 8.616/8.606 µs contact and 1.071/1.070 ms overload;
+medians of per-run p95 were 17.532/26.609 µs, 15.148/15.969 µs and
+1.198/1.240 ms. The ordinary p95 ranged 8.315–46.446 µs baseline and
+8.676–80.559 µs resilient; roughly 18–25 observed steps per run make its tail
+estimate especially noisy. The p95 difference has not been attributed to a
+specific cause, and 6.3 remains open pending investigation. These values are
+the sampled engine duration plus dispatch wait, not a complete trace of every
+step; allocations are measured separately by the queue and recovery probes.
+
 After the scheduler fix, `cargo test --workspace --all-features --no-fail-fast
 --quiet` again completed with the same two baseline-reproduced failing targets;
 the core library passed 1442 tests with 20 ignored. The focused adaptive suite
