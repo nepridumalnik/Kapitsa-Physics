@@ -225,6 +225,28 @@ Adding public `SimulationMetrics` fields affects downstream struct literals and
 should be considered in release compatibility review. The rustdoc path snapshot
 also picks up existing `PhysicsSystem` paths missing from the old baseline.
 
+Verification: the first `cargo test --workspace` failed in
+`part_aerodynamic_geometry_commands_apply_loads_on_both_executors` with a full
+shape-worker queue. The same isolated test passed three times and failed on its
+fourth run at baseline `f603ae4` with the identical error. Canceled requests
+can still occupy the bounded worker queue until its worker drains them; this
+pre-existing scheduling-sensitive test failure is retained here rather than
+changing its assertions. The full command must still be rerun and recorded.
+
+The rerun of `cargo test --workspace` passed. The first all-features build ran
+out of tmpfs quota; after cleaning reproducible debug artifacts it compiled but
+`physical_mesh_continuous_landing_regression` failed at frame 441 with collision
+nonconvergence. The isolated test fails identically at baseline `f603ae4`, with
+the same reported body state. This is a pre-existing deterministic failure;
+remaining all-features tests are being run with `--no-fail-fast`.
+
+Task 6.2: all three requested `kapitsa --no-default-features` test commands
+passed (plain, `parallel`, `service`); the resilient host example ran to 200 ms.
+The suites include `explicit_step` and legacy fail-fast step-failure tests.
+Plain and parallel builds initially warned about a service-only helper; it was
+feature-gated and both corresponding all-target clippy checks now pass with
+warnings denied.
+
 The current Rayon executor exposes `InvalidChunkLayout`, a configuration or
 invariant error, rather than a verified transient worker fault. The resumed
 blocked-state test now also checks that an identical velocity update leaves the

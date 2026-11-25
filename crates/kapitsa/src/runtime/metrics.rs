@@ -87,6 +87,7 @@ pub struct SimulationMetrics {
     pub step_diagnostics: StepDiagnostics,
 }
 
+#[cfg(feature = "service")]
 impl SimulationMetrics {
     pub(crate) fn copy_runtime_diagnostics_from(&mut self, source: &Self) {
         self.total_attempts = source.total_attempts;
