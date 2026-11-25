@@ -331,6 +331,16 @@ them and `snapshot_keeps_committed_diagnostics_after_world_advances` verifies
 the snapshot retains the prior step's diagnostics after the world advances.
 Task 6.4 remains open while remaining verification is resolved.
 
+Final OpenSpec audit: using the installed CLI, both `openspec validate
+adaptive-async-runtime-resilience --strict` and `openspec validate --all
+--strict` passed; the latter validated seven changes. The scenario-to-test
+mapping above was reviewed after the host boundary and snapshot diagnostic
+additions. Implementation and evidence commits from `1e58819` through
+`c48616b` are recorded in `git log f603ae4..HEAD`; subsequent audit commits are
+in the same history. Raw benchmark logs and their limitations are recorded
+above. The all-features baseline-reproduced failures remain unresolved and
+task 6.1 remains unchecked; no claim of a clean all-features test run is made.
+
 The equal-committed-time `service-benchmark` compares a baseline adaptive
 service and resilient service with 50 ms warmup, 200 ms measured horizon and
 five repetitions. Raw baseline and initial candidate output are in
