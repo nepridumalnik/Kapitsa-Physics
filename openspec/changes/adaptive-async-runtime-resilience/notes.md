@@ -355,6 +355,24 @@ boundary marker and eight consecutive repeated runs completed
 (`benchmark-service-completed.txt`, `benchmark-service-repeat.txt`). The
 intermittent delay is not diagnosed or asserted fixed. Output logs retain it.
 
+The service benchmark now includes 128 bodies in contact pairs at requested
+1000x, one second of equal committed time, and five measured repetitions after
+warmup. Raw paired outputs are `benchmark-service-loaded-baseline.txt` and
+`benchmark-service-loaded-candidate.txt`. Median achieved warp was 7.840x /
+7.764x; median sampled step wall time was 1.090 / 1.091 ms, and the median of
+per-run sampled p95 was 1.169 / 1.255 ms (baseline / resilient). Maximum sampled
+debt medians were 2.503 s / 0.980 s; candidate discarded approximately 123–128
+simulated seconds and had zero retries in each sample. Both committed exactly
+one second in 100 steps. Snapshot read medians were 130 / 120 ns and median p95
+370 / 351 ns. Samples use step duration plus task-wait duration as the wall-time
+proxy, polled approximately every 100 µs; some steps are missed. The measured
+ordinary and contact cases also commit equal time, but differing adaptive step
+sequences and scheduler noise prevent interpreting them as physical-equivalence
+or precise overhead measurements. Existing allocation probes and bounded queue
+tests are noted above. Full 6.3 remains open pending a retrying fault workload,
+allocation/queue evidence under that workload, and interpretation of the observed
+timing spread.
+
 After the scheduler fix, `cargo test --workspace --all-features --no-fail-fast
 --quiet` again completed with the same two baseline-reproduced failing targets;
 the core library passed 1442 tests with 20 ignored. The focused adaptive suite
