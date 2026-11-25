@@ -416,6 +416,16 @@ specific cause, and 6.3 remains open pending investigation. These values are
 the sampled engine duration plus dispatch wait, not a complete trace of every
 step; allocations are measured separately by the queue and recovery probes.
 
+To reduce the small service-sample tail uncertainty, the existing scheduler
+benchmark now records every `StepRunner::step` wall duration. Five alternating
+baseline/candidate runs each recorded 640 steps after 32 warmups. Raw data are
+`benchmark-step-wall-baseline.txt` and `benchmark-step-wall-candidate.txt`.
+The median of per-run p50 values was 72.103/73.586 µs, and of per-run p95
+86.830/88.252 µs; baseline p95 ranged 79.877–91.048 µs and candidate
+85.708–90.768 µs. The ranges overlap and no stable regression is established
+by these wall-clock samples. This measures the common runner, not the whole
+service loop, and does not eliminate the separate service p95 uncertainty.
+
 After the scheduler fix, `cargo test --workspace --all-features --no-fail-fast
 --quiet` again completed with the same two baseline-reproduced failing targets;
 the core library passed 1442 tests with 20 ignored. The focused adaptive suite

@@ -846,12 +846,15 @@ fn benchmark_time_warp_scheduler_overhead() -> Result<(), Box<dyn std::error::Er
         println!("Rayon spawn + oneshot round trip: {min:.3}/{median:.3}/{max:.3} us/task");
 
         let mut runner_wall_samples = Vec::with_capacity(SAMPLES);
+        let mut runner_step_samples = Vec::with_capacity(SAMPLES * STEPS_PER_SAMPLE);
         let mut engine_samples = Vec::with_capacity(SAMPLES * STEPS_PER_SAMPLE);
         let mut task_wait_samples = Vec::with_capacity(SAMPLES * STEPS_PER_SAMPLE);
         for _ in 0..SAMPLES {
             let started = Instant::now();
             for _ in 0..STEPS_PER_SAMPLE {
+                let step_started = Instant::now();
                 let stats = black_box(runner.step().await?);
+                runner_step_samples.push(step_started.elapsed());
                 engine_samples.push(stats.step_duration);
                 task_wait_samples.push(stats.task_wait_duration);
             }
@@ -859,6 +862,12 @@ fn benchmark_time_warp_scheduler_overhead() -> Result<(), Box<dyn std::error::Er
         }
         let (min, median, max) = duration_stats_us(&runner_wall_samples);
         println!("StepRunner::step total: {min:.3}/{median:.3}/{max:.3} us/step");
+        println!(
+            "StepRunner individual wall p50/p95/p99={:.3}/{:.3}/{:.3} us",
+            duration_quantile_us(&runner_step_samples, 0.50),
+            duration_quantile_us(&runner_step_samples, 0.95),
+            duration_quantile_us(&runner_step_samples, 0.99),
+        );
         println!(
             "StepRunner engine CPU p50/p95/p99={:.3}/{:.3}/{:.3} us; dispatch+wait p50/p95/p99={:.3}/{:.3}/{:.3} us",
             duration_quantile_us(&engine_samples, 0.50),
