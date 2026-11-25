@@ -1,0 +1,27 @@
+     Locking 18 packages to highest Rust 1.99.1 compatible versions
+   Compiling crossbeam-utils v0.8.23
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling crossbeam-epoch v0.9.21
+   Compiling crossbeam-deque v0.8.8
+   Compiling rayon-core v1.13.0
+   Compiling libm v0.2.16
+   Compiling kapitsa-math v0.7.0 (/tmp/kapitsa-runtime-baseline/crates/kapitsa-math)
+   Compiling robust v1.2.0
+   Compiling either v1.19.0
+   Compiling pin-project-lite v0.2.17
+   Compiling syn v3.0.9
+   Compiling kapitsa-core v0.7.0 (/tmp/kapitsa-runtime-baseline/crates/kapitsa-core)
+   Compiling rayon v1.12.0
+   Compiling tokio-macros v2.7.2
+   Compiling tokio v1.54.1
+   Compiling kapitsa v0.7.0 (/tmp/kapitsa-runtime-baseline/crates/kapitsa)
+   Compiling snapshot-bench v0.1.0 (/tmp/kapitsa-snapshot-bench)
+    Finished `release` profile [optimized] target(s) in 12.75s
+     Running `target/release/snapshot-bench`
+sample=0 reads=100000 median_ns=30 p95_ns=30
+sample=1 reads=100000 median_ns=30 p95_ns=30
+sample=2 reads=100000 median_ns=30 p95_ns=30
+sample=3 reads=100000 median_ns=30 p95_ns=30
+sample=4 reads=100000 median_ns=30 p95_ns=30

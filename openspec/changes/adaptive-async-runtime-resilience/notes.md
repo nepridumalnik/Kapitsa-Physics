@@ -278,6 +278,24 @@ samples or measure the service, so it does not satisfy task 6.3 by itself.
 Snapshot diagnostics were added subsequently in `779896e`; these core-only
 measurements do not assess that additional snapshot copy.
 
+Snapshot-read probe: `benchmark-snapshot.rs` uses a paused single-body service,
+10,000 warmup reads and five sets of 100,000 individually timed snapshot/body
+lookups. The same standalone release harness with `kapitsa` path pointed to
+`f603ae4` and `fc03f29` produced median 30 ns in every set; p95 was 30 ns for
+all baseline sets and 40/30/30/30/31 ns for candidate. Command output is in
+`benchmark-snapshot-baseline.txt` and `benchmark-snapshot-candidate.txt`.
+Timer resolution and the inactive producer limit interpretation; this is not an
+in-flight contention measurement. The probe depends on `kapitsa` with feature
+`service` and Tokio 1 with `rt`, `time` and `sync`, and is run with
+`cargo run --release --offline` from a separate Cargo project.
+
+After snapshot diagnostics were added, `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`, all 15
+focused snapshot tests, and the host example passed. Clippy's first rebuild ran
+out of tmpfs quota; removing reproducible baseline build outputs allowed the
+unchanged command to pass. `openspec validate --all --strict` passed all seven
+changes. The complete workspace test results above predate `779896e`.
+
 Scenario audit against the delta specification (test names are reproducible via
 `cargo test -p kapitsa --features service NAME` unless noted):
 
